@@ -1,7 +1,8 @@
 # Dependencies
 node_modules/
 
-# Local preview harness (dev-only; served via `bun .preview/serve.mjs`)
+# Local preview data only — imported workspace state, screenshots, server logs.
+# The preview server itself is tracked: tools/preview-server.mjs (`bun run preview`).
 .preview/
 
 # Build scratch output

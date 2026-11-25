@@ -17,6 +17,9 @@ function ProcessCapabilityChartModal({
 
   if (!spec) return null;
 
+  // The limits in force on the measurement date, not the ones in force today.
+  const specInForce = effectiveSpecForRecord(spec, record) || spec;
+
   const liveRec = {
     ...record,
     mean: Number(meanInput) || 0,
@@ -24,20 +27,20 @@ function ProcessCapabilityChartModal({
     sampleSize: Math.max(5, Number(nInput) || 32)
   };
 
-  const stats = computeCapabilityStats(liveRec, spec);
+  const stats = computeCapabilityStats(liveRec, specInForce);
   const tone = getCpkTone(stats.cpk);
 
   // Compute SVG chart coordinate domain covering both ±4σ and LSL/USL
   const mean = liveRec.mean;
   const sd = liveRec.stdDev;
-  const hasLsl = spec.specType !== 'upper' && spec.lsl !== null && spec.lsl !== '';
-  const hasUsl = spec.specType !== 'lower' && spec.usl !== null && spec.usl !== '';
-  const lslVal = hasLsl ? Number(spec.lsl) : 0;
-  const uslVal = hasUsl ? Number(spec.usl) : mean + 4 * sd;
+  const hasLsl = specInForce.specType !== 'upper' && specInForce.lsl !== null && specInForce.lsl !== '';
+  const hasUsl = specInForce.specType !== 'lower' && specInForce.usl !== null && specInForce.usl !== '';
+  const lslVal = hasLsl ? Number(specInForce.lsl) : 0;
+  const uslVal = hasUsl ? Number(specInForce.usl) : mean + 4 * sd;
 
   const domainCandidatesMin = [mean - 4 * sd];
   const domainCandidatesMax = [mean + 4 * sd];
-  if (hasLsl || spec.specType === 'upper') domainCandidatesMin.push(lslVal - 0.5 * sd);
+  if (hasLsl || specInForce.specType === 'upper') domainCandidatesMin.push(lslVal - 0.5 * sd);
   if (hasUsl) domainCandidatesMax.push(uslVal + 0.5 * sd);
 
   const minX = Math.min(...domainCandidatesMin);
@@ -81,7 +84,7 @@ function ProcessCapabilityChartModal({
     }
 
     const outOfSpec =
-      (hasLsl && mid < lslVal) || (hasUsl && mid > uslVal) || (spec.specType === 'upper' && mid < 0);
+      (hasLsl && mid < lslVal) || (hasUsl && mid > uslVal) || (specInForce.specType === 'upper' && mid < 0);
     return { idx, start, end, mid, count, outOfSpec };
   });
 
@@ -114,10 +117,23 @@ function ProcessCapabilityChartModal({
               <span className={`px-2 py-0.5 rounded-md border text-[11px] font-bold ${tone.badgeClass}`}>
                 Cpk {stats.cpk.toFixed(2)} · {tone.label}
               </span>
+              <span
+                title={`Limits of revision ${specInForce.revisionNumber || 1} of ${
+                  specInForce.revisionCount || 1
+                }, in force from ${specInForce.effectiveFrom || 'the recorded baseline'}`}
+                className="px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-[10px] font-semibold text-slate-600 dark:text-slate-300 tabular-nums"
+              >
+                Limits R{specInForce.revisionNumber || 1} · {specInForce.effectiveFrom || 'baseline'}
+              </span>
             </div>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
               {record.model} {record.phase} ({record.side} · {record.config}) · {spec.station} ·{' '}
               {spec.metrology} · {spec.docRef}
+              {specInForce.predatesFirstRevision && (
+                <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-800 font-semibold">
+                  Measured before the first recorded limit revision
+                </span>
+              )}
               {record.sourceFile && (
                 <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 font-semibold">
                   Source: {record.sourceFile} ({hasUploadedRaw ? 'Raw Data' : 'Summary'})
@@ -309,23 +325,23 @@ function ProcessCapabilityChartModal({
               {/* Nominal Target Line */}
               <g>
                 <line
-                  x1={xToPx(Number(spec.nominal))}
+                  x1={xToPx(Number(specInForce.nominal))}
                   y1={padT}
-                  x2={xToPx(Number(spec.nominal))}
+                  x2={xToPx(Number(specInForce.nominal))}
                   y2={padT + plotH}
                   stroke="#2563eb"
                   strokeWidth="1.25"
                   strokeDasharray="2 3"
                 />
                 <text
-                  x={xToPx(Number(spec.nominal))}
+                  x={xToPx(Number(specInForce.nominal))}
                   y={svgH - 8}
                   textAnchor="middle"
                   fontSize="10"
                   fontWeight="600"
                   fill="#2563eb"
                 >
-                  Nom {formatSpecNum(spec.nominal, spec)}
+                  Nom {formatSpecNum(specInForce.nominal, specInForce)}
                 </text>
               </g>
 
@@ -374,25 +390,29 @@ function ProcessCapabilityChartModal({
                 <div>
                   <span className="text-slate-400 dark:text-slate-400 block">LSL</span>
                   <strong className="text-slate-800 dark:text-slate-200">
-                    {spec.specType === 'upper' ? '0 (1-sided)' : `${spec.lsl} ${spec.unit}`}
+                    {specInForce.specType === 'upper' ? '0 (1-sided)' : `${specInForce.lsl} ${spec.unit}`}
                   </strong>
                 </div>
                 <div>
                   <span className="text-slate-400 dark:text-slate-400 block">Nominal</span>
                   <strong className="text-blue-700 dark:text-blue-300">
-                    {spec.nominal} {spec.unit}
+                    {specInForce.nominal} {spec.unit}
                   </strong>
                 </div>
                 <div>
                   <span className="text-slate-400 dark:text-slate-400 block">USL</span>
                   <strong className="text-slate-800 dark:text-slate-200">
-                    {spec.specType === 'lower' ? '—' : `${spec.usl} ${spec.unit}`}
+                    {specInForce.specType === 'lower' ? '—' : `${specInForce.usl} ${spec.unit}`}
                   </strong>
                 </div>
               </div>
               <div className="text-[11px] text-slate-500 dark:text-slate-400 pt-1.5 border-t border-slate-200 dark:border-slate-800 flex justify-between">
                 <span>Sampling: {spec.samplingPlan}</span>
-                <span>Target Cpk ≥ {spec.cpkTarget.toFixed(2)}</span>
+                <span>Target Cpk ≥ {Number(specInForce.cpkTarget).toFixed(2)}</span>
+              </div>
+              <div className="text-[10px] text-slate-400 dark:text-slate-500">
+                Limits in force on {record.date || 'the measurement date'} · revision{' '}
+                {specInForce.revisionNumber || 1} of {specInForce.revisionCount || 1}
               </div>
             </div>
 
@@ -512,10 +532,21 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
         }
   );
 
+  // New and edited limits take effect on a date the planner chooses, so the
+  // revision history stays truthful instead of rewriting past capability.
+  const [effectiveFrom, setEffectiveFrom] = useState(() => todayIso());
+  const revisionHistory = initialSpec ? getSpecRevisions(initialSpec).slice().reverse() : [];
+  const describeRevisionLimits = (rev) => {
+    const unit = form.unit ? ` ${form.unit}` : '';
+    if (rev.specType === 'upper') return `≤ ${rev.usl}${unit}`;
+    if (rev.specType === 'lower') return `≥ ${rev.lsl}${unit}`;
+    return `${rev.lsl}–${rev.usl}${unit}`;
+  };
+
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!form.code.trim() || !form.name.trim()) return;
-    onSubmit(form);
+    onSubmit({ ...form, effectiveFrom });
   };
 
   return (
@@ -644,6 +675,53 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
                 className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg text-right tabular-nums disabled:bg-slate-100 dark:disabled:bg-slate-800 dark:dark:disabled:bg-slate-600"
               />
             </div>
+          </div>
+
+          {/* Effective dating: a limit change becomes a revision, not an overwrite. */}
+          <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <label className="font-semibold text-slate-700 dark:text-slate-300 block">
+                  Limits effective from *
+                </label>
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                  Applies to LSL / Nominal / USL / Target Cpk. Cpk measured before this date keeps the
+                  limits that were in force then.
+                </p>
+              </div>
+              <input
+                type="date"
+                required
+                value={effectiveFrom}
+                onChange={(e) => setEffectiveFrom(e.target.value)}
+                className="px-2.5 py-1.5 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 tabular-nums"
+              />
+            </div>
+
+            {revisionHistory.length > 0 && (
+              <div className="border-t border-slate-200 dark:border-slate-700 pt-2 space-y-1">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                  Limit revisions ({revisionHistory.length})
+                </div>
+                {revisionHistory.slice(0, 4).map((rev, idx) => (
+                  <div
+                    key={rev.id || rev.effectiveFrom}
+                    className="flex items-center justify-between gap-2 text-[10px] text-slate-600 dark:text-slate-400 tabular-nums"
+                  >
+                    <span className="font-semibold">
+                      {rev.effectiveFrom} · R{revisionHistory.length - idx}
+                      {rev.baseline ? ' (baseline)' : ''}
+                    </span>
+                    <span className="font-mono">{describeRevisionLimits(rev)}</span>
+                  </div>
+                ))}
+                {revisionHistory.length > 4 && (
+                  <div className="text-[10px] text-slate-400 dark:text-slate-500">
+                    +{revisionHistory.length - 4} earlier revision(s)
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-3 gap-3">
@@ -2343,21 +2421,33 @@ function CpkImportPipelineModal({
     if (!parsedPayload) return;
     const newSpecs = Object.entries(autoGenDrafts)
       .filter(([, d]) => d.enabled && d.code.trim())
-      .map(([header, d], idx) => ({
-        id: `SPEC-AUTO-${d.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}-${idx}`,
-        code: d.code.toUpperCase().trim(),
-        name: d.name.trim() || header,
-        station: 'Final Inspection (OQC)',
-        unit: d.unit.trim() || 'mm',
-        specType: 'two-sided',
-        lsl: Number(d.lsl),
-        nominal: Number(d.nominal),
-        usl: Number(d.usl),
-        cpkTarget: 1.33,
-        metrology: 'Uploaded OMM / Tester',
-        docRef: `AUTO-${parsedPayload.fileName.slice(0, 14)}`,
-        samplingPlan: 'Uploaded Lot'
-      }));
+      .map(([header, d], idx) => {
+        const id = `SPEC-AUTO-${d.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}-${idx}`;
+        const limits = {
+          specType: 'two-sided',
+          lsl: Number(d.lsl),
+          nominal: Number(d.nominal),
+          usl: Number(d.usl),
+          cpkTarget: 1.33
+        };
+        // Generated now from this upload's distribution: effective today.
+        const effectiveFrom = todayIso();
+        return {
+          id,
+          code: d.code.toUpperCase().trim(),
+          name: d.name.trim() || header,
+          station: 'Final Inspection (OQC)',
+          unit: d.unit.trim() || 'mm',
+          ...limits,
+          effectiveFrom,
+          revisions: [
+            { id: `${id}-R1`, effectiveFrom, ...limits, updatedAt: new Date().toISOString(), updatedBy: '' }
+          ],
+          metrology: 'Uploaded OMM / Tester',
+          docRef: `AUTO-${parsedPayload.fileName.slice(0, 14)}`,
+          samplingPlan: 'Uploaded Lot'
+        };
+      });
 
     if (newSpecs.length === 0) return;
     const mergedExtra = [...(parsedPayload.extraSpecs || []), ...newSpecs];
@@ -2778,7 +2868,7 @@ function CpkImportPipelineModal({
                       <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
                         {parsedPayload.records.map((rec) => {
                           const spec = effectiveSpecMap[rec.specId];
-                          const stats = computeCapabilityStats(rec, spec);
+                          const stats = computeCapabilityStats(rec, effectiveSpecForRecord(spec, rec));
                           const tone = getCpkTone(stats.cpk);
                           return (
                             <tr key={rec.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/80">

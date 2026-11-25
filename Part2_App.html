@@ -1308,29 +1308,87 @@ function App() {
   };
 
   const handleSaveMasterSpec = (form, existingId = null) => {
-    const cleanSpec = {
-      id: existingId || `SPEC-${form.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}`,
+    const effectiveFrom = String(form.effectiveFrom || todayIso()).slice(0, 10);
+    const limits = {
+      specType: form.specType || 'two-sided',
+      lsl: form.specType === 'upper' ? 0 : Number(form.lsl),
+      nominal: Number(form.nominal),
+      usl: form.specType === 'lower' ? null : Number(form.usl),
+      cpkTarget: Number(form.cpkTarget) || 1.33
+    };
+    const identity = {
       code: form.code.toUpperCase().trim(),
       name: form.name.trim(),
       model: (form.model || '').trim().toUpperCase(),
       station: form.station || PRODUCTION_STATIONS[3],
       unit: form.unit.trim() || 'mm',
-      specType: form.specType || 'two-sided',
-      lsl: form.specType === 'upper' ? 0 : Number(form.lsl),
-      nominal: Number(form.nominal),
-      usl: form.specType === 'lower' ? null : Number(form.usl),
-      cpkTarget: Number(form.cpkTarget) || 1.33,
       metrology: form.metrology.trim() || 'OMM Optical',
       docRef: form.docRef.trim() || 'SPC-FFM-00',
       samplingPlan: form.samplingPlan.trim() || '32 pcs / Lot'
     };
+    const stamp = new Date().toISOString();
+    const actor = cloudSync.userEmail || '';
 
-    if (existingId) {
-      setMasterSpecs((prev) => prev.map((s) => (s.id === existingId ? cleanSpec : s)));
-      showToast(`Updated Master Specification: ${cleanSpec.name}`);
+    if (!existingId) {
+      const id = `SPEC-${form.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}`;
+      const spec = {
+        id,
+        ...identity,
+        ...limits,
+        effectiveFrom,
+        revisions: [{ id: `${id}-R1`, effectiveFrom, ...limits, updatedAt: stamp, updatedBy: actor }]
+      };
+      setMasterSpecs((prev) => [...prev, spec]);
+      showToast(`Added Master Specification: ${spec.name} (limits effective ${effectiveFrom})`);
+      setEditingMasterSpec(null);
+      setNewMasterSpecModalOpen(false);
+      return;
+    }
+
+    const existing = masterSpecs.find((s) => s.id === existingId);
+    if (!existing) return;
+
+    // Limit history is append-only: a same-day edit corrects that day's entry,
+    // a metadata-only edit adds nothing, any other limit change starts a
+    // revision. Cpk records resolve against this history by their own date.
+    let history = getSpecRevisions(existing).map((rev) => ({ ...rev }));
+    const sameDay = history.find((rev) => rev.effectiveFrom === effectiveFrom);
+    const latest = history[history.length - 1];
+    let outcome = 'metadata';
+    if (sameDay && specLimitsDiffer(sameDay, limits)) {
+      // Re-picking an existing date edits that day's entry instead of stacking
+      // a second revision on the same effective date.
+      history = history.map((rev) =>
+        rev.effectiveFrom === effectiveFrom ? { ...rev, ...limits, updatedAt: stamp, updatedBy: actor } : rev
+      );
+      outcome = 'corrected';
+    } else if (!sameDay && specLimitsDiffer(latest, limits)) {
+      history = [
+        ...history,
+        { id: `${existing.id}-R${history.length + 1}`, effectiveFrom, ...limits, updatedAt: stamp, updatedBy: actor }
+      ].sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+      outcome = 'revision';
+    }
+
+    const latestRevision = history[history.length - 1];
+    const nextSpec = {
+      ...existing,
+      ...identity,
+      ...specLimitSnapshot(latestRevision),
+      effectiveFrom: latestRevision.effectiveFrom,
+      revisions: history
+    };
+
+    setMasterSpecs((prev) => prev.map((s) => (s.id === existingId ? nextSpec : s)));
+    if (outcome === 'revision') {
+      showToast(
+        `Updated ${nextSpec.name}: new limit revision effective ${effectiveFrom} (${history.length} on file)`,
+        'warning'
+      );
+    } else if (outcome === 'corrected') {
+      showToast(`Updated ${nextSpec.name}: corrected the limits effective ${effectiveFrom}`);
     } else {
-      setMasterSpecs((prev) => [...prev, cleanSpec]);
-      showToast(`Added Master Specification: ${cleanSpec.name}`);
+      showToast(`Updated ${nextSpec.name} (limits unchanged, effective ${latestRevision.effectiveFrom})`);
     }
     setEditingMasterSpec(null);
     setNewMasterSpecModalOpen(false);
