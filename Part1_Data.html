@@ -2540,18 +2540,32 @@ async function parseUploadedTabularFile(file) {
   throw new Error('Unsupported file type. Please upload .xlsx, .xls, or .csv.');
 }
 
-function findMatchingSpec(colHeader, masterSpecs) {
+/**
+ * Resolves an uploaded parameter column/name to a Master Spec.
+ *
+ * The same parameter can exist once per model plus once as an all-models spec,
+ * so a plain "first match wins" would bind a X3082 upload to a X4151 limit.
+ * Candidates are therefore ranked: the record's own model, then the all-models
+ * spec, and only as a last resort another model's spec.
+ */
+function findMatchingSpec(colHeader, masterSpecs, model) {
   const norm = String(colHeader || '')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
   if (!norm) return null;
+  const modelKey = String(model || '').toUpperCase().trim();
+
+  const candidates = masterSpecs.filter((s) => {
+    const codeNorm = s.code.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const nameNorm = s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return norm === codeNorm || norm === nameNorm || norm.includes(codeNorm);
+  });
+  if (!candidates.length) return null;
 
   return (
-    masterSpecs.find((s) => {
-      const codeNorm = s.code.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const nameNorm = s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return norm === codeNorm || norm === nameNorm || norm.includes(codeNorm);
-    }) || null
+    candidates.find((s) => modelKey && String(s.model || '').toUpperCase() === modelKey) ||
+    candidates.find((s) => !s.model) ||
+    candidates[0]
   );
 }
 
@@ -2589,10 +2603,17 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
   if (paramCol && meanCol && stdCol) {
     const records = [];
     rows.forEach((r, idx) => {
-      const spec = findMatchingSpec(r[paramCol], masterSpecs);
+      // Resolve the model first: the same parameter code may exist per model.
+      const model = String(r[modelCol] || defaults.model || 'X4151').toUpperCase().trim();
+      const spec = findMatchingSpec(r[paramCol], masterSpecs, model);
       if (!spec) {
         warnings.push(`Row ${idx + 2}: Parameter "${r[paramCol]}" did not match any Master Spec.`);
         return;
+      }
+      if (spec.model && spec.model.toUpperCase() !== model) {
+        warnings.push(
+          `Row ${idx + 2}: No ${model} specification for "${r[paramCol]}"; resolved to ${spec.code} (${spec.model}).`
+        );
       }
       const mean = Number(r[meanCol]);
       const sd = Number(r[stdCol]);
@@ -2600,7 +2621,6 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
         warnings.push(`Row ${idx + 2}: Invalid Mean/StdDev for ${spec.code}.`);
         return;
       }
-      const model = String(r[modelCol] || defaults.model || 'X4151').toUpperCase().trim();
       const phase = String(r[phaseCol] || defaults.phase || 'EVT').toUpperCase().trim();
       const side = String(r[sideCol] || defaults.side || 'RHS').toUpperCase().trim();
       const config = String(r[configCol] || defaults.config || 'ME11').toUpperCase().trim();
@@ -2641,14 +2661,15 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
       findCol(['serial', 'sn', 'unit', 'sample', 'no', 'id', 'date', 'time'])
     ].filter(Boolean)
   );
-  const specColMap = [];
+  // Headers that name a known parameter. The spec itself is resolved per row
+  // group below, because the same header can mean a different model's limits.
+  const specHeaders = [];
   const unmappedColumns = [];
 
   headers.forEach((h) => {
     if (metaCols.has(h)) return;
-    const spec = findMatchingSpec(h, masterSpecs);
-    if (spec) {
-      specColMap.push({ header: h, spec });
+    if (findMatchingSpec(h, masterSpecs)) {
+      specHeaders.push(h);
     } else {
       const numericVals = rows
         .map((r) => r[h])
@@ -2681,7 +2702,7 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
     }
   });
 
-  if (specColMap.length === 0) {
+  if (specHeaders.length === 0) {
     warnings.push(
       'No columns matched existing Master Spec codes. Use the Auto-Generate Master Spec panel below to register uploaded columns.'
     );
@@ -2710,7 +2731,14 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
 
   const records = [];
   grouped.forEach((grp) => {
-    specColMap.forEach(({ header, spec }) => {
+    specHeaders.forEach((header) => {
+      const spec = findMatchingSpec(header, masterSpecs, grp.model);
+      if (!spec) return;
+      if (spec.model && spec.model.toUpperCase() !== grp.model) {
+        warnings.push(
+          `Column "${header}": no ${grp.model} specification; resolved to ${spec.code} (${spec.model}).`
+        );
+      }
       const vals = grp.rows
         .map((r) => r[header])
         .filter((v) => v !== '' && v !== null && v !== undefined)
@@ -2742,8 +2770,8 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
   });
 
   return {
-    format: `Wide Raw Measurements (${rows.length} units · ${specColMap.length} matched params)`,
-    matchedSpecs: specColMap.map((s) => s.spec.id),
+    format: `Wide Raw Measurements (${rows.length} units · ${specHeaders.length} matched params)`,
+    matchedSpecs: Array.from(new Set(records.map((r) => r.specId))),
     unmappedColumns,
     records,
     warnings

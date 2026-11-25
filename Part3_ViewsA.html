@@ -1298,13 +1298,114 @@ function BuildTimelineGanttView({
   globalSide,
   scheduleOverrides,
   onOpenGate,
-  onEditSchedule
+  onEditSchedule,
+  onReschedule
 }) {
   const [groupMode, setGroupMode] = useState('side'); // 'side' | 'config'
   const [sequenceMode, setSequenceMode] = useState('lhs-first'); // 'lhs-first' | 'rhs-first' | 'readiness'
   const [zoomLevel, setZoomLevel] = useState('week'); // 'week' | 'day'
   const [collapsedProjects, setCollapsedProjects] = useState({}); // projectId -> true
   const boardScrollRef = useRef(null);
+
+  // Direct manipulation of the stage bars: a drag is only a preview until the
+  // pointer is released, so Escape / pointercancel leaves the plan untouched.
+  const [stageDrag, setStageDrag] = useState(null);
+  const stageDragRef = useRef(null);
+  const suppressClickRef = useRef(false);
+  const rescheduleRef = useRef(onReschedule);
+  rescheduleRef.current = onReschedule;
+
+  const commitStageDrag = useCallback((drag) => {
+    if (!drag || !drag.deltaDays) return;
+    const stage = GANTT_STAGES.find((s) => s.id === drag.stageId);
+    const base = drag.schedule || {};
+    if (!stage) return;
+    let startIso = base[stage.startKey];
+    let endIso = base[stage.endKey];
+    if (!startIso || !endIso) return;
+
+    if (drag.mode !== 'resize-end') startIso = addDaysIso(startIso, drag.deltaDays);
+    if (drag.mode !== 'resize-start') endIso = addDaysIso(endIso, drag.deltaDays);
+    // A stage never collapses or inverts: the dragged edge stops at the far one.
+    if (diffDaysIso(startIso, endIso) < 0) {
+      if (drag.mode === 'resize-start') startIso = endIso;
+      else endIso = startIso;
+    }
+
+    suppressClickRef.current = true;
+    if (rescheduleRef.current) {
+      rescheduleRef.current({
+        project: drag.project,
+        rowKeys: drag.rowKeys,
+        label: drag.label,
+        schedule: { ...base, [stage.startKey]: startIso, [stage.endKey]: endIso }
+      });
+    }
+  }, []);
+
+  const isStageDragging = Boolean(stageDrag);
+
+  // Window-level listeners, so a fast drag that leaves the bar still tracks.
+  useEffect(() => {
+    if (!isStageDragging) return undefined;
+    const onMove = (event) => {
+      const drag = stageDragRef.current;
+      if (!drag) return;
+      const deltaDays = Math.round((event.clientX - drag.startX) / drag.dayWidthPx);
+      if (deltaDays === drag.deltaDays) return;
+      // A zero-delta drag is indistinguishable from a click, which still opens the gate.
+      suppressClickRef.current = false;
+      const next = { ...drag, deltaDays };
+      stageDragRef.current = next;
+      setStageDrag(next);
+    };
+    const finish = (commit) => {
+      const drag = stageDragRef.current;
+      stageDragRef.current = null;
+      setStageDrag(null);
+      if (commit) commitStageDrag(drag);
+    };
+    const onPointerUp = () => finish(true);
+    const onPointerCancel = () => finish(false);
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') finish(false);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isStageDragging, commitStageDrag]);
+
+  const startStageDrag = (event, project, row, stage, mode) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const schedule = row.schedule || {};
+    if (!schedule[stage.startKey] || !schedule[stage.endKey]) return;
+    event.preventDefault();
+    event.stopPropagation();
+    suppressClickRef.current = false;
+    const drag = {
+      project,
+      rowId: row.id,
+      stageId: stage.id,
+      mode,
+      label: `${row.sideBadge} · ${row.label}`,
+      rowKeys: row.rowKeys,
+      schedule,
+      startIso: schedule[stage.startKey],
+      endIso: schedule[stage.endKey],
+      startX: event.clientX,
+      deltaDays: 0,
+      dayWidthPx
+    };
+    stageDragRef.current = drag;
+    setStageDrag(drag);
+  };
 
   // Build normalized rows with side-priority or readiness-driven sequencing
   const timelineGroups = useMemo(() => {
@@ -2049,7 +2150,7 @@ function BuildTimelineGanttView({
                                 ) : null
                               )}
 
-                          {/* Stage Bars */}
+                          {/* Stage Bars — drag to move, drag an edge to resize */}
                           {GANTT_STAGES.map((st) => {
                             const startIso = row.schedule[st.startKey];
                             const endIso = row.schedule[st.endKey];
@@ -2058,23 +2159,84 @@ function BuildTimelineGanttView({
                             const spanDays = Math.max(1, diffDaysIso(startIso, endIso) + 1);
                             const widthPx = Math.max(16, spanDays * dayWidthPx);
 
+                            const drag =
+                              stageDrag && stageDrag.rowId === row.id && stageDrag.stageId === st.id
+                                ? stageDrag
+                                : null;
+                            const dragPx = drag ? drag.deltaDays * dayWidthPx : 0;
+                            let barLeft = leftPx;
+                            let barWidth = widthPx;
+                            if (drag) {
+                              if (drag.mode === 'resize-start') {
+                                const shift = Math.min(dragPx, barWidth - dayWidthPx);
+                                barLeft += shift;
+                                barWidth -= shift;
+                              } else if (drag.mode === 'resize-end') {
+                                barWidth = Math.max(dayWidthPx, barWidth + dragPx);
+                              } else {
+                                barLeft += dragPx;
+                              }
+                            }
+
+                            // The badge previews the dates the drop would commit.
+                            let preview = null;
+                            if (drag) {
+                              let pStart = startIso;
+                              let pEnd = endIso;
+                              if (drag.mode !== 'resize-end') pStart = addDaysIso(pStart, drag.deltaDays);
+                              if (drag.mode !== 'resize-start') pEnd = addDaysIso(pEnd, drag.deltaDays);
+                              if (diffDaysIso(pStart, pEnd) < 0) {
+                                if (drag.mode === 'resize-start') pStart = pEnd;
+                                else pEnd = pStart;
+                              }
+                              preview = { start: pStart, end: pEnd, days: diffDaysIso(pStart, pEnd) + 1 };
+                            }
+
                             return (
                               <button
                                 key={st.id}
                                 type="button"
-                                onClick={() => onOpenGate(project.id, st.gateId, row.primaryLineKey)}
+                                onClick={() => {
+                                  // A committed drag ends with a click; it must not also open the gate.
+                                  if (suppressClickRef.current) {
+                                    suppressClickRef.current = false;
+                                    return;
+                                  }
+                                  onOpenGate(project.id, st.gateId, row.primaryLineKey);
+                                }}
+                                onPointerDown={(event) => startStageDrag(event, project, row, st, 'move')}
                                 title={`${project.model} ${row.sideBadge} ${row.label} · ${st.label}: ${formatShortDate(
                                   startIso
-                                )} – ${formatShortDate(endIso)} · ${spanDays}d (Click to open Gate Sign-Off)`}
+                                )} – ${formatShortDate(endIso)} · ${spanDays}d · Drag to move, drag an edge to resize, click to open Gate Sign-Off`}
                                 style={{
-                                  left: `${leftPx}px`,
-                                  width: `${widthPx}px`
+                                  left: `${barLeft}px`,
+                                  width: `${barWidth}px`,
+                                  touchAction: 'none'
                                 }}
-                                className={`absolute top-2.5 h-7 rounded-md border px-1.5 text-[10px] font-semibold flex items-center overflow-hidden whitespace-nowrap shadow-2xs hover:brightness-110 transition-all cursor-pointer ${
+                                className={`group absolute top-2.5 h-7 rounded-md border px-1.5 text-[10px] font-semibold flex items-center whitespace-nowrap shadow-2xs hover:brightness-110 transition-all cursor-grab active:cursor-grabbing select-none ${
                                   st.barClass
                                 } ${row.hasHold && st.id === 'prep' ? 'ring-2 ring-rose-500 ring-offset-1' : ''}`}
                               >
-                                {widthPx >= 48 ? st.label : st.id.toUpperCase()}
+                                <span
+                                  role="presentation"
+                                  onPointerDown={(event) => startStageDrag(event, project, row, st, 'resize-start')}
+                                  style={{ touchAction: 'none' }}
+                                  className="absolute inset-y-0 left-0 w-2 cursor-ew-resize rounded-l-md bg-white/30 opacity-0 group-hover:opacity-100 group-active:opacity-100 transition-opacity"
+                                />
+                                <span className="min-w-0 truncate">
+                                  {barWidth >= 48 ? st.label : st.id.toUpperCase()}
+                                </span>
+                                <span
+                                  role="presentation"
+                                  onPointerDown={(event) => startStageDrag(event, project, row, st, 'resize-end')}
+                                  style={{ touchAction: 'none' }}
+                                  className="absolute inset-y-0 right-0 w-2 cursor-ew-resize rounded-r-md bg-white/30 opacity-0 group-hover:opacity-100 group-active:opacity-100 transition-opacity"
+                                />
+                                {preview && (
+                                  <span className="pointer-events-none absolute -top-6 left-0 z-30 rounded bg-slate-900/95 dark:bg-slate-700 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-lg tabular-nums">
+                                    {formatShortDate(preview.start)} – {formatShortDate(preview.end)} · {preview.days}d
+                                  </span>
+                                )}
                               </button>
                             );
                           })}
@@ -2132,7 +2294,10 @@ function BuildTimelineGanttView({
               Dashed red vertical line marks <strong className="text-slate-700 dark:text-slate-300">Today ({formatShortDate(todayIso())}, {todayIso().slice(0, 4)})</strong>.
             </span>
           </div>
-          <span>Click any stage bar or milestone diamond to open its Gate Sign-Off dossier.</span>
+          <span>
+            Drag a stage bar to move it, drag either edge to resize it (Esc cancels); click a bar or
+            milestone diamond to open its Gate Sign-Off dossier.
+          </span>
         </div>
       </section>
     </div>

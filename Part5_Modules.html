@@ -1813,6 +1813,115 @@ function ImportMergePreviewModal({ kind, fileName, summary, samples, removedSamp
 // SAVE CONFLICT MODAL — local edits are never discarded without a choice
 // ============================================================================
 
+/**
+ * Fallback for a clipboard the frame refuses to write to: shows the exact
+ * export text, already selected, so it can still be copied by hand.
+ */
+function WorkspaceExportModal({ json, revision, reason, onClose }) {
+  const textareaRef = useRef(null);
+  const [status, setStatus] = useState('idle'); // idle | copied | blocked
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, []);
+
+  const copyAgain = async () => {
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        throw new Error('no clipboard API');
+      }
+      await navigator.clipboard.writeText(json);
+      setStatus('copied');
+      return;
+    } catch (err) {
+      // Fall through to copying the current selection instead.
+    }
+    const el = textareaRef.current;
+    let copied = false;
+    if (el) {
+      el.focus();
+      el.select();
+      try {
+        copied = document.execCommand('copy');
+      } catch (err) {
+        copied = false;
+      }
+    }
+    setStatus(copied ? 'copied' : 'blocked');
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <div className="w-full max-w-2xl max-h-[90vh] flex flex-col bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-slate-700 dark:text-slate-200">
+            <ClipboardCheck className="w-4 h-4 shrink-0" />
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Workspace JSON</h3>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-[10px] font-semibold text-slate-600 dark:text-slate-300 tabular-nums">
+              Rev #{revision} · {Math.round(json.length / 1024)} KB
+            </span>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="px-5 py-3 space-y-2 overflow-y-auto">
+          <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+            {reason ? `The clipboard was blocked (${reason}). ` : ''}
+            The text below is the complete loaded workspace. Copy it, save it as a .json file, and import it
+            on the preview machine with <code className="font-mono text-slate-800 dark:text-slate-200">bun run state:import &lt;file&gt;</code>.
+          </p>
+          <textarea
+            ref={textareaRef}
+            readOnly
+            spellCheck={false}
+            value={json}
+            className="w-full h-64 p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono text-[10px] leading-snug text-slate-700 dark:text-slate-300 resize-none"
+          />
+          {status === 'blocked' && (
+            <p className="text-[11px] text-amber-700 dark:text-amber-300">
+              Automatic copy is blocked too — the text is selected; press Ctrl+C (⌘C on macOS).
+            </p>
+          )}
+        </div>
+
+        <div className="px-5 py-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+          <span className="text-[10px] text-slate-500 dark:text-slate-400">
+            {status === 'copied' ? 'Copied to the clipboard.' : 'Includes the revision and all nine workspace slices.'}
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={copyAgain}
+              className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 text-xs font-semibold text-white"
+            >
+              {status === 'copied' ? 'Copied' : 'Copy again'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SyncConflictModal({ revision, remoteMeta, local, remote, loading, error, onKeepLocal, onUseRemote }) {
   const [showDiff, setShowDiff] = useState(false);
   const slices = useMemo(() => (remote ? diffWorkspacePayloads(local, remote) : []), [local, remote]);
