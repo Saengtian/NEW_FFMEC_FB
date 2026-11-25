@@ -911,6 +911,14 @@ function CustomerFeedbackView({
     });
   }, [items, locationFilter, issueCatFilter, typeFilter, statusFilter, search]);
 
+  // Claims against the annual ceiling are an organisation-wide KPI, so they are
+  // counted over every record with the same rule as the KPI tile — page filters
+  // narrow the list, never the ceiling.
+  const claimsFy = useMemo(
+    () => items.filter((c) => c.category === 'Claim' && isInKpiFiscalYear(c.feedbackDate)).length,
+    [items]
+  );
+
   const stats = useMemo(() => {
     let totalNg = 0;
     let openNmb = 0;
@@ -963,7 +971,7 @@ function CustomerFeedbackView({
       {/* Executive KPI Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3.5">
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
-          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Y2026 Feedback Cases</div>
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Feedback Cases (all dates)</div>
           <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums">{stats.total}</div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
             NPI: {stats.npiCount} · MP: {stats.mpCount}
@@ -992,12 +1000,20 @@ function CustomerFeedbackView({
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
           <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Type Split (FA / FB / Claim)</div>
           <div className="text-sm font-bold text-slate-900 dark:text-slate-100 tabular-nums pt-1">
-            {stats.faCount} FA · {stats.feedbackCount} FB ·{' '}
-            <span className={stats.claims >= 5 ? 'text-rose-600 dark:text-rose-400' : 'text-blue-700 dark:text-blue-300'}>
-              {stats.claims} Claim
+            {stats.faCount} FA · {stats.feedbackCount} FB · {stats.claims} Claim
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+            Annual Claim Ceiling: &le; {KPI_TARGETS.customerClaims} ·{' '}
+            <span
+              className={
+                claimsFy > KPI_TARGETS.customerClaims
+                  ? 'text-rose-600 dark:text-rose-400 font-semibold'
+                  : 'text-slate-600 dark:text-slate-300'
+              }
+            >
+              {claimsFy} in FY{KPI_FISCAL_YEAR}
             </span>
           </div>
-          <div className="text-[11px] text-slate-500 dark:text-slate-400">Annual Claim Ceiling: &lt; 5</div>
         </div>
 
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-emerald-200 dark:border-emerald-800 p-4 space-y-1 col-span-2 lg:col-span-1">
@@ -2107,7 +2123,7 @@ const KPI_DEEP_DIVE_META = {
     paretoUnit: 'min'
   },
   claims: {
-    title: 'Customer Claims FY2026',
+    title: `Customer Claims FY${KPI_FISCAL_YEAR}`,
     family: 'claims',
     target: KPI_TARGETS.customerClaims,
     targetText: `${KPI_TARGETS.customerClaims}`,
@@ -2124,7 +2140,7 @@ const KPI_DEEP_DIVE_META = {
     emptyTrend: 'No claims in this range.'
   },
   saving: {
-    title: 'Annual Cost Saving FY2026',
+    title: `Annual Cost Saving FY${KPI_FISCAL_YEAR}`,
     family: 'savings',
     target: KPI_TARGETS.annualSavingThb,
     targetText: formatThbCompact(KPI_TARGETS.annualSavingThb),
@@ -2422,7 +2438,11 @@ const KPI_FAMILY_BUILDERS = {
   },
 
   claims({ claims, cutoffIso, rangeDays, variantKey }) {
-    const scopeClaims = variantKey ? claims.filter((f) => f.model === variantKey) : claims;
+    // Same fiscal window as the scorecard tile: a claim the tile does not count is
+    // not counted here either, so the panel can never contradict its tile.
+    const fyWindow = fiscalYearWindow(KPI_FISCAL_YEAR);
+    const fyClaims = claims.filter((f) => isInKpiFiscalYear(f.feedbackDate));
+    const scopeClaims = variantKey ? fyClaims.filter((f) => f.model === variantKey) : fyClaims;
     const inScope = scopeClaims.filter((f) => kpiInRange(f.feedbackDate, cutoffIso));
     const monthly = !rangeDays || rangeDays > 30;
     const byBucket = new Map();
@@ -2440,7 +2460,7 @@ const KPI_FAMILY_BUILDERS = {
       }));
 
     const byModel = new Map();
-    claims.forEach((f) => byModel.set(f.model, (byModel.get(f.model) || 0) + 1));
+    fyClaims.forEach((f) => byModel.set(f.model, (byModel.get(f.model) || 0) + 1));
     const maxModel = Math.max(1, ...byModel.values());
     const variant = [...byModel.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -2450,7 +2470,7 @@ const KPI_FAMILY_BUILDERS = {
         value: count,
         pct: (count / maxModel) * 100,
         valueText: `${count} claim${count === 1 ? '' : 's'}`,
-        meta: `${((count / Math.max(1, claims.length)) * 100).toFixed(0)}% of claims`,
+        meta: `${((count / Math.max(1, fyClaims.length)) * 100).toFixed(0)}% of claims`,
         barClass: 'bg-amber-500'
       }));
 
@@ -2463,10 +2483,10 @@ const KPI_FAMILY_BUILDERS = {
       .sort((a, b) => b[1] - a[1])
       .map(([label, value]) => ({ key: label, label, value }));
 
-    const count = scopeClaims.filter((f) => String(f.feedbackDate || '').slice(0, 4) === '2026').length;
+    const count = scopeClaims.length;
     return {
       headline: { value: count, text: String(count) },
-      scopeLabel: 'Global scope · customer feedback records',
+      scopeLabel: `All programs · FY${KPI_FISCAL_YEAR} ${fyWindow.start} to ${fyWindow.end} · customer claims`,
       trend,
       variant,
       pareto
@@ -2475,7 +2495,11 @@ const KPI_FAMILY_BUILDERS = {
 
   savings({ savingItems, variantKey }) {
     const familyOf = (item) => item.familyGroup || '—';
-    const scopeItems = variantKey ? savingItems.filter((s) => familyOf(s.item) === variantKey) : savingItems;
+    // Initiatives are tagged with a fiscal year rather than dated, so the tile's
+    // fiscal year is the tag test here too (untagged keeps the current KPI year).
+    const fyWindow = fiscalYearWindow(KPI_FISCAL_YEAR);
+    const fyItems = savingItems.filter(({ item }) => isKpiFiscalYearTag(item.fyTarget));
+    const scopeItems = variantKey ? fyItems.filter((s) => familyOf(s.item) === variantKey) : fyItems;
     const total = scopeItems.reduce((sum, s) => sum + s.metrics.annualSavingThb, 0);
     const byFamily = new Map();
     const byCategory = new Map();
@@ -2483,7 +2507,7 @@ const KPI_FAMILY_BUILDERS = {
       const category = item.category || 'Unclassified';
       byCategory.set(category, (byCategory.get(category) || 0) + metrics.annualSavingThb);
     });
-    savingItems.forEach(({ item, metrics }) => {
+    fyItems.forEach(({ item, metrics }) => {
       const family = familyOf(item);
       byFamily.set(family, (byFamily.get(family) || 0) + metrics.annualSavingThb);
     });
@@ -2507,7 +2531,7 @@ const KPI_FAMILY_BUILDERS = {
 
     return {
       headline: { value: total, text: formatThbCompact(total) },
-      scopeLabel: 'Global scope · cost-saving initiatives · annual run-rate',
+      scopeLabel: `All programs · FY${KPI_FISCAL_YEAR} ${fyWindow.start} to ${fyWindow.end} · ${fyItems.length} initiatives tagged FY${KPI_FISCAL_YEAR} · annual run-rate`,
       trend: [],
       variant,
       pareto

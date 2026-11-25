@@ -1,8 +1,9 @@
 {
   "scripts": {
     "build": "bun tools/build.mjs",
-    "preview": "bun .preview/serve.mjs 5183",
+    "preview": "bun tools/preview-server.mjs 5183",
     "state:import": "bun tools/import-state.mjs",
+    "test": "bun tools/test-fy-helpers.mjs",
     "deploy": "bun run build && clasp push -f && clasp create-deployment -i AKfycbz6y_8byEXlOxSWq6y5_azvp129b7CmlIfqhuNGA2BX-LrKTHVnmQdgHwylvx7yFE4C -d \"deploy $(git rev-parse --short HEAD)\""
   },
   "devDependencies": {

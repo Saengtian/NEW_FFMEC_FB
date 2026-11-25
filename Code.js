@@ -651,12 +651,14 @@ function syncMirrorSheets_(ss, payload) {
 
   if (Array.isArray(payload.masterSpecs)) {
     const rows = payload.masterSpecs.map(function(s) {
+      const revisions = Array.isArray(s.revisions) ? s.revisions : [];
       return [
         s.id || '', s.code || '', s.name || '', s.unit || '',
-        s.lsl ?? '', s.nominal ?? '', s.usl ?? '', s.category || '', s.model || ''
+        s.lsl ?? '', s.nominal ?? '', s.usl ?? '', s.category || '', s.model || '',
+        s.effectiveFrom || '', revisions.length || 1
       ];
     });
-    writeTable('MasterSpecs', ['ID', 'ParamCode', 'Parameter', 'Unit', 'LSL', 'Nominal', 'USL', 'Category', 'Model'], rows);
+    writeTable('MasterSpecs', ['ID', 'ParamCode', 'Parameter', 'Unit', 'LSL', 'Nominal', 'USL', 'Category', 'Model', 'LimitsEffectiveFrom', 'LimitRevisions'], rows);
   }
 
   if (Array.isArray(payload.cpkRecords)) {
