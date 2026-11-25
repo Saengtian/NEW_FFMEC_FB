@@ -1,0 +1,3207 @@
+<script type="text/babel" data-presets="react">
+// ============================================================================
+// MAIN APPLICATION SHELL
+// ============================================================================
+
+/**
+ * Debounced save scheduling with an explicit flush path. Without flush(), a
+ * pending auto-save is cancelled when the tab closes and those edits are lost.
+ */
+function createSaveScheduler(options) {
+  const {
+    delayMs = 2500,
+    setTimeoutFn = (fn, ms) => setTimeout(fn, ms),
+    clearTimeoutFn = (id) => clearTimeout(id),
+    send
+  } = options;
+  let timerId = null;
+  let pending = false;
+  let pendingArgs = null;
+
+  const cancel = () => {
+    if (timerId !== null) clearTimeoutFn(timerId);
+    timerId = null;
+    pending = false;
+    pendingArgs = null;
+  };
+
+  const schedule = (sendArgs) => {
+    cancel();
+    pending = true;
+    pendingArgs = sendArgs;
+    timerId = setTimeoutFn(() => {
+      const args = pendingArgs;
+      timerId = null;
+      pending = false;
+      pendingArgs = null;
+      send(...args);
+    }, delayMs);
+  };
+
+  const flush = (sendArgs) => {
+    if (!pending) return false;
+    const args = sendArgs || pendingArgs;
+    cancel();
+    send(...args);
+    return true;
+  };
+
+  return { schedule, flush, cancel, hasPending: () => pending };
+}
+
+/** Toast lifecycle keyed by identity, not message text. */
+function createToastController(options) {
+  const {
+    durationMs = 3600,
+    setTimeoutFn = (fn, ms) => setTimeout(fn, ms),
+    clearTimeoutFn = (id) => clearTimeout(id),
+    onChange
+  } = options;
+  let nextId = 1;
+  let activeId = null;
+  let timerId = null;
+
+  return {
+    show(message, tone = 'success') {
+      if (timerId !== null) clearTimeoutFn(timerId);
+      const id = nextId++;
+      activeId = id;
+      onChange({ id, message, tone });
+      timerId = setTimeoutFn(() => {
+        timerId = null;
+        if (activeId === id) {
+          activeId = null;
+          onChange(null);
+        }
+      }, durationMs);
+    }
+  };
+}
+
+/** Interpret a saveWorkspaceState response, including a stale-client conflict. */
+function resolveSaveResult(res, currentRevision) {
+  if (res && res.ok === false && res.conflict) {
+    return { conflict: true, revision: Number(res.revision) || 0 };
+  }
+  return {
+    conflict: false,
+    revision: Number(res?.revision) || (Number(currentRevision) || 0) + 1
+  };
+}
+
+/**
+ * One Global Scope dropdown. Family, model, phase, side and process all render
+ * through this component so their sizing, focus ring and light/dark colors can
+ * never drift apart again.
+ */
+function ScopeFilterSelect({ label, ariaLabel, value, options, allLabel, onChange, fullWidthOnMobile = false }) {
+  const optionClass = 'bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100';
+  return (
+    <div
+      className={`inline-flex min-w-0 items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-2 py-1 shadow-2xs ${
+        fullWidthOnMobile ? 'col-span-2 w-full sm:col-auto sm:w-auto' : ''
+      }`}
+    >
+      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">{label}</span>
+      <select
+        aria-label={ariaLabel}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full max-w-none cursor-pointer bg-transparent pr-1 text-xs font-bold text-slate-900 focus:outline-none dark:text-slate-100 sm:w-auto sm:max-w-[11rem]"
+      >
+        <option value="ALL" className={optionClass}>
+          {allLabel} ({options.length})
+        </option>
+        {options.map((option) => (
+          <option key={option} value={option} className={optionClass}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function App() {
+  const [activeView, setActiveView] = useState('overview');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Theme is applied to <html> by the bootstrap script in Index.html before paint;
+  // this state only mirrors it so the toggle icon matches.
+  const [theme, setTheme] = useState(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark') ? 'dark' : 'light'
+  );
+
+  const toggleTheme = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.classList.toggle('dark', next === 'dark');
+    try {
+      localStorage.setItem('ffm-theme', next);
+    } catch (e) {}
+    setTheme(next);
+  };
+
+  const [projects, setProjects] = useState(INITIAL_PROJECTS);
+  const [tasks, setTasks] = useState(() => INITIAL_TASKS.map(normalizeTask));
+  const [gateRecords, setGateRecords] = useState(() => createInitialGateRecords());
+  const [productionRecords, setProductionRecords] = useState(INITIAL_PRODUCTION_RECORDS);
+  const [masterSpecs, setMasterSpecs] = useState(INITIAL_MASTER_SPECS);
+  const [cpkRecords, setCpkRecords] = useState(INITIAL_CPK_RECORDS);
+  const [costProjects, setCostProjects] = useState(INITIAL_COST_PROJECTS);
+  const [customerFeedback, setCustomerFeedback] = useState(INITIAL_CUSTOMER_FEEDBACK);
+  const [selectedProjectId, setSelectedProjectId] = useState('PRJ-X4151');
+  const [selectedGateId, setSelectedGateId] = useState('mbo');
+  const [selectedLineKey, setSelectedLineKey] = useState('ME11-RHS');
+  const [selectedLineKeys, setSelectedLineKeys] = useState(['ME11-RHS']);
+
+  // Global Top-Header Dependency Filter Scope (Family <-> Model <-> Phase <-> Side)
+  const [globalFamily, setGlobalFamily] = useState('ALL');
+  const [globalModel, setGlobalModel] = useState('ALL');
+  const [globalPhase, setGlobalPhase] = useState('ALL');
+  const [globalProcess, setGlobalProcess] = useState('ALL');
+  const [globalSide, setGlobalSide] = useState('ALL');
+
+  const [activeTaskDrawerId, setActiveTaskDrawerId] = useState(null);
+  const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
+  const [newTaskModalOpen, setNewTaskModalOpen] = useState(false);
+  const [newProdRecordModalOpen, setNewProdRecordModalOpen] = useState(false);
+  const [editingProdRecord, setEditingProdRecord] = useState(null);
+  const [deletingProdRecord, setDeletingProdRecord] = useState(null);
+  const [matrixModalState, setMatrixModalState] = useState(null);
+  const [deletingMatrixRow, setDeletingMatrixRow] = useState(null);
+  const [scheduleOverrides, setScheduleOverrides] = useState({});
+  const [editingScheduleTarget, setEditingScheduleTarget] = useState(null);
+  const [activeCpkChartRecord, setActiveCpkChartRecord] = useState(null);
+  const [editingMasterSpec, setEditingMasterSpec] = useState(null);
+  const [newMasterSpecModalOpen, setNewMasterSpecModalOpen] = useState(false);
+  const [cpkImportModalOpen, setCpkImportModalOpen] = useState(false);
+  const [cpkUploadHistory, setCpkUploadHistory] = useState([]);
+  const [lastUploadBatch, setLastUploadBatch] = useState(null);
+  const [newCostModalOpen, setNewCostModalOpen] = useState(false);
+  const [editingCostProject, setEditingCostProject] = useState(null);
+  const [deletingCostProject, setDeletingCostProject] = useState(null);
+  const [newFeedbackModalOpen, setNewFeedbackModalOpen] = useState(false);
+  const [editingFeedback, setEditingFeedback] = useState(null);
+  const [deletingFeedback, setDeletingFeedback] = useState(null);
+  const [costImportDraft, setCostImportDraft] = useState(null);
+  const [feedbackImportDraft, setFeedbackImportDraft] = useState(null);
+  const [syncConflict, setSyncConflict] = useState(null);
+  const [signOffModal, setSignOffModal] = useState(null);
+  const [kpiDrilldown, setKpiDrilldown] = useState(null);
+  const [toast, setToast] = useState(null);
+  const toastControllerRef = useRef(null);
+  if (!toastControllerRef.current) {
+    toastControllerRef.current = createToastController({ onChange: (value) => setToast(value) });
+  }
+
+  const showToast = (message, tone = 'success') => {
+    toastControllerRef.current.show(message, tone);
+  };
+
+  // ==========================================================================
+  // GOOGLE APPS SCRIPT / GOOGLE SHEETS LIVE CLOUD SYNC ENGINE
+  // ==========================================================================
+  const isGasEnv = typeof window !== 'undefined' && !!(window.google && window.google.script && window.google.script.run);
+  // Real IDs come only from the server-injected config; the local-preview
+  // fallback must not duplicate deployment identifiers.
+  const serverCfg = (typeof window !== 'undefined' && window.__FFM_GAS_CONFIG__) || {
+    spreadsheetId: 'LOCAL_PREVIEW',
+    sheetUrl: '',
+    webAppUrl: '',
+    userEmail: 'local-preview@minebea.co.th'
+  };
+
+  const [cloudSync, setCloudSync] = useState({
+    status: isGasEnv ? 'loading' : 'local', // loading | synced | saving | error | local
+    revision: 0,
+    lastSavedAt: null,
+    lastSavedBy: null,
+    userEmail: serverCfg.userEmail || '',
+    sheetUrl: serverCfg.sheetUrl,
+    errorMsg: null
+  });
+  const hasLoadedCloudRef = useRef(false);
+  const isHydratingRef = useRef(false);
+  const revisionRef = useRef(0);
+  const pushRef = useRef(null);
+  const saveSchedulerRef = useRef(null);
+  const restoreInputRef = useRef(null);
+  const syncConflictRef = useRef(null);
+
+  if (!saveSchedulerRef.current) {
+    saveSchedulerRef.current = createSaveScheduler({
+      delayMs: 2500,
+      send: (...args) => { if (pushRef.current) pushRef.current(...args); }
+    });
+  }
+
+  const buildWorkspacePayload = () => ({
+    projects,
+    tasks,
+    gateRecords,
+    productionRecords,
+    masterSpecs,
+    cpkRecords,
+    costProjects,
+    customerFeedback,
+    scheduleOverrides
+  });
+
+  const hydrateFromPayload = (data) => {
+    if (!data || typeof data !== 'object') return;
+    isHydratingRef.current = true;
+    try {
+      if (Array.isArray(data.projects)) setProjects(data.projects);
+      if (Array.isArray(data.tasks)) setTasks(data.tasks.map(normalizeTask));
+      if (data.gateRecords && typeof data.gateRecords === 'object') setGateRecords(data.gateRecords);
+      if (Array.isArray(data.productionRecords)) setProductionRecords(data.productionRecords);
+      if (Array.isArray(data.masterSpecs)) setMasterSpecs(data.masterSpecs);
+      if (Array.isArray(data.cpkRecords)) setCpkRecords(data.cpkRecords);
+      if (Array.isArray(data.costProjects)) setCostProjects(data.costProjects);
+      if (Array.isArray(data.customerFeedback)) setCustomerFeedback(data.customerFeedback);
+      if (data.scheduleOverrides && typeof data.scheduleOverrides === 'object') setScheduleOverrides(data.scheduleOverrides);
+    } catch (err) {
+      console.error('hydrateFromPayload failed:', err);
+      showToast('Failed to apply loaded data: ' + (err && err.message ? err.message : String(err)), 'error');
+      isHydratingRef.current = false;
+      return;
+    }
+    setTimeout(() => {
+      isHydratingRef.current = false;
+    }, 150);
+  };
+
+  // ---------------------------------------------------------------------------
+  // Save conflict: another user saved first. Local edits are kept in the browser
+  // and nothing is reloaded over them until the user picks a version.
+  // ---------------------------------------------------------------------------
+  const updateSyncConflict = (next) => {
+    const value = typeof next === 'function' ? next(syncConflictRef.current) : next;
+    syncConflictRef.current = value;
+    setSyncConflict(value);
+  };
+
+  const openSyncConflict = (revision) => {
+    saveSchedulerRef.current.cancel();
+    setCloudSync((prev) => ({
+      ...prev,
+      status: 'error',
+      revision,
+      errorMsg: `Save conflict: another user saved Rev #${revision}. Your edits are still here — choose which version to keep.`
+    }));
+    updateSyncConflict({ revision, remote: null, remoteMeta: null, loading: isGasEnv, error: null });
+    showToast(`Another user saved Rev #${revision}. Your edits were kept — resolve the conflict.`, 'error');
+    if (!isGasEnv) return;
+    // Read their copy without applying it: only the explicit choice applies it.
+    window.google.script.run
+      .withSuccessHandler((res) => {
+        updateSyncConflict((prev) => {
+          if (!prev) return prev;
+          if (res && res.initialized && res.data) {
+            return {
+              ...prev,
+              revision: Number(res.revision) || prev.revision,
+              remote: res.data,
+              remoteMeta: { lastSavedBy: res.lastSavedBy || null, lastSavedAt: res.lastSavedAt || null },
+              loading: false,
+              error: null
+            };
+          }
+          return { ...prev, loading: false, error: res?.error || 'the saved copy could not be read' };
+        });
+      })
+      .withFailureHandler((err) => {
+        const msg = err && err.message ? err.message : String(err || 'the saved copy could not be read');
+        updateSyncConflict((prev) => (prev ? { ...prev, loading: false, error: msg } : prev));
+      })
+      .loadWorkspaceState();
+  };
+
+  // Options: toast (announce success), refreshMirrors (explicit saves rebuild
+  // the server's derived reporting tabs; autosaves never do), expectedRevision
+  // (defaults to the loaded revision), payload (restores pass the parsed backup,
+  // because state has not re-rendered yet).
+  const pushToGoogleSheet = (summaryText = 'Auto-sync from FFM NPI Ops', { toast = false, refreshMirrors = false, expectedRevision: expectedRevisionOption, payload } = {}) => {
+    if (!isGasEnv) {
+      if (toast) showToast('Running in Local Preview mode (deploy to GAS for Google Sheets sync).', 'info');
+      return;
+    }
+    if (syncConflictRef.current && expectedRevisionOption === undefined) {
+      if (toast) showToast('Resolve the save conflict first — your edits are still in the browser.', 'info');
+      return;
+    }
+    setCloudSync((prev) => ({ ...prev, status: 'saving', errorMsg: null }));
+    const payloadJson = JSON.stringify(payload || buildWorkspacePayload());
+    const expectedRevision = expectedRevisionOption !== undefined ? expectedRevisionOption : revisionRef.current;
+    window.google.script.run
+      .withSuccessHandler((res) => {
+        const outcome = resolveSaveResult(res, revisionRef.current);
+        if (outcome.conflict) {
+          openSyncConflict(outcome.revision);
+          return;
+        }
+        revisionRef.current = outcome.revision;
+        setCloudSync((prev) => ({
+          ...prev,
+          status: 'synced',
+          revision: outcome.revision,
+          lastSavedAt: res?.lastSavedAt || new Date().toISOString(),
+          lastSavedBy: res?.lastSavedBy || prev.userEmail,
+          userEmail: res?.userEmail || prev.userEmail,
+          errorMsg: null
+        }));
+        if (toast) {
+          showToast(`Synced to Google Sheet (Rev #${outcome.revision})`, 'success');
+        }
+      })
+      .withFailureHandler((err) => {
+        const msg = (err && err.message) ? err.message : String(err || 'Sync failed');
+        setCloudSync((prev) => ({ ...prev, status: 'error', errorMsg: msg }));
+        showToast(`Sheet sync error: ${msg}`, 'error');
+      })
+      .saveWorkspaceState(payloadJson, summaryText, expectedRevision, refreshMirrors);
+  };
+  pushRef.current = pushToGoogleSheet;
+
+  const handleConflictKeepLocal = () => {
+    const conflict = syncConflictRef.current;
+    if (!conflict) return;
+    updateSyncConflict(null);
+    showToast(`Keeping your version — saving it over Rev #${conflict.revision}.`, 'info');
+    pushToGoogleSheet('Conflict resolved: kept local edits', {
+      toast: true,
+      refreshMirrors: true,
+      expectedRevision: conflict.revision
+    });
+  };
+
+  const handleConflictUseRemote = () => {
+    const conflict = syncConflictRef.current;
+    if (!conflict || !conflict.remote) return;
+    hydrateFromPayload(conflict.remote);
+    revisionRef.current = conflict.revision;
+    setCloudSync((prev) => ({
+      ...prev,
+      status: 'synced',
+      revision: conflict.revision,
+      lastSavedBy: conflict.remoteMeta?.lastSavedBy || prev.lastSavedBy,
+      lastSavedAt: conflict.remoteMeta?.lastSavedAt || prev.lastSavedAt,
+      errorMsg: null
+    }));
+    updateSyncConflict(null);
+    showToast(`Loaded the other user's version (Rev #${conflict.revision}).`, 'info');
+  };
+
+  const loadFromGoogleSheet = (showNotice = false) => {
+    if (!isGasEnv) return;
+    setCloudSync((prev) => ({ ...prev, status: 'loading', errorMsg: null }));
+    window.google.script.run
+      .withSuccessHandler((res) => {
+        if (res && res.corrupted) {
+          hasLoadedCloudRef.current = true;
+          setCloudSync((prev) => ({
+            ...prev,
+            status: 'error',
+            revision: res.revision || 0,
+            errorMsg: res.error || 'Stored workspace data is invalid.'
+          }));
+          showToast(res.error || 'Stored workspace data is invalid. Sync paused.', 'error');
+          return;
+        }
+        if (res && res.initialized && res.data) {
+          try {
+            hydrateFromPayload(res.data);
+          } catch (err) {
+            console.error('hydrateFromPayload threw:', err);
+            showToast('Failed to apply loaded data: ' + (err && err.message ? err.message : String(err)), 'error');
+          }
+          hasLoadedCloudRef.current = true;
+          revisionRef.current = res.revision || 1;
+          setCloudSync((prev) => ({
+            ...prev,
+            status: 'synced',
+            revision: res.revision || 1,
+            lastSavedAt: res.lastSavedAt || null,
+            lastSavedBy: res.lastSavedBy || null,
+            userEmail: res.userEmail || prev.userEmail,
+            sheetUrl: res.sheetUrl || prev.sheetUrl,
+            errorMsg: null
+          }));
+          if (showNotice) showToast(`Reloaded workspace from Google Sheet (Rev #${res.revision || 1})`, 'success');
+        } else {
+          // First run on an empty Sheet: seed baseline data automatically
+          hasLoadedCloudRef.current = true;
+          setCloudSync((prev) => ({
+            ...prev,
+            status: 'saving',
+            userEmail: res?.userEmail || prev.userEmail,
+            sheetUrl: res?.sheetUrl || prev.sheetUrl
+          }));
+          const seedPayload = JSON.stringify(buildWorkspacePayload());
+          window.google.script.run
+            .withSuccessHandler((seedRes) => {
+              revisionRef.current = seedRes?.revision || 1;
+              setCloudSync((prev) => ({
+                ...prev,
+                status: 'synced',
+                revision: seedRes?.revision || 1,
+                lastSavedAt: seedRes?.lastSavedAt || new Date().toISOString(),
+                lastSavedBy: seedRes?.lastSavedBy || prev.userEmail,
+                errorMsg: null
+              }));
+              showToast('Initialized Google Sheet database with FFM NPI baseline.', 'success');
+            })
+            .withFailureHandler((err) => {
+              const msg = (err && err.message) ? err.message : String(err || 'Init failed');
+              setCloudSync((prev) => ({ ...prev, status: 'error', errorMsg: msg }));
+              showToast(`Sheet initialization error: ${msg}`, 'error');
+            })
+            .initializeDatabase(seedPayload);
+        }
+      })
+      .withFailureHandler((err) => {
+        hasLoadedCloudRef.current = true;
+        const msg = (err && err.message) ? err.message : String(err || 'Load failed');
+        setCloudSync((prev) => ({ ...prev, status: 'error', errorMsg: msg }));
+        showToast(`Failed to load from Google Sheet: ${msg}`, 'error');
+      })
+      .loadWorkspaceState();
+  };
+
+  // Load workspace from Google Sheets on initial mount
+  useEffect(() => {
+    if (isGasEnv) {
+      loadFromGoogleSheet(false);
+    }
+  }, []);
+
+  // Debounced auto-save whenever any of the 9 persisted slices change
+  useEffect(() => {
+    if (!isGasEnv || !hasLoadedCloudRef.current || isHydratingRef.current) return;
+    // While a save conflict is unresolved, pushes are paused so the other
+    // user's revision is never overwritten by an autosave.
+    if (syncConflictRef.current) return;
+    saveSchedulerRef.current.schedule(['Auto-sync from FFM NPI Ops']);
+  }, [projects, tasks, gateRecords, productionRecords, masterSpecs, cpkRecords, costProjects, customerFeedback, scheduleOverrides]);
+
+  // A pending debounced save must not be lost when the page is closed or hidden
+  useEffect(() => {
+    if (!isGasEnv) return;
+    const flushPending = () => {
+      saveSchedulerRef.current.flush(['Auto-sync on page hide']);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushPending();
+    };
+    window.addEventListener('pagehide', flushPending);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', flushPending);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
+
+  const handleExportWorkspaceJson = () => {
+    const backup = {
+      app: 'FFM NPI Ops',
+      version: 'v2.1.0-GAS',
+      exportedAt: new Date().toISOString(),
+      data: buildWorkspacePayload()
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `FFM_NPI_Ops_Backup_${todayIso()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Exported full workspace JSON backup.', 'success');
+  };
+
+  const handleImportWorkspaceJson = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(String(ev.target?.result || '{}'));
+        const payload = parsed.data || parsed;
+        if (!payload.projects || !Array.isArray(payload.projects)) {
+          throw new Error('Invalid FFM NPI Ops backup file.');
+        }
+        hydrateFromPayload(payload);
+        showToast('Workspace restored from JSON backup.', 'success');
+        if (isGasEnv) {
+          setTimeout(() => pushToGoogleSheet('Restored from JSON backup', { toast: true, refreshMirrors: true, payload }), 300);
+        }
+      } catch (err) {
+        showToast(`Restore failed: ${err.message}`, 'error');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const projectMap = useMemo(() => {
+    const map = {};
+    projects.forEach((p) => {
+      map[p.id] = p;
+    });
+    return map;
+  }, [projects]);
+
+  const gateMap = useMemo(() => {
+    const map = {};
+    NPI_GATES.forEach((g) => {
+      map[g.id] = g;
+    });
+    return map;
+  }, []);
+
+  const selectedProject = projectMap[selectedProjectId] || projects[0];
+  const activeDrawerTask = tasks.find((t) => t.id === activeTaskDrawerId) || null;
+
+  // Unified Family x Model x Phase x Side Scope Catalog (Active NPI + Production Records)
+  const scopeCatalog = useMemo(() => {
+    const npiEntries = projects.map((p) => ({
+      family: getFamilyGroup(p),
+      model: p.model,
+      phase: p.phase,
+      sides: getSideList(p.side),
+      source: 'NPI',
+      projectId: p.id
+    }));
+    const prodEntries = productionRecords.map((r) => ({
+      family: getFamilyGroup(r),
+      model: r.model,
+      phase: r.phase,
+      sides: getSideList(r.side),
+      process: getProcessStep(r),
+      source: 'PROD',
+      recordId: r.id
+    }));
+    return [...npiEntries, ...prodEntries];
+  }, [projects, productionRecords]);
+
+  // Dependency-Driven Filter Options
+  const availableFamilies = useMemo(() => {
+    const matched = scopeCatalog.filter((item) => {
+      if (globalModel !== 'ALL' && item.model !== globalModel) return false;
+      if (globalPhase !== 'ALL' && item.phase !== globalPhase) return false;
+      if (globalSide !== 'ALL' && !item.sides.includes(globalSide)) return false;
+      return true;
+    });
+    const order = ['MB14"', 'MB16"', 'iMac', 'MacMini', 'Display'];
+    return Array.from(new Set(matched.map((item) => item.family))).sort(
+      (a, b) =>
+        (order.indexOf(a) === -1 ? 99 : order.indexOf(a)) -
+        (order.indexOf(b) === -1 ? 99 : order.indexOf(b))
+    );
+  }, [scopeCatalog, globalModel, globalPhase, globalSide]);
+
+  // Process options follow the same dependency chain as the other scope filters.
+  const availableProcesses = useMemo(() => {
+    const matched = scopeCatalog.filter((item) => {
+      if (!item.process) return false;
+      if (globalFamily !== 'ALL' && item.family !== globalFamily) return false;
+      if (globalModel !== 'ALL' && item.model !== globalModel) return false;
+      if (globalPhase !== 'ALL' && item.phase !== globalPhase) return false;
+      if (globalSide !== 'ALL' && !item.sides.includes(globalSide)) return false;
+      return true;
+    });
+    const present = new Set(matched.map((item) => item.process));
+    return PROCESS_STEPS.filter((step) => present.has(step));
+  }, [scopeCatalog, globalFamily, globalModel, globalPhase, globalSide]);
+
+  const availableModels = useMemo(() => {
+    const matched = scopeCatalog.filter((item) => {
+      if (globalFamily !== 'ALL' && item.family !== globalFamily) return false;
+      if (globalPhase !== 'ALL' && item.phase !== globalPhase) return false;
+      if (globalSide !== 'ALL' && !item.sides.includes(globalSide)) return false;
+      return true;
+    });
+    return Array.from(new Set(matched.map((item) => item.model)));
+  }, [scopeCatalog, globalFamily, globalPhase, globalSide]);
+
+  const availablePhases = useMemo(() => {
+    const matched = scopeCatalog.filter((item) => {
+      if (globalFamily !== 'ALL' && item.family !== globalFamily) return false;
+      if (globalModel !== 'ALL' && item.model !== globalModel) return false;
+      if (globalSide !== 'ALL' && !item.sides.includes(globalSide)) return false;
+      return true;
+    });
+    return Array.from(new Set(matched.map((item) => item.phase))).sort(
+      (a, b) =>
+        (PHASE_ORDER.indexOf(a) === -1 ? 99 : PHASE_ORDER.indexOf(a)) -
+        (PHASE_ORDER.indexOf(b) === -1 ? 99 : PHASE_ORDER.indexOf(b))
+    );
+  }, [scopeCatalog, globalFamily, globalModel, globalSide]);
+
+  const availableSides = useMemo(() => {
+    const matched = scopeCatalog.filter((item) => {
+      if (globalFamily !== 'ALL' && item.family !== globalFamily) return false;
+      if (globalModel !== 'ALL' && item.model !== globalModel) return false;
+      if (globalPhase !== 'ALL' && item.phase !== globalPhase) return false;
+      return true;
+    });
+    const sideSet = new Set();
+    matched.forEach((item) => item.sides.forEach((s) => sideSet.add(s)));
+    return Array.from(sideSet).sort(
+      (a, b) =>
+        (SIDE_ORDER.indexOf(a) === -1 ? 99 : SIDE_ORDER.indexOf(a)) -
+        (SIDE_ORDER.indexOf(b) === -1 ? 99 : SIDE_ORDER.indexOf(b))
+    );
+  }, [scopeCatalog, globalFamily, globalModel, globalPhase]);
+
+  // Models offered when a Master Spec is scoped to a single model (blank = all models).
+  const masterSpecModelOptions = useMemo(
+    () =>
+      Array.from(
+        new Set([...scopeCatalog.map((item) => item.model), ...masterSpecs.map((s) => s.model)].filter(Boolean))
+      ).sort(),
+    [scopeCatalog, masterSpecs]
+  );
+  const syncGateSelectionToScope = (nextFamily, nextModel, nextSide) => {
+    const matchingProjects = projects.filter((p) => {
+      if (nextFamily !== 'ALL' && getFamilyGroup(p) !== nextFamily) return false;
+      if (nextModel !== 'ALL' && p.model !== nextModel) return false;
+      if (nextSide !== 'ALL' && !getSideList(p.side).includes(nextSide)) return false;
+      return true;
+    });
+    const targetProj =
+      matchingProjects.find((p) => p.id === selectedProjectId) ||
+      matchingProjects[0] ||
+      selectedProject;
+    if (!targetProj) return;
+
+    if (targetProj.id !== selectedProjectId) {
+      setSelectedProjectId(targetProj.id);
+      setSelectedGateId(targetProj.currentGateId);
+    }
+
+    const variants = getLineVariantsForProject(targetProj);
+    const matchingKeys =
+      nextSide !== 'ALL'
+        ? variants.filter((v) => v.side === nextSide).map((v) => v.key)
+        : variants.map((v) => v.key);
+    if (matchingKeys.length > 0) {
+      setSelectedLineKey(matchingKeys[0]);
+      setSelectedLineKeys(nextSide !== 'ALL' ? matchingKeys : [matchingKeys[0]]);
+    }
+  };
+
+  const handleGlobalFamilyChange = (nextFamily) => {
+    setGlobalFamily(nextFamily);
+    if (nextFamily === 'ALL') {
+      syncGateSelectionToScope('ALL', globalModel, globalSide);
+      return;
+    }
+
+    const familyEntries = scopeCatalog.filter((item) => item.family === nextFamily);
+    const validModels = new Set(familyEntries.map((item) => item.model));
+    const validPhases = new Set(familyEntries.map((item) => item.phase));
+    const validSides = new Set();
+    familyEntries.forEach((item) => item.sides.forEach((s) => validSides.add(s)));
+
+    let resolvedModel = globalModel;
+    let resolvedSide = globalSide;
+    if (globalModel !== 'ALL' && !validModels.has(globalModel)) {
+      resolvedModel = 'ALL';
+      setGlobalModel('ALL');
+    }
+    if (globalPhase !== 'ALL' && !validPhases.has(globalPhase)) {
+      setGlobalPhase('ALL');
+    }
+    if (globalSide !== 'ALL' && !validSides.has(globalSide)) {
+      resolvedSide = 'ALL';
+      setGlobalSide('ALL');
+    }
+    syncGateSelectionToScope(nextFamily, resolvedModel, resolvedSide);
+  };
+
+  const handleGlobalModelChange = (nextModel) => {
+    setGlobalModel(nextModel);
+    if (nextModel === 'ALL') {
+      syncGateSelectionToScope(globalFamily, 'ALL', globalSide);
+      return;
+    }
+
+    const modelEntries = scopeCatalog.filter((item) => item.model === nextModel);
+    const validFamilies = new Set(modelEntries.map((item) => item.family));
+    const validPhases = new Set(modelEntries.map((item) => item.phase));
+    const validSides = new Set();
+    modelEntries.forEach((item) => item.sides.forEach((s) => validSides.add(s)));
+
+    let resolvedFamily = globalFamily;
+    let resolvedSide = globalSide;
+    if (globalFamily !== 'ALL' && !validFamilies.has(globalFamily)) {
+      resolvedFamily = 'ALL';
+      setGlobalFamily('ALL');
+    }
+    if (globalPhase !== 'ALL' && !validPhases.has(globalPhase)) {
+      setGlobalPhase('ALL');
+    }
+    if (globalSide !== 'ALL' && !validSides.has(globalSide)) {
+      resolvedSide = 'ALL';
+      setGlobalSide('ALL');
+    }
+    syncGateSelectionToScope(resolvedFamily, nextModel, resolvedSide);
+  };
+
+  const handleGlobalPhaseChange = (nextPhase) => {
+    setGlobalPhase(nextPhase);
+    if (nextPhase === 'ALL') return;
+
+    const phaseEntries = scopeCatalog.filter((item) => item.phase === nextPhase);
+    const validFamilies = new Set(phaseEntries.map((item) => item.family));
+    const validModels = new Set(phaseEntries.map((item) => item.model));
+    const validSides = new Set();
+    phaseEntries.forEach((item) => item.sides.forEach((s) => validSides.add(s)));
+
+    if (globalFamily !== 'ALL' && !validFamilies.has(globalFamily)) {
+      setGlobalFamily('ALL');
+    }
+    if (globalModel !== 'ALL' && !validModels.has(globalModel)) {
+      setGlobalModel('ALL');
+    }
+    if (globalSide !== 'ALL' && !validSides.has(globalSide)) {
+      setGlobalSide('ALL');
+    }
+  };
+
+  const handleGlobalSideChange = (nextSide) => {
+    setGlobalSide(nextSide);
+    if (nextSide !== 'ALL') {
+      const sideEntries = scopeCatalog.filter((item) => item.sides.includes(nextSide));
+      const validFamilies = new Set(sideEntries.map((item) => item.family));
+      const validModels = new Set(sideEntries.map((item) => item.model));
+      const validPhases = new Set(sideEntries.map((item) => item.phase));
+
+      let resolvedFamily = globalFamily;
+      let resolvedModel = globalModel;
+      if (globalFamily !== 'ALL' && !validFamilies.has(globalFamily)) {
+        resolvedFamily = 'ALL';
+        setGlobalFamily('ALL');
+      }
+      if (globalModel !== 'ALL' && !validModels.has(globalModel)) {
+        resolvedModel = 'ALL';
+        setGlobalModel('ALL');
+      }
+      if (globalPhase !== 'ALL' && !validPhases.has(globalPhase)) {
+        setGlobalPhase('ALL');
+      }
+      syncGateSelectionToScope(resolvedFamily, resolvedModel, nextSide);
+    } else {
+      syncGateSelectionToScope(globalFamily, globalModel, 'ALL');
+    }
+  };
+
+  // Keep Process valid when another scope filter removes it from the option list.
+  useEffect(() => {
+    if (globalProcess !== 'ALL' && !availableProcesses.includes(globalProcess)) setGlobalProcess('ALL');
+  }, [availableProcesses, globalProcess]);
+
+  const handleResetGlobalFilters = () => {
+    setGlobalFamily('ALL');
+    setGlobalModel('ALL');
+    setGlobalPhase('ALL');
+    setGlobalSide('ALL');
+    setGlobalProcess('ALL');
+  };
+
+  const isGlobalFilterActive =
+    globalFamily !== 'ALL' ||
+    globalModel !== 'ALL' ||
+    globalPhase !== 'ALL' ||
+    globalSide !== 'ALL' ||
+    globalProcess !== 'ALL';
+
+  const scopedProjects = useMemo(() => {
+    return projects
+      .filter((p) => {
+        if (globalFamily !== 'ALL' && getFamilyGroup(p) !== globalFamily) return false;
+        if (globalModel !== 'ALL' && p.model !== globalModel) return false;
+        if (globalPhase !== 'ALL' && p.phase !== globalPhase) return false;
+        if (globalSide !== 'ALL' && !getSideList(p.side).includes(globalSide)) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const modelCmp = a.model.localeCompare(b.model);
+        if (modelCmp !== 0) return modelCmp;
+        const pA = PHASE_ORDER.indexOf(a.phase) === -1 ? 99 : PHASE_ORDER.indexOf(a.phase);
+        const pB = PHASE_ORDER.indexOf(b.phase) === -1 ? 99 : PHASE_ORDER.indexOf(b.phase);
+        return pA - pB;
+      });
+  }, [projects, globalFamily, globalModel, globalPhase, globalSide]);
+
+  const scopedProductionRecords = useMemo(() => {
+    return productionRecords
+      .filter((r) => {
+        if (globalFamily !== 'ALL' && getFamilyGroup(r) !== globalFamily) return false;
+        if (globalModel !== 'ALL' && r.model !== globalModel) return false;
+        if (globalPhase !== 'ALL' && r.phase !== globalPhase) return false;
+        if (globalSide !== 'ALL' && !getSideList(r.side).includes(globalSide)) return false;
+        if (globalProcess !== 'ALL' && getProcessStep(r) !== globalProcess) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const modelCmp = a.model.localeCompare(b.model);
+        if (modelCmp !== 0) return modelCmp;
+        const pA = PHASE_ORDER.indexOf(a.phase) === -1 ? 99 : PHASE_ORDER.indexOf(a.phase);
+        const pB = PHASE_ORDER.indexOf(b.phase) === -1 ? 99 : PHASE_ORDER.indexOf(b.phase);
+        if (pA !== pB) return pA - pB;
+        const sA = SIDE_ORDER.indexOf(a.side) === -1 ? 99 : SIDE_ORDER.indexOf(a.side);
+        const sB = SIDE_ORDER.indexOf(b.side) === -1 ? 99 : SIDE_ORDER.indexOf(b.side);
+        if (sA !== sB) return sA - sB;
+        return a.config.localeCompare(b.config, undefined, { numeric: true });
+      });
+  }, [productionRecords, globalFamily, globalModel, globalPhase, globalSide, globalProcess]);
+
+  const scopedTasks = useMemo(() => {
+    const allowedIds = new Set(scopedProjects.map((p) => p.id));
+    return tasks.filter(
+      (t) => allowedIds.has(t.projectId) && (globalProcess === 'ALL' || t.processStep === globalProcess)
+    );
+  }, [tasks, scopedProjects, globalProcess]);
+
+  const scopedCpkRecords = useMemo(() => {
+    return cpkRecords.filter((r) => {
+      if (globalFamily !== 'ALL' && getFamilyGroup(r) !== globalFamily) return false;
+      if (globalModel !== 'ALL' && r.model !== globalModel) return false;
+      if (globalPhase !== 'ALL' && r.phase !== globalPhase) return false;
+      if (globalSide !== 'ALL' && r.side !== globalSide) return false;
+      return true;
+    });
+  }, [cpkRecords, globalFamily, globalModel, globalPhase, globalSide]);
+
+  const scopedCostProjects = useMemo(() => {
+    return costProjects.filter((c) => {
+      if (globalFamily !== 'ALL' && getFamilyGroup(c) !== globalFamily) return false;
+      if (globalModel !== 'ALL' && c.model !== globalModel) return false;
+      if (globalPhase !== 'ALL' && c.phase !== globalPhase) return false;
+      if (globalSide !== 'ALL' && !getSideList(c.side).includes(globalSide)) return false;
+      return true;
+    });
+  }, [costProjects, globalFamily, globalModel, globalPhase, globalSide]);
+
+  const scopedCustomerFeedback = useMemo(() => {
+    return customerFeedback.filter((cf) => {
+      if (globalFamily !== 'ALL' && getFamilyGroup(cf) !== globalFamily) return false;
+      if (globalModel !== 'ALL' && cf.model !== globalModel) return false;
+      if (globalPhase !== 'ALL' && cf.phase !== globalPhase) return false;
+      if (globalSide !== 'ALL' && !getSideList(cf.side).includes(globalSide)) return false;
+      return true;
+    });
+  }, [customerFeedback, globalFamily, globalModel, globalPhase, globalSide]);
+
+  // Scope-wide counters still consumed by the top bar and the sidebar badges.
+  const globalStats = useMemo(() => {
+    let pendingSignOffs = 0;
+    let activeLineCount = 0;
+
+    scopedProjects.forEach((p) => {
+      const pLines = gateRecords[p.id] || {};
+      const variants = getLineVariantsForProject(p).filter(
+        (v) => globalSide === 'ALL' || v.side === globalSide
+      );
+      activeLineCount += variants.length;
+
+      variants.forEach((v) => {
+        Object.values(pLines[v.key] || {}).forEach((g) => {
+          if (g.status === 'In Review' || g.status === 'Blocked' || g.status === 'Conditional') {
+            pendingSignOffs += g.approvers.filter(
+              (a) => a.decision === 'Pending' || a.decision === 'Rejected'
+            ).length;
+          }
+        });
+      });
+    });
+
+    const openTasks = scopedTasks.filter((t) => t.status !== 'Done').length;
+
+    return { pendingSignOffs, openTasks, activeLineCount };
+  }, [scopedProjects, gateRecords, scopedTasks, globalSide]);
+
+  // ============================================================================
+  // MUTATION & INTERACTION HANDLERS
+  // ============================================================================
+
+  const handleToggleSidebar = () => {
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+      setMobileMenuOpen((prev) => !prev);
+    } else {
+      setSidebarCollapsed((prev) => !prev);
+    }
+  };
+
+  const handleCreateProject = (form) => {
+    const modelCode = form.model.toUpperCase();
+    // Sequential and never reused: a timestamp suffix repeats within the same second.
+    const newId = nextId(`PRJ-${modelCode.replace(/[^A-Z0-9]/g, '')}-`, projects);
+    const roster = getSignOffRosterForProject();
+    const sideList = getSideList(form.side || 'RHS & LHS');
+    const initialMatrix = ['ME11', 'ME12'].flatMap((cfg, cIdx) =>
+      sideList.map((sd) => ({
+        config: cfg,
+        side: sd,
+        apnRev: sd === 'RHS' ? '610-00991-01 / Rev.01' : '610-00990-01 / Rev.01',
+        code7E: `7E-${modelCode}${sd[0]}-${11 + cIdx}`,
+        vendors: cIdx === 0 ? 'POR Baseline Vendor Split' : 'Alternate Vendor Split',
+        fbu: 100,
+        main: 400,
+        rel: 57,
+        mbo: 30,
+        iqc: 15,
+        oqc: 15,
+        doe: 20,
+        estYieldLoss: 25,
+        fatpMih: form.mihDate || '2027-03-29',
+        total: 662
+      }))
+    );
+    const newProj = {
+      id: newId,
+      model: modelCode,
+      familyGroup: form.familyGroup || 'MB14"',
+      family: form.family || `${form.familyGroup || 'MB14"'} FDB Fan Module`,
+      phase: form.phase || 'EVT',
+      side: form.side || 'RHS & LHS',
+      spec: 'DC5V · Standard FDB Fan Spec',
+      lineSpec: 'FFM Auto Line @ 340 UPH · HC 34.25',
+      moRange: form.moRange || 'SPP0890–SPP0895',
+      customer: form.customer || 'QSMC',
+      etdDate: form.etdDate || '2027-03-25',
+      mihDate: form.mihDate || '2027-03-29',
+      pm: roster.em.defaultName,
+      leader: form.leader || 'Program Leader — TBD',
+      owner: form.owner || 'Program Engineer — TBD',
+      currentGateId: 'prep',
+      status: 'On Track',
+      fpy: 96.5,
+      fy: 98.8,
+      uph: 340,
+      eff: 91.0,
+      buildMatrix: initialMatrix
+    };
+
+    const lineRecords = {};
+    getLineVariantsForProject(newProj).forEach((variant) => {
+      const gMap = {};
+      NPI_GATES.forEach((g, idx) => {
+        const st = idx === 0 ? 'In Review' : 'Pending';
+        gMap[g.id] = createSingleGateDossier(
+          newProj,
+          g,
+          variant,
+          st,
+          newProj.leader,
+          newProj.owner
+        );
+      });
+      lineRecords[variant.key] = gMap;
+    });
+
+    setProjects((prev) => [newProj, ...prev]);
+    setGateRecords((prev) => ({ ...prev, [newProj.id]: lineRecords }));
+    setSelectedProjectId(newProj.id);
+    setSelectedGateId('prep');
+    const firstLine = getLineVariantsForProject(newProj)[0]?.key || 'ME11-RHS';
+    setSelectedLineKey(firstLine);
+    setSelectedLineKeys([firstLine]);
+    setNewProjectModalOpen(false);
+    showToast(`Initialized NPI program ${newProj.model} ${newProj.phase}`);
+  };
+
+  const handleSaveBuildMatrixRow = (projectId, originalRow, form) => {
+    const project = projectMap[projectId];
+    if (!project) return;
+
+    const cleanConfig = form.config.toUpperCase().trim();
+    const cleanSide = form.side || getSideList(project.side)[0] || 'RHS';
+    if (!cleanConfig) return;
+
+    const calc = computeBuildMatrixRow(form);
+    const nextRow = {
+      config: cleanConfig,
+      side: cleanSide,
+      apnRev: form.apnRev.trim() || '—',
+      code7E: form.code7E.trim() || '—',
+      vendors: form.vendors.trim() || 'POR Baseline Split',
+      fbu: calc.fbu,
+      main: calc.main,
+      rel: calc.rel,
+      mbo: calc.mbo,
+      iqc: calc.iqc,
+      oqc: calc.oqc,
+      doe: calc.doe,
+      estYieldLoss: calc.estYieldLoss,
+      fatpMih: form.fatpMih || project.mihDate || '',
+      total: calc.totalProduction
+    };
+
+    const oldKey = originalRow ? `${originalRow.config}-${originalRow.side || 'RHS'}` : null;
+    const newKey = `${cleanConfig}-${cleanSide}`;
+    const isEditing = Boolean(originalRow);
+
+    setProjects((prev) =>
+      prev.map((p) => {
+        if (p.id !== projectId) return p;
+        const exists = p.buildMatrix.some(
+          (r) => `${r.config}-${r.side || 'RHS'}` === oldKey
+        );
+        const updatedMatrix =
+          isEditing && exists
+            ? p.buildMatrix.map((r) =>
+                `${r.config}-${r.side || 'RHS'}` === oldKey ? nextRow : r
+              )
+            : [...p.buildMatrix, nextRow];
+        return { ...p, buildMatrix: updatedMatrix };
+      })
+    );
+
+    // Sync Gate Sign-Off dossier for this specific Config x Side line
+    setGateRecords((prev) => {
+      const projLines = { ...(prev[projectId] || {}) };
+      const currentGateIdx = Math.max(
+        0,
+        NPI_GATES.findIndex((g) => g.id === project.currentGateId)
+      );
+
+      if (isEditing && oldKey && oldKey !== newKey && projLines[oldKey]) {
+        projLines[newKey] = projLines[oldKey];
+        delete projLines[oldKey];
+      } else if (!projLines[newKey]) {
+        const variant = {
+          key: newKey,
+          config: cleanConfig,
+          side: cleanSide,
+          apnRev: nextRow.apnRev,
+          code7E: nextRow.code7E,
+          vendors: nextRow.vendors,
+          qty: nextRow.total
+        };
+        const gMap = {};
+        NPI_GATES.forEach((g, idx) => {
+          const st =
+            idx < currentGateIdx ? 'Approved' : idx === currentGateIdx ? 'In Review' : 'Pending';
+          gMap[g.id] = createSingleGateDossier(
+            project,
+            g,
+            variant,
+            st,
+            project.leader,
+            project.owner
+          );
+        });
+        projLines[newKey] = gMap;
+      }
+
+      return { ...prev, [projectId]: projLines };
+    });
+
+    setMatrixModalState(null);
+    showToast(
+      isEditing
+        ? `Updated ${project.model} ${cleanConfig} (${cleanSide})`
+        : `Added ${cleanConfig} (${cleanSide}) to ${project.model} build matrix`
+    );
+  };
+
+  const handleDeleteBuildMatrixRow = (projectId, row) => {
+    const project = projectMap[projectId];
+    if (!project || !row) return;
+    const rowKey = `${row.config}-${row.side || 'RHS'}`;
+
+    setProjects((prev) =>
+      prev.map((p) =>
+        p.id === projectId
+          ? {
+              ...p,
+              buildMatrix: p.buildMatrix.filter(
+                (r) => `${r.config}-${r.side || 'RHS'}` !== rowKey
+              )
+            }
+          : p
+      )
+    );
+
+    setGateRecords((prev) => {
+      const projLines = { ...(prev[projectId] || {}) };
+      delete projLines[rowKey];
+      return { ...prev, [projectId]: projLines };
+    });
+
+    setDeletingMatrixRow(null);
+    showToast(`Deleted ${row.config} (${row.side}) from ${project.model} build matrix`, 'warning');
+  };
+
+  const handleSaveScheduleOverride = (projectId, rowKeys, scheduleForm) => {
+    const project = projectMap[projectId];
+    if (!project) return;
+    const keys = Array.isArray(rowKeys) ? rowKeys : [rowKeys];
+
+    setScheduleOverrides((prev) => {
+      const next = { ...prev };
+      keys.forEach((k) => {
+        next[`${projectId}::${k}`] = { ...scheduleForm };
+      });
+      return next;
+    });
+
+    if (scheduleForm.mih) {
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (p.id !== projectId) return p;
+          return {
+            ...p,
+            buildMatrix: p.buildMatrix.map((r) => {
+              const rKey = `${r.config}-${r.side || 'RHS'}`;
+              return keys.includes(rKey) ? { ...r, fatpMih: scheduleForm.mih } : r;
+            })
+          };
+        })
+      );
+    }
+
+    setEditingScheduleTarget(null);
+    showToast(
+      `Updated Gantt timeline for ${project.model} (${keys.length} ${keys.length === 1 ? 'line' : 'lines'})`
+    );
+  };
+
+  const handleCreateTask = (form) => {
+    const newTask = {
+      id: nextId('TSK-', tasks),
+      projectId: form.projectId,
+      gateId: form.gateId,
+      processStep: form.processStep,
+      category: TASK_CATEGORIES.includes(form.category) ? form.category : TASK_CATEGORIES[0],
+      title: form.title,
+      owner: form.owner || 'Patcharapong J.',
+      priority: form.priority || 'High',
+      status: 'To Do',
+      dueDate: form.dueDate || '2026-12-05',
+      description: form.description || 'Action item logged under PEN-81-0002 gate tracking.',
+      updates: []
+    };
+    setTasks((prev) => [newTask, ...prev]);
+    setNewTaskModalOpen(false);
+    showToast(`Created task ${newTask.id}`);
+  };
+
+  const handleAddProductionRecord = (form) => {
+    const cleanDefects = (form.defectItems || [])
+      .filter((d) => d.mode.trim() || Number(d.falloutQty) > 0 || Number(d.salvageQty) > 0)
+      .map((d, idx) => ({
+        id: d.id || `d-${Date.now()}-${idx}`,
+        mode: d.mode.trim() || 'Unspecified Defect',
+        falloutQty: Math.max(0, Number(d.falloutQty) || 0),
+        salvageQty: Math.max(0, Number(d.salvageQty) || 0)
+      }));
+
+    const cleanDowntime = (form.downtimeEvents || [])
+      .filter((e) => e.reason.trim() || Number(e.durationMin) > 0)
+      .map((e, idx) => ({
+        id: e.id || `dt-${Date.now()}-${idx}`,
+        category: e.category || DOWNTIME_CATEGORIES[0],
+        reason: e.reason.trim() || 'Unplanned stop',
+        durationMin: Math.max(0, Number(e.durationMin) || 0)
+      }));
+
+    const newRec = {
+      id: `REC-${form.model.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-4)}`,
+      model: form.model.toUpperCase().trim(),
+      familyGroup: form.familyGroup || 'MB14"',
+      phase: form.phase || 'EVT',
+      station: form.station || PRODUCTION_STATIONS[3],
+      config: form.config.toUpperCase().trim() || 'ME11',
+      side: form.side || 'RHS',
+      input: Number(form.input) || 0,
+      plannedTimeHr: Number(form.plannedTimeHr) || 0,
+      date: form.date || todayIso(),
+      defectItems: cleanDefects,
+      downtimeEvents: cleanDowntime
+    };
+    setProductionRecords((prev) => [newRec, ...prev]);
+    setNewProdRecordModalOpen(false);
+    showToast(`Logged production record for ${newRec.model} ${newRec.phase} (${newRec.station})`);
+  };
+
+  const handleUpdateProductionRecord = (id, form) => {
+    const cleanDefects = (form.defectItems || [])
+      .filter((d) => d.mode.trim() || Number(d.falloutQty) > 0 || Number(d.salvageQty) > 0)
+      .map((d, idx) => ({
+        id: d.id || `d-${Date.now()}-${idx}`,
+        mode: d.mode.trim() || 'Unspecified Defect',
+        falloutQty: Math.max(0, Number(d.falloutQty) || 0),
+        salvageQty: Math.max(0, Number(d.salvageQty) || 0)
+      }));
+
+    const cleanDowntime = (form.downtimeEvents || [])
+      .filter((e) => e.reason.trim() || Number(e.durationMin) > 0)
+      .map((e, idx) => ({
+        id: e.id || `dt-${Date.now()}-${idx}`,
+        category: e.category || DOWNTIME_CATEGORIES[0],
+        reason: e.reason.trim() || 'Unplanned stop',
+        durationMin: Math.max(0, Number(e.durationMin) || 0)
+      }));
+
+    const updatedRec = {
+      id,
+      model: form.model.toUpperCase().trim(),
+      familyGroup: form.familyGroup || 'MB14"',
+      phase: form.phase || 'EVT',
+      station: form.station || PRODUCTION_STATIONS[3],
+      config: form.config.toUpperCase().trim() || 'ME11',
+      side: form.side || 'RHS',
+      input: Number(form.input) || 0,
+      plannedTimeHr: Number(form.plannedTimeHr) || 0,
+      date: form.date || todayIso(),
+      defectItems: cleanDefects,
+      downtimeEvents: cleanDowntime
+    };
+    setProductionRecords((prev) => prev.map((r) => (r.id === id ? updatedRec : r)));
+    setEditingProdRecord(null);
+    showToast(`Updated production record for ${updatedRec.model} ${updatedRec.phase} (${updatedRec.station})`);
+  };
+
+  const handleDeleteProductionRecord = (rec) => {
+    setProductionRecords((prev) => prev.filter((r) => r.id !== rec.id));
+    setDeletingProdRecord(null);
+    showToast(`Deleted production record ${rec.model} ${rec.phase} (${rec.config} ${rec.side})`, 'warning');
+  };
+
+  const handleSaveMasterSpec = (form, existingId = null) => {
+    const cleanSpec = {
+      id: existingId || `SPEC-${form.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}`,
+      code: form.code.toUpperCase().trim(),
+      name: form.name.trim(),
+      model: (form.model || '').trim().toUpperCase(),
+      station: form.station || PRODUCTION_STATIONS[3],
+      unit: form.unit.trim() || 'mm',
+      specType: form.specType || 'two-sided',
+      lsl: form.specType === 'upper' ? 0 : Number(form.lsl),
+      nominal: Number(form.nominal),
+      usl: form.specType === 'lower' ? null : Number(form.usl),
+      cpkTarget: Number(form.cpkTarget) || 1.33,
+      metrology: form.metrology.trim() || 'OMM Optical',
+      docRef: form.docRef.trim() || 'SPC-FFM-00',
+      samplingPlan: form.samplingPlan.trim() || '32 pcs / Lot'
+    };
+
+    if (existingId) {
+      setMasterSpecs((prev) => prev.map((s) => (s.id === existingId ? cleanSpec : s)));
+      showToast(`Updated Master Specification: ${cleanSpec.name}`);
+    } else {
+      setMasterSpecs((prev) => [...prev, cleanSpec]);
+      showToast(`Added Master Specification: ${cleanSpec.name}`);
+    }
+    setEditingMasterSpec(null);
+    setNewMasterSpecModalOpen(false);
+  };
+
+  const handleDeleteMasterSpec = (spec) => {
+    setMasterSpecs((prev) => prev.filter((s) => s.id !== spec.id));
+    setCpkRecords((prev) => prev.filter((r) => r.specId !== spec.id));
+    showToast(`Deleted Master Specification ${spec.code}`, 'warning');
+  };
+
+  const handleGenerateFfmMasterSpecs = () => {
+    const existingCodes = new Set(masterSpecs.map((s) => s.code.toUpperCase()));
+    const toAdd = FFM_STANDARD_MASTER_SPEC_LIBRARY.filter(
+      (s) => !existingCodes.has(s.code.toUpperCase())
+    );
+    if (toAdd.length === 0) {
+      showToast('All FFM Standard Master Specifications are already loaded.');
+      return;
+    }
+    setMasterSpecs((prev) => [...prev, ...toAdd]);
+    showToast(`Generated ${toAdd.length} FFM Standard Master Specifications (${toAdd.map((s) => s.code).join(', ')})`);
+  };
+
+  const handleUpdateCpkMeasurement = (recordId, updates) => {
+    setCpkRecords((prev) =>
+      prev.map((r) =>
+        r.id === recordId
+          ? {
+              ...r,
+              mean: Number(updates.mean),
+              stdDev: Math.max(0.0001, Number(updates.stdDev)),
+              sampleSize: Math.max(5, Number(updates.sampleSize) || 32),
+              date: todayIso()
+            }
+          : r
+      )
+    );
+    setActiveCpkChartRecord((prev) =>
+      prev && prev.id === recordId
+        ? {
+            ...prev,
+            mean: Number(updates.mean),
+            stdDev: Math.max(0.0001, Number(updates.stdDev)),
+            sampleSize: Math.max(5, Number(updates.sampleSize) || 32),
+            date: todayIso()
+          }
+        : prev
+    );
+    showToast('Updated process capability telemetry & recalculated Cpk');
+  };
+
+  const handleImportCpkRecords = (importedRecords, meta) => {
+    if (!importedRecords || importedRecords.length === 0) return;
+
+    const batchId = `BATCH-${Date.now()}`;
+    const taggedRecords = importedRecords.map((r) => ({
+      ...r,
+      uploadBatchId: batchId,
+      sourceFile: meta.fileName
+    }));
+
+    if (Array.isArray(meta.newSpecs) && meta.newSpecs.length > 0) {
+      setMasterSpecs((prev) => {
+        const existingCodes = new Set(prev.map((s) => s.code.toUpperCase()));
+        const uniqueNew = meta.newSpecs.filter(
+          (s) => !existingCodes.has(s.code.toUpperCase())
+        );
+        return [...prev, ...uniqueNew];
+      });
+    }
+
+    setCpkRecords((prev) => {
+      if (meta.importMode === 'replace') {
+        const importedModels = new Set(taggedRecords.map((r) => `${r.model}::${r.phase}`));
+        const kept = prev.filter((r) => !importedModels.has(`${r.model}::${r.phase}`));
+        return [...taggedRecords, ...kept];
+      }
+
+      // Upsert by Model x Phase x Side x SpecId
+      const next = [...prev];
+      taggedRecords.forEach((rec) => {
+        const matchIdx = next.findIndex(
+          (r) =>
+            r.model === rec.model &&
+            r.phase === rec.phase &&
+            r.side === rec.side &&
+            r.specId === rec.specId
+        );
+        if (matchIdx >= 0) {
+          next[matchIdx] = { ...rec, id: next[matchIdx].id };
+        } else {
+          next.push(rec);
+        }
+      });
+      return next;
+    });
+
+    const stamp = `Today ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    const matchedSpecIds = Array.from(new Set(taggedRecords.map((r) => r.specId)));
+    const batchMeta = {
+      id: batchId,
+      fileName: meta.fileName,
+      format: meta.format,
+      rowCount: meta.rawRowCount,
+      recordsUpdated: taggedRecords.length,
+      matchedSpecIds,
+      generatedSpecCount: meta.newSpecs?.length || 0,
+      time: stamp
+    };
+
+    setLastUploadBatch(batchMeta);
+    setCpkUploadHistory((prev) => [batchMeta, ...prev.slice(0, 4)]);
+    setCpkImportModalOpen(false);
+    showToast(
+      `Updated Cpk Dashboard: ${taggedRecords.length} matched records${
+        meta.newSpecs?.length ? ` + ${meta.newSpecs.length} generated specs` : ''
+      } from ${meta.fileName}`
+    );
+  };
+
+  const handleUpdateTaskStatus = (taskId, nextStatus) => {
+    setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status: nextStatus } : t)));
+    showToast(`Updated ${taskId} to ${nextStatus}`);
+  };
+
+  const handleUpdateTaskCategory = (taskId, category) => {
+    setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, category } : t)));
+    showToast(`Set ${taskId} category to ${category}`);
+  };
+
+  const handleAddTaskNote = (taskId, text) => {
+    if (!text.trim()) return;
+    const stamp = `Today ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === taskId
+          ? { ...t, updates: [{ author: 'Engineering DRI', time: stamp, text: text.trim() }, ...t.updates] }
+          : t
+      )
+    );
+    showToast('Engineering update posted');
+  };
+
+  const handleSaveCostProject = (form, existingId = null) => {
+    const clean = {
+      id: existingId || nextId('CI-', costProjects),
+      title: form.title.trim(),
+      model: form.model.toUpperCase().trim() || 'X4151',
+      familyGroup: form.familyGroup || inferFamilyFromModel(form.model),
+      phase: form.phase || 'EVT',
+      side: form.side || 'RHS & LHS',
+      category: form.category || COST_SAVING_CATEGORIES[0],
+      vendor: form.vendor.trim() || 'NMB Internal',
+      hcReduction: Math.max(0, Number(form.hcReduction) || 0),
+      budgetThb: Math.max(0, Number(form.budgetThb) || 0),
+      quotedCostThb: Math.max(0, Number(form.quotedCostThb) || 0),
+      annualMaterialSavingThb: Math.max(0, Number(form.annualMaterialSavingThb) || 0),
+      feasibility: form.feasibility || 'Pending',
+      stage: form.stage || 'RFP / Studying',
+      fyTarget: form.fyTarget || 'FY2026',
+      owner: form.owner.trim() || 'Touchakorn',
+      notes: (form.notes || '').trim()
+    };
+
+    if (existingId) {
+      setCostProjects((prev) => prev.map((c) => (c.id === existingId ? clean : c)));
+      showToast(`Updated cost initiative ${clean.id}`);
+    } else {
+      setCostProjects((prev) => [clean, ...prev]);
+      showToast(`Added cost initiative ${clean.id}`);
+    }
+    setNewCostModalOpen(false);
+    setEditingCostProject(null);
+  };
+
+  const handleUpdateCostFeasibility = (id, nextFeasibility) => {
+    setCostProjects((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, feasibility: nextFeasibility } : c))
+    );
+    showToast(`Updated ${id} feasibility to ${nextFeasibility}`);
+  };
+
+  const handleUpdateCostStage = (id, nextStage) => {
+    setCostProjects((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, stage: nextStage } : c))
+    );
+    showToast(`Moved ${id} to ${nextStage}`);
+  };
+
+  const handleImportCostCsv = async (file) => {
+    try {
+      const { headers, rows } = await parseUploadedTabularFile(file);
+      if (!rows || rows.length === 0) {
+        showToast('No project rows found in uploaded CSV/Excel file.', 'warning');
+        return;
+      }
+      const findCol = createColumnFinder(headers);
+
+      const idCol = findCol(['id', 'code', 'ref']);
+      const titleCol = findCol(['title', 'description', 'opportunity', 'project', 'initiative', 'process']);
+      const modelCol = findCol(['model', 'platform', 'product']);
+      const familyCol = findCol(['family', 'line']);
+      const vendorCol = findCol(['vendor', 'supporter', 'supplier']);
+      const hcCol = findCol(['hc', 'headcount']);
+      const budgetCol = findCol(['budget', 'targetbudget']);
+      const costCol = findCol(['quoted', 'actual', 'costsupport', 'investment', 'capex']);
+      const feasCol = findCol(['feasibility', 'decision', 'go']);
+      const statusCol = findCol(['status', 'stage']);
+
+      if (!titleCol) {
+        showToast('Could not detect Project / Description column in uploaded file.', 'warning');
+        return;
+      }
+
+      const numClean = (v) => Number(String(v || '0').replace(/[^0-9.-]/g, '')) || 0;
+      const normKey = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      const fieldLabels = {
+        title: 'title',
+        model: 'model',
+        familyGroup: 'family',
+        vendor: 'vendor',
+        hcReduction: 'headcount',
+        budgetThb: 'budget',
+        quotedCostThb: 'quoted cost',
+        feasibility: 'feasibility',
+        stage: 'stage'
+      };
+
+      // `provided` holds only what the file states. Merging it into an existing
+      // record therefore never overwrites columns the upload leaves out with
+      // import defaults (phase, category, owner, ...).
+      const parsed = rows
+        .filter((r) => String(r[titleCol] || '').trim())
+        .map((r) => {
+          const rawModel = modelCol
+            ? String(r[modelCol] || '').toUpperCase().trim().split('/')[0].trim()
+            : '';
+          const model = rawModel || 'X3784';
+          const provided = { title: String(r[titleCol]).trim() };
+          if (rawModel) provided.model = rawModel;
+          if (familyCol) {
+            const family = String(r[familyCol] || '').trim();
+            if (family) provided.familyGroup = family;
+          }
+          if (vendorCol) {
+            const vendor = String(r[vendorCol] || '').trim();
+            if (vendor) provided.vendor = vendor;
+          }
+          if (hcCol) provided.hcReduction = numClean(r[hcCol]);
+          if (budgetCol) provided.budgetThb = numClean(r[budgetCol]);
+          if (costCol) provided.quotedCostThb = numClean(r[costCol]);
+          if (feasCol) {
+            const rawFeas = String(r[feasCol] || '').toLowerCase();
+            provided.feasibility = rawFeas.includes('no')
+              ? 'No-go'
+              : rawFeas.includes('go')
+              ? 'Go'
+              : 'Pending';
+          }
+          if (statusCol) {
+            const stage = String(r[statusCol] || '').trim();
+            if (stage) provided.stage = stage;
+          }
+          return {
+            fileId: idCol ? String(r[idCol] || '').trim() : '',
+            matchKey: `${normKey(provided.title)}|${model}`,
+            provided,
+            addRecord: {
+              title: provided.title,
+              model,
+              familyGroup: provided.familyGroup || inferFamilyFromModel(model),
+              phase: 'EVT',
+              side: model === 'X3784' ? 'Single' : 'RHS & LHS',
+              category: 'Assembly Automation',
+              vendor: provided.vendor || 'NMB Internal',
+              hcReduction: provided.hcReduction || 0,
+              budgetThb: provided.budgetThb || 0,
+              quotedCostThb: provided.quotedCostThb || 0,
+              feasibility: provided.feasibility || 'Pending',
+              stage: provided.stage || 'RFP / Studying',
+              fyTarget: 'FY2026',
+              owner: 'NMB Eng',
+              notes: `Imported from ${file.name}`
+            }
+          };
+        });
+
+      if (parsed.length === 0) {
+        showToast('No valid rows parsed from file.', 'warning');
+        return;
+      }
+
+      const existingById = new Map(costProjects.map((p) => [String(p.id), p]));
+      const seenKeys = new Set();
+      const matchedIds = new Set();
+      const adds = [];
+      const updates = [];
+      let unchangedCount = 0;
+      let duplicateCount = 0;
+
+      const sameValue = (a, b) => {
+        if (typeof a === 'number' || typeof b === 'number') return Number(a) === Number(b);
+        return String(a === undefined || a === null ? '' : a) === String(b === undefined || b === null ? '' : b);
+      };
+
+      parsed.forEach((row) => {
+        const dedupeKey = row.fileId ? `id:${row.fileId}` : row.matchKey;
+        let match = row.fileId ? existingById.get(row.fileId) : null;
+        if (!match) {
+          match = costProjects.find(
+            (p) => `${normKey(p.title)}|${String(p.model || '').toUpperCase()}` === row.matchKey
+          );
+        }
+        if (seenKeys.has(dedupeKey) || (match && matchedIds.has(match.id))) {
+          duplicateCount += 1;
+          return;
+        }
+        seenKeys.add(dedupeKey);
+        if (match) {
+          matchedIds.add(match.id);
+          const changed = Object.keys(row.provided).filter(
+            (key) => !sameValue(match[key], row.provided[key])
+          );
+          if (changed.length === 0) {
+            unchangedCount += 1;
+            return;
+          }
+          updates.push({
+            id: match.id,
+            label: `${match.id} · ${row.provided.title}`,
+            fields: row.provided,
+            changed: changed.map((key) => fieldLabels[key] || key)
+          });
+          return;
+        }
+        adds.push(row.addRecord);
+      });
+
+      setCostImportDraft({
+        kind: 'cost',
+        fileName: file.name,
+        adds,
+        updates,
+        keptIds: Array.from(matchedIds),
+        removed: costProjects.filter((p) => !matchedIds.has(p.id)),
+        unchangedCount,
+        duplicateCount
+      });
+    } catch (err) {
+      showToast(err?.message || 'Failed to import cost CSV/Excel file.', 'warning');
+    }
+  };
+
+  const handleConfirmCostImport = (mode) => {
+    const draft = costImportDraft;
+    if (!draft) return;
+    setCostProjects((prev) => {
+      const fieldsById = new Map(draft.updates.map((u) => [u.id, u.fields]));
+      const keptIds = new Set(draft.keptIds || []);
+      const withUpdates = (item) =>
+        fieldsById.has(item.id) ? { ...item, ...fieldsById.get(item.id) } : item;
+      const updated = prev.map(withUpdates);
+      // Numbers stay monotonic across a replace: ids of dropped rows are not
+      // handed to the new ones.
+      const addRecords = (used) => {
+        let pool = used.slice();
+        return draft.adds.map((record) => {
+          const next = { ...record, id: nextId('CI-', pool) };
+          pool = [next, ...pool];
+          return next;
+        });
+      };
+      if (mode === 'replace') {
+        // Every row the file matched is kept, even when no field changed.
+        const kept = updated.filter((item) => keptIds.has(item.id));
+        return [...addRecords(prev), ...kept];
+      }
+      return [...addRecords(updated), ...updated];
+    });
+    setCostImportDraft(null);
+    showToast(
+      mode === 'replace'
+        ? `Replaced cost initiatives from ${draft.fileName}: ${draft.adds.length} added, ${draft.updates.length} updated, ${draft.removed.length} removed`
+        : `Merged ${draft.adds.length} new · ${draft.updates.length} updated cost initiatives from ${draft.fileName}`
+    );
+  };
+
+  const handleDeleteCostProject = (proj) => {
+    setCostProjects((prev) => prev.filter((c) => c.id !== proj.id));
+    setDeletingCostProject(null);
+    showToast(`Deleted cost saving project ${proj.id}`, 'warning');
+  };
+
+  const handleSaveFeedback = (form, existingId = null) => {
+    const cleanModel = (form.model || 'X3082').toUpperCase().trim();
+    const existingCase = existingId ? customerFeedback.find((c) => c.id === existingId) : null;
+    // `no` is the same never-reused sequence as the CF-26- id, so deleting a case
+    // cannot hand its number to the next one. An edited case keeps the number it
+    // was filed under.
+    const newCaseId = nextId('CF-26-', customerFeedback);
+    const clean = {
+      id: existingId || newCaseId,
+      no: existingCase ? existingCase.no || caseNoFromId(existingId) : caseNoFromId(newCaseId),
+      location: form.location || 'QSMC',
+      feedbackDate: form.feedbackDate || todayIso(),
+      facaNo: (form.facaNo || '').trim(),
+      severity: form.severity || 'Major',
+      model: cleanModel,
+      familyGroup: form.familyGroup || inferFamilyFromModel(cleanModel),
+      dateCode: (form.dateCode || '').trim(),
+      build: form.build || 'NPI',
+      phase: form.phase || (form.build === 'MP' ? 'MP' : 'EVT'),
+      buildConfig: (form.buildConfig || form.phase || 'EVT').trim(),
+      side: form.side || (cleanModel === 'X3784' ? 'Single' : 'RHS & LHS'),
+      issueCategory: form.issueCategory || 'Function',
+      issueItem: (form.issueItem || '').trim(),
+      ngQty: Math.max(1, Number(form.ngQty) || 1),
+      rtvDate: form.rtvDate || '',
+      category: form.category || 'FA',
+      eightD: form.eightD || {
+        d1d3: 'Open',
+        d4: 'Open',
+        d5: 'Open',
+        d6: 'Open',
+        d7: 'Open',
+        d8: 'Open'
+      },
+      nmbStatus: form.nmbStatus || 'Open',
+      customerStatus: form.customerStatus || 'Open',
+      remark: (form.remark || '').trim()
+    };
+
+    if (existingId) {
+      setCustomerFeedback((prev) => prev.map((c) => (c.id === existingId ? clean : c)));
+      showToast(`Updated customer feedback ${clean.id}`);
+    } else {
+      setCustomerFeedback((prev) => [clean, ...prev]);
+      showToast(`Logged customer feedback ${clean.id} (${clean.model})`);
+    }
+    setNewFeedbackModalOpen(false);
+    setEditingFeedback(null);
+  };
+
+  const handleDeleteFeedback = (item) => {
+    setCustomerFeedback((prev) => prev.filter((c) => c.id !== item.id));
+    setDeletingFeedback(null);
+    showToast(`Deleted feedback case ${item.id}`, 'warning');
+  };
+
+  const handleToggleFeedback8D = (id, stepKey) => {
+    setCustomerFeedback((prev) =>
+      prev.map((c) => {
+        if (c.id !== id) return c;
+        const nextVal = c.eightD?.[stepKey] === 'Closed' ? 'Open' : 'Closed';
+        const nextEightD = { ...(c.eightD || {}), [stepKey]: nextVal };
+        const allClosed = EIGHT_D_STEPS.every((s) => nextEightD[s.key] === 'Closed');
+        return {
+          ...c,
+          eightD: nextEightD,
+          nmbStatus: allClosed ? 'Closed' : 'Open'
+        };
+      })
+    );
+  };
+
+  const handleUpdateFeedbackStatus = (id, field, value) => {
+    setCustomerFeedback((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, [field]: value } : c))
+    );
+    showToast(`Updated ${id} ${field === 'nmbStatus' ? 'NMB' : 'Customer'} status to ${value}`);
+  };
+
+  const handleImportFeedbackCsv = async (file) => {
+    try {
+      const { headers, rows } = await parseUploadedTabularFile(file);
+      if (!rows || rows.length === 0) {
+        showToast('No feedback rows found in uploaded file.', 'warning');
+        return;
+      }
+
+      const findCol = createColumnFinder(headers);
+
+      const locCol = findCol(['location', 'customer', 'site']);
+      const dateCol = findCol(['feedbackdate', 'date']);
+      const facaCol = findCol(['faca', 'facano']);
+      const sevCol = findCol(['severity']);
+      const modelCol = findCol(['model', 'product']);
+      const dcCol = findCol(['datecode']);
+      const buildCol = findCol(['build']);
+      const cfgCol = findCol(['buildconfig', 'config']);
+      const issueCatCol = findCol(['issuecategory']);
+      const issueItemCol = findCol(['issueitem', 'issue', 'defect']);
+      const qtyCol = findCol(['ngqty', 'qty']);
+      const rtvCol = findCol(['rtvreceiveddate', 'rtv']);
+      const catCol = findCol(['category']);
+      const nmbStCol = findCol(['nmbstatus']);
+      const custStCol = findCol(['customerstatus']);
+      const remarkCol = findCol(['remark', 'notes']);
+      const stepCols = EIGHT_D_STEPS.map((step) => ({
+        key: step.key,
+        col: findCol(
+          step.key === 'd1d3' ? ['d1d3', 'd13'] : step.key === 'd8' ? ['finald8', 'd8'] : [step.key]
+        )
+      }));
+
+      if (!modelCol || !issueItemCol) {
+        showToast('Could not detect Model or Issue Item columns in uploaded file.', 'warning');
+        return;
+      }
+
+      const normStatus = (v) => (String(v || '').toLowerCase().includes('closed') ? 'Closed' : 'Open');
+      const stepStatus = (v) => {
+        const text = String(v || '').trim().toLowerCase();
+        if (!text) return null;
+        return text.includes('closed') ? 'Closed' : 'Open';
+      };
+      const inferPhaseFromConfig = (buildVal, cfgVal) => {
+        const c = String(cfgVal || '').toUpperCase();
+        if (String(buildVal || '').toUpperCase() === 'MP' || c === 'MP') return 'MP';
+        if (c.includes('P1')) return 'P1';
+        if (c.includes('P2')) return 'P2';
+        if (c.includes('EVT')) return 'EVT';
+        if (c.includes('DVT') || c.includes('PRB')) return 'DVT';
+        if (c.includes('PVT')) return 'PVT';
+        return 'EVT';
+      };
+      const normKey = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+      // `provided` holds only what the file states, so a merge keeps values the
+      // upload does not mention (statuses, 8D steps, remarks, ...).
+      const parsed = rows
+        .filter((r) => String(r[modelCol] || '').trim() && String(r[issueItemCol] || '').trim())
+        .map((r) => {
+          const model = String(r[modelCol]).toUpperCase().trim();
+          const build = buildCol ? String(r[buildCol] || '').trim() : '';
+          const buildConfig = cfgCol ? String(r[cfgCol] || '').trim() : '';
+          const nmbStatus = nmbStCol ? normStatus(r[nmbStCol]) : 'Open';
+          const provided = { model, issueItem: String(r[issueItemCol]).trim() };
+          if (locCol) {
+            const location = String(r[locCol] || '').trim();
+            if (location) provided.location = location;
+          }
+          if (dateCol) {
+            const date = String(r[dateCol] || '').replace(/^B1/, '').trim();
+            if (date) provided.feedbackDate = date;
+          }
+          if (facaCol) provided.facaNo = String(r[facaCol] || '').trim();
+          if (sevCol) {
+            const severity = String(r[sevCol] || '').trim();
+            if (severity) provided.severity = severity;
+          }
+          if (dcCol) provided.dateCode = String(r[dcCol] || '').trim();
+          if (buildCol) provided.build = build || 'NPI';
+          if (cfgCol) provided.buildConfig = buildConfig || build || 'EVT';
+          if (buildCol || cfgCol) provided.phase = inferPhaseFromConfig(build || 'NPI', buildConfig || build);
+          if (issueCatCol) {
+            const issueCategory = String(r[issueCatCol] || '').trim();
+            if (issueCategory) provided.issueCategory = issueCategory;
+          }
+          if (qtyCol) {
+            provided.ngQty = Math.max(1, Number(String(r[qtyCol] || '1').replace(/[^0-9]/g, '')) || 1);
+          }
+          if (rtvCol) provided.rtvDate = String(r[rtvCol] || '').trim();
+          if (catCol) {
+            const category = String(r[catCol] || '').trim();
+            if (category) provided.category = category;
+          }
+          if (nmbStCol) provided.nmbStatus = nmbStatus;
+          if (custStCol) provided.customerStatus = normStatus(r[custStCol]);
+          if (remarkCol) provided.remark = String(r[remarkCol] || '').trim();
+
+          const fileSteps = {};
+          stepCols.forEach(({ key, col }) => {
+            if (!col) return;
+            const status = stepStatus(r[col]);
+            if (status) fileSteps[key] = status;
+          });
+          const defaultStep = nmbStatus === 'Closed' ? 'Closed' : 'Open';
+
+          return {
+            matchKey: `${model}|${normKey(provided.issueItem)}`,
+            provided,
+            fileSteps,
+            addRecord: {
+              location: provided.location || 'QSMC',
+              feedbackDate: provided.feedbackDate || todayIso(),
+              facaNo: provided.facaNo || '',
+              severity: provided.severity || 'Major',
+              model,
+              familyGroup: inferFamilyFromModel(model),
+              dateCode: provided.dateCode || '',
+              build: provided.build || 'NPI',
+              phase: provided.phase || (provided.build === 'MP' ? 'MP' : 'EVT'),
+              buildConfig: provided.buildConfig || provided.phase || 'EVT',
+              side: model === 'X3784' || model === 'X2977' ? 'Single' : 'RHS & LHS',
+              issueCategory: provided.issueCategory || 'Function',
+              issueItem: provided.issueItem,
+              ngQty: provided.ngQty || 1,
+              rtvDate: provided.rtvDate || '',
+              category: provided.category || 'Feedback',
+              eightD: EIGHT_D_STEPS.reduce(
+                (acc, step) => ({ ...acc, [step.key]: fileSteps[step.key] || defaultStep }),
+                {}
+              ),
+              nmbStatus,
+              customerStatus: provided.customerStatus || 'Open',
+              remark: provided.remark || ''
+            }
+          };
+        });
+
+      if (parsed.length === 0) {
+        showToast('No valid feedback entries parsed from file.', 'warning');
+        return;
+      }
+
+      const seenKeys = new Set();
+      const matchedIds = new Set();
+      const adds = [];
+      const updates = [];
+      let unchangedCount = 0;
+      let duplicateCount = 0;
+
+      const sameValue = (a, b) => {
+        if (a && b && typeof a === 'object' && typeof b === 'object') {
+          return JSON.stringify(a) === JSON.stringify(b);
+        }
+        if (typeof a === 'number' || typeof b === 'number') return Number(a) === Number(b);
+        return String(a === undefined || a === null ? '' : a) === String(b === undefined || b === null ? '' : b);
+      };
+
+      const fieldLabels = {
+        model: 'model',
+        location: 'location',
+        feedbackDate: 'date',
+        facaNo: 'FACA',
+        severity: 'severity',
+        dateCode: 'date code',
+        build: 'build',
+        buildConfig: 'build config',
+        phase: 'phase',
+        issueCategory: 'issue category',
+        issueItem: 'issue item',
+        ngQty: 'NG qty',
+        rtvDate: 'RTV date',
+        category: 'category',
+        nmbStatus: 'NMB status',
+        customerStatus: 'customer status',
+        remark: 'remark',
+        eightD: '8D steps'
+      };
+
+      parsed.forEach((row) => {
+        // Match order: FACA number, then model + issue + date, then a single
+        // model + issue candidate. Ambiguous rows fall through to "add".
+        let match = null;
+        if (row.provided.facaNo) {
+          const facaKey = normKey(row.provided.facaNo);
+          match = customerFeedback.find((c) => normKey(c.facaNo) === facaKey) || null;
+        }
+        if (!match && row.provided.feedbackDate) {
+          const dateKey = normKey(row.provided.feedbackDate);
+          match =
+            customerFeedback.find(
+              (c) =>
+                `${String(c.model || '').toUpperCase()}|${normKey(c.issueItem)}` === row.matchKey &&
+                normKey(c.feedbackDate) === dateKey
+            ) || null;
+        }
+        if (!match) {
+          const candidates = customerFeedback.filter(
+            (c) => `${String(c.model || '').toUpperCase()}|${normKey(c.issueItem)}` === row.matchKey
+          );
+          if (candidates.length === 1) match = candidates[0];
+        }
+
+        const dedupeKey = match ? `id:${match.id}` : row.matchKey;
+        if (seenKeys.has(dedupeKey)) {
+          duplicateCount += 1;
+          return;
+        }
+        seenKeys.add(dedupeKey);
+
+        if (match) {
+          matchedIds.add(match.id);
+          const fields = { ...row.provided };
+          if (Object.keys(row.fileSteps).length > 0) {
+            fields.eightD = { ...(match.eightD || {}), ...row.fileSteps };
+          }
+          const changed = Object.keys(fields).filter((key) => !sameValue(match[key], fields[key]));
+          if (changed.length === 0) {
+            unchangedCount += 1;
+            return;
+          }
+          updates.push({
+            id: match.id,
+            label: `${match.id} · ${match.model} · ${match.issueItem}`,
+            fields,
+            changed: changed.map((key) => fieldLabels[key] || key)
+          });
+          return;
+        }
+        adds.push(row.addRecord);
+      });
+
+      setFeedbackImportDraft({
+        kind: 'feedback',
+        fileName: file.name,
+        adds,
+        updates,
+        keptIds: Array.from(matchedIds),
+        removed: customerFeedback.filter((c) => !matchedIds.has(c.id)),
+        unchangedCount,
+        duplicateCount
+      });
+    } catch (err) {
+      showToast(err?.message || 'Failed to parse customer feedback file.', 'warning');
+    }
+  };
+
+  const handleConfirmFeedbackImport = (mode) => {
+    const draft = feedbackImportDraft;
+    if (!draft) return;
+    setCustomerFeedback((prev) => {
+      const fieldsById = new Map(draft.updates.map((u) => [u.id, u.fields]));
+      const keptIds = new Set(draft.keptIds || []);
+      const withUpdates = (item) =>
+        fieldsById.has(item.id) ? { ...item, ...fieldsById.get(item.id) } : item;
+      const updated = prev.map(withUpdates);
+      const buildRecord = (record, used) => {
+        const id = nextId('CF-26-', used);
+        return { ...record, id, no: caseNoFromId(id) };
+      };
+      // Numbers stay monotonic across a replace: ids of dropped rows are not
+      // handed to the new ones.
+      const addRecords = (used) => {
+        let pool = used.slice();
+        return draft.adds.map((record) => {
+          const next = buildRecord(record, pool);
+          pool = [next, ...pool];
+          return next;
+        });
+      };
+      if (mode === 'replace') {
+        // Every row the file matched is kept, even when no field changed.
+        const kept = updated.filter((item) => keptIds.has(item.id));
+        return [...addRecords(prev), ...kept];
+      }
+      return [...addRecords(updated), ...updated];
+    });
+    setFeedbackImportDraft(null);
+    showToast(
+      mode === 'replace'
+        ? `Replaced feedback cases from ${draft.fileName}: ${draft.adds.length} added, ${draft.updates.length} updated, ${draft.removed.length} removed`
+        : `Merged ${draft.adds.length} new · ${draft.updates.length} updated feedback cases from ${draft.fileName}`
+    );
+  };
+
+  const handleToggleCriterion = (projectId, lineKeysInput, gateId, criterionId) => {
+    const targetKeys = Array.isArray(lineKeysInput) ? lineKeysInput : [lineKeysInput];
+    setGateRecords((prev) => {
+      const projLines = prev[projectId] || {};
+      const primaryKey = targetKeys[0];
+      const primaryCriteria = projLines[primaryKey]?.[gateId]?.criteria || [];
+      const critIdx = primaryCriteria.findIndex((c) => c.id === criterionId);
+      if (critIdx < 0) return prev;
+      const nextChecked = !primaryCriteria[critIdx].checked;
+
+      const updatedProjLines = { ...projLines };
+      targetKeys.forEach((k) => {
+        const gate = updatedProjLines[k]?.[gateId];
+        if (!gate || gate.status === 'Approved') return;
+        updatedProjLines[k] = {
+          ...updatedProjLines[k],
+          [gateId]: {
+            ...gate,
+            criteria: gate.criteria.map((c, idx) =>
+              idx === critIdx ? { ...c, checked: nextChecked } : c
+            )
+          }
+        };
+      });
+
+      return { ...prev, [projectId]: updatedProjLines };
+    });
+  };
+
+  const handleSubmitApproverDecision = (
+    projectId,
+    lineKeysInput,
+    gateId,
+    approverIdx,
+    decision,
+    remark,
+    signerEmail
+  ) => {
+    const targetKeys = Array.isArray(lineKeysInput) ? lineKeysInput : [lineKeysInput];
+    // Identity comes from the signed-in Google session, never a typed name.
+    const signer = String(signerEmail || '').trim();
+    if (!signer) {
+      showToast(
+        'Your Google identity is unavailable, so this sign-off was not recorded. Reload and grant access, then retry.',
+        'error'
+      );
+      return;
+    }
+    const isMulti = targetKeys.length > 1;
+    const stamp = `Today ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+    setGateRecords((prev) => {
+      const updatedProjLines = { ...prev[projectId] };
+
+      targetKeys.forEach((k) => {
+        const gate = updatedProjLines[k]?.[gateId];
+        if (!gate || gate.status === 'Approved') return;
+        const targetApprover = gate.approvers[approverIdx];
+        const resolvedName = signer;
+        const nextApprovers = gate.approvers.map((a, idx) =>
+          idx === approverIdx
+            ? { ...a, name: resolvedName, decision, remark, updatedAt: stamp }
+            : a
+        );
+
+        const hasRejected = nextApprovers.some((a) => a.decision === 'Rejected');
+        const hasConditional = nextApprovers.some((a) => a.decision === 'Conditional');
+
+        let nextStatus = 'In Review';
+        if (hasRejected) nextStatus = 'Blocked';
+        else if (hasConditional) nextStatus = 'Conditional';
+
+        const logEntry = {
+          actor: `${resolvedName} (${targetApprover.role})`,
+          action: `${k} · Signed: ${decision}${isMulti ? ` (Multi-Config: ${targetKeys.length} lines)` : ''}`,
+          time: stamp,
+          note: remark || 'No additional remarks.'
+        };
+
+        updatedProjLines[k] = {
+          ...updatedProjLines[k],
+          [gateId]: {
+            ...gate,
+            status: nextStatus,
+            approvers: nextApprovers,
+            auditLog: [logEntry, ...gate.auditLog]
+          }
+        };
+      });
+
+      return { ...prev, [projectId]: updatedProjLines };
+    });
+
+    setSignOffModal(null);
+    showToast(
+      isMulti
+        ? `Recorded ${decision} across ${targetKeys.length} selected lines (${targetKeys.join(', ')})`
+        : `Recorded ${decision} for ${targetKeys[0]}`,
+      decision === 'Rejected' ? 'warning' : 'success'
+    );
+  };
+
+  // Append a Google Drive evidence link to one or more gate dossiers.
+  const handleAddGateEvidence = (projectId, lineKeysInput, gateId, evidenceInput) => {
+    const targetKeys = Array.isArray(lineKeysInput) ? lineKeysInput : [lineKeysInput];
+    const label = (evidenceInput?.label || '').trim();
+    const url = (evidenceInput?.url || '').trim();
+    if (!label || !url) return;
+
+    const stamp = `Today ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    const actor = evidenceInput?.addedBy || 'PEN-81-0002 Gate Board';
+
+    setGateRecords((prev) => {
+      const updatedProjLines = { ...prev[projectId] };
+      targetKeys.forEach((k, idx) => {
+        const gate = updatedProjLines[k]?.[gateId];
+        if (!gate) return;
+        const entry = {
+          id: `${projectId}-${k}-${gateId}-ev-${Date.now()}-${idx}`,
+          label,
+          url,
+          addedBy: actor,
+          addedAt: stamp
+        };
+        updatedProjLines[k] = {
+          ...updatedProjLines[k],
+          [gateId]: {
+            ...gate,
+            evidence: [entry, ...(Array.isArray(gate.evidence) ? gate.evidence : [])],
+            auditLog: [
+              {
+                actor,
+                action: `${k} · Evidence linked: ${label}`,
+                time: stamp,
+                note: url
+              },
+              ...gate.auditLog
+            ]
+          }
+        };
+      });
+      return { ...prev, [projectId]: updatedProjLines };
+    });
+
+    showToast(
+      targetKeys.length > 1
+        ? `Evidence saved to ${targetKeys.length} selected lines`
+        : `Evidence saved to ${targetKeys[0]}`,
+      'success'
+    );
+  };
+
+  const handleFinalizeGate = (projectId, lineKeysInput, gateId) => {
+    const proj = projectMap[projectId];
+    const targetKeys = Array.isArray(lineKeysInput) ? lineKeysInput : [lineKeysInput];
+
+    const currentIdx = NPI_GATES.findIndex((g) => g.id === gateId);
+    if (currentIdx > 0) {
+      const prevGate = NPI_GATES[currentIdx - 1];
+      const unreadyPrev = targetKeys.filter(
+        (k) => gateRecords[projectId]?.[k]?.[prevGate.id]?.status !== 'Approved'
+      );
+      if (unreadyPrev.length > 0) {
+        showToast(
+          `Dependency Hold: ${prevGate.code} (${prevGate.short}) must be Approved first on ${unreadyPrev.join(', ')}.`,
+          'warning'
+        );
+        return;
+      }
+    }
+
+    const eligibleKeys = targetKeys.filter((k) => {
+      const gate = gateRecords[projectId]?.[k]?.[gateId];
+      if (!gate || gate.status === 'Approved') return false;
+      const allCriteriaDone = gate.criteria.every((c) => c.checked);
+      const hasRejection = gate.approvers.some((a) => a.decision === 'Rejected');
+      const allSigned = gate.approvers.every(
+        (a) => a.decision === 'Approved' || a.decision === 'Conditional'
+      );
+      return allCriteriaDone && !hasRejection && allSigned;
+    });
+
+    if (eligibleKeys.length === 0) {
+      showToast(
+        'Complete all exit criteria and resolve pending/rejected sign-offs on the selected line(s) first.',
+        'warning'
+      );
+      return;
+    }
+
+    const nextGate = NPI_GATES[currentIdx + 1];
+    const stamp = `Today ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+    setGateRecords((prev) => {
+      const updatedProjLines = { ...prev[projectId] };
+
+      eligibleKeys.forEach((k) => {
+        const lineObj = { ...updatedProjLines[k] };
+        lineObj[gateId] = {
+          ...lineObj[gateId],
+          status: 'Approved',
+          auditLog: [
+            {
+              actor: 'PEN-81-0002 Gate Board',
+              action: `${k} · Gate ${gateMap[gateId].code} (${gateMap[gateId].short}) Approved & Locked`,
+              time: stamp,
+              note: nextGate
+                ? `Unlocked ${nextGate.code} (${nextGate.short}) for ${k}.`
+                : `All 9 NPI gates completed for ${k}.`
+            },
+            ...lineObj[gateId].auditLog
+          ]
+        };
+
+        if (nextGate && lineObj[nextGate.id].status === 'Pending') {
+          lineObj[nextGate.id] = { ...lineObj[nextGate.id], status: 'In Review' };
+        }
+        updatedProjLines[k] = lineObj;
+      });
+
+      if (nextGate) {
+        const allLinesCleared = getLineVariantsForProject(proj).every(
+          (v) => updatedProjLines[v.key]?.[gateId]?.status === 'Approved'
+        );
+        if (allLinesCleared) {
+          setProjects((pPrev) =>
+            pPrev.map((p) =>
+              p.id === projectId ? { ...p, currentGateId: nextGate.id, status: 'On Track' } : p
+            )
+          );
+          setSelectedGateId(nextGate.id);
+        }
+      }
+
+      return { ...prev, [projectId]: updatedProjLines };
+    });
+
+    showToast(
+      `Approved ${gateMap[gateId].code} (${gateMap[gateId].short}) for ${eligibleKeys.join(', ')}!`
+    );
+  };
+
+  const navigateToGate = (projectId, gateId, lineKey = null) => {
+    const proj = projectMap[projectId] || projects[0];
+    const defaultLine = lineKey || getLineVariantsForProject(proj)[0]?.key || 'ME11-RHS';
+    setSelectedProjectId(projectId);
+    setSelectedLineKey(defaultLine);
+    setSelectedLineKeys([defaultLine]);
+    setSelectedGateId(gateId);
+    setActiveView('gates');
+    setMobileMenuOpen(false);
+  };
+
+  const navItems = [
+    { id: 'overview', label: 'Program Overview', icon: LayoutDashboard },
+    { id: 'projects', label: 'NPI Projects & Matrix', icon: FolderKanban },
+    { id: 'timeline', label: 'Build Timeline (Gantt)', icon: Calendar },
+    { id: 'tasks', label: 'Tasks & AIL', icon: CheckSquare, badge: globalStats.openTasks },
+    { id: 'gates', label: 'NPI Gate Sign-Off', icon: ShieldCheck, badge: globalStats.pendingSignOffs },
+    { id: 'cpk', label: 'Cpk & Master Specs', icon: BarChart3 },
+    { id: 'costs', label: 'Projects & Cost Saving', icon: DollarSign, badge: scopedCostProjects.length },
+    {
+      id: 'feedback',
+      label: 'Customer Feedback',
+      icon: MessageSquareWarning,
+      badge: scopedCustomerFeedback.filter(
+        (c) => c.nmbStatus === 'Open' || c.customerStatus === 'Open'
+      ).length
+    },
+    { id: 'production', label: 'Production Records', icon: Database }
+  ];
+
+  const viewTitles = {
+    overview: 'FFM Program Overview & Gate Dependency Matrix',
+    projects: 'NPI Projects & Multi-Vendor Split Build Matrix',
+    timeline: 'NPI Build Timeline & Milestone Gantt',
+    tasks: 'FDB Fan Assembly Tasks & AIL (Action Item List)',
+    gates: 'NPI Gate Pass Sign-Off Center (PEN-81-0002 Rev B)',
+    cpk: 'Process Capability (Cpk) & Master Specifications',
+    costs: 'FFM Projects & Cost Saving Portfolio (VA/VE · Yield · HC)',
+    feedback: 'FFM Customer Feedback, FA & 8D FACA Tracker (Y2026)',
+    production: 'Production Records (Yield, UPH & Efficiency)'
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 flex font-sans antialiased">
+      {/* Mobile Backdrop */}
+      {mobileMenuOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-slate-950/50 lg:hidden"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* High-Contrast Collapsible Left Sidebar with Hamburger */}
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 bg-slate-950 dark:bg-slate-900 text-slate-200 dark:text-slate-200 border-r border-slate-800 flex flex-col transition-all duration-200 lg:static ${
+          sidebarCollapsed ? 'w-[74px]' : 'w-64'
+        } ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
+      >
+        <div className="h-14 px-3.5 border-b border-slate-800/90 flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={handleToggleSidebar}
+              aria-label="Toggle Navigation Sidebar"
+              className="p-2 rounded-lg text-slate-300 dark:text-slate-300 hover:text-white hover:bg-slate-800/90 transition-colors shrink-0"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+            {!sidebarCollapsed && (
+              <div className="min-w-0">
+                <div className="text-xs font-bold tracking-wider uppercase text-white truncate">
+                  FFM NPI Ops
+                </div>
+                <div className="text-[10px] text-slate-400 dark:text-slate-400 truncate">FDB Fan Assembly · BPI</div>
+              </div>
+            )}
+          </div>
+          {mobileMenuOpen && (
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(false)}
+              className="lg:hidden p-1.5 rounded-lg text-slate-400 dark:text-slate-400 hover:text-white"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Primary Navigation */}
+        <nav className="flex-1 px-2.5 py-4 space-y-1 overflow-y-auto">
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const active = activeView === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  setActiveView(item.id);
+                  setMobileMenuOpen(false);
+                }}
+                title={sidebarCollapsed ? item.label : undefined}
+                className={`w-full flex items-center justify-between gap-2.5 px-3 py-2.5 rounded-lg text-xs font-medium transition-colors ${
+                  active
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-slate-300 dark:text-slate-300 hover:bg-slate-900 dark:hover:bg-slate-700 hover:text-white'
+                }`}
+              >
+                <span className="flex items-center gap-3 min-w-0">
+                  <Icon className="w-4 h-4 shrink-0" />
+                  {!sidebarCollapsed && <span className="truncate">{item.label}</span>}
+                </span>
+                {!sidebarCollapsed && typeof item.badge === 'number' && (
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold tabular-nums ${
+                      active ? 'bg-blue-500 text-white' : 'bg-slate-800 dark:bg-slate-600 text-slate-300 dark:text-slate-300'
+                    }`}
+                  >
+                    {item.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+
+          {!sidebarCollapsed && (
+            <div className="pt-5 mt-5 border-t border-slate-800/80 space-y-1.5">
+              <div className="px-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Active EVT Programs
+              </div>
+              {projects.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => navigateToGate(p.id, p.currentGateId)}
+                  className="w-full px-3 py-2 rounded-lg text-left hover:bg-slate-900 dark:hover:bg-slate-700 transition-colors flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-slate-200 dark:text-slate-200 truncate">
+                      {p.model} · {p.phase}
+                    </div>
+                    <div className="text-[10px] text-slate-400 dark:text-slate-400 truncate">
+                      Next: {gateMap[p.currentGateId]?.short}
+                    </div>
+                  </div>
+                  <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      p.status === 'At Risk' ? 'bg-rose-500' : 'bg-emerald-500'
+                    }`}
+                  />
+                </button>
+              ))}
+            </div>
+          )}
+        </nav>
+
+        {!sidebarCollapsed && (
+          <div className="p-3.5 border-t border-slate-800/90 bg-slate-900/60 text-[11px] space-y-1.5">
+            <div className="font-semibold text-slate-300 dark:text-slate-300">FFM NPI Target Floors</div>
+            <div className="flex justify-between text-slate-400 dark:text-slate-400 tabular-nums">
+              <span>EVT FPY &gt; 95.0%</span>
+              <span>FY &gt; 98.5%</span>
+            </div>
+            <div className="flex justify-between text-slate-400 dark:text-slate-400 tabular-nums">
+              <span>Line EFF &gt; 90%</span>
+              <span>MIH 100%</span>
+            </div>
+            <div className="pt-2 mt-2 border-t border-slate-800 space-y-1.5">
+              <div className="flex items-center justify-between text-[10px] text-slate-400 dark:text-slate-400">
+                <span className="inline-flex items-center gap-1 font-semibold text-slate-300 dark:text-slate-300">
+                  <Cloud className="w-3 h-3 text-emerald-400 dark:text-emerald-400" />
+                  Sheets DB
+                </span>
+                <a
+                  href={cloudSync.sheetUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-0.5 text-sky-400 dark:text-sky-400 hover:text-sky-300 dark:hover:text-sky-300"
+                >
+                  Open Sheet <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+              </div>
+              {cloudSync.userEmail && (
+                <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate" title={cloudSync.userEmail}>
+                  {cloudSync.userEmail}
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-1.5 pt-1">
+                <button
+                  type="button"
+                  onClick={handleExportWorkspaceJson}
+                  className="px-2 py-1 rounded bg-slate-800 dark:bg-slate-600 hover:bg-slate-700 text-slate-300 dark:text-slate-300 text-[10px] font-medium inline-flex items-center justify-center gap-1"
+                >
+                  <Download className="w-3 h-3" /> Backup
+                </button>
+                <button
+                  type="button"
+                  onClick={() => restoreInputRef.current?.click()}
+                  className="px-2 py-1 rounded bg-slate-800 dark:bg-slate-600 hover:bg-slate-700 text-slate-300 dark:text-slate-300 text-[10px] font-medium inline-flex items-center justify-center gap-1"
+                >
+                  <Upload className="w-3 h-3" /> Restore
+                </button>
+                <input
+                  ref={restoreInputRef}
+                  type="file"
+                  accept=".json"
+                  onChange={handleImportWorkspaceJson}
+                  className="hidden"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </aside>
+
+      {/* Main Content Workspace */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Top Action Bar + Interactive Global Scope Filter */}
+        <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-20 shrink-0">
+          <div className="h-14 px-4 lg:px-6 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={handleToggleSidebar}
+                aria-label="Toggle Navigation"
+                className="p-2 rounded-lg text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 dark:dark:hover:bg-slate-600 hover:text-slate-900 dark:hover:text-slate-100 transition-colors shrink-0"
+              >
+                <Menu className="w-5 h-5" />
+              </button>
+              <div className="min-w-0">
+                <h1 className="text-sm lg:text-base font-bold text-slate-900 dark:text-slate-100 truncate">
+                  {viewTitles[activeView]}
+                </h1>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 text-[11px]">
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    cloudSync.status === 'synced'
+                      ? 'bg-emerald-500'
+                      : cloudSync.status === 'saving' || cloudSync.status === 'loading'
+                      ? 'bg-amber-500 animate-pulse'
+                      : cloudSync.status === 'error'
+                      ? 'bg-rose-500'
+                      : 'bg-slate-400'
+                  }`}
+                />
+                <span className="font-medium text-slate-700 dark:text-slate-300 tabular-nums">
+                  {cloudSync.status === 'synced' && `Sheet Synced · Rev #${cloudSync.revision}`}
+                  {cloudSync.status === 'saving' && 'Saving to Sheet...'}
+                  {cloudSync.status === 'loading' && 'Loading Sheet...'}
+                  {cloudSync.status === 'error' && 'Sync Error'}
+                  {cloudSync.status === 'local' && 'Local Mode'}
+                </span>
+                {isGasEnv && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => pushToGoogleSheet('Manual sync from header', { toast: true, refreshMirrors: true })}
+                      disabled={cloudSync.status === 'saving' || cloudSync.status === 'loading'}
+                      title="Save now to Google Sheet"
+                      className="ml-1 px-1.5 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold disabled:opacity-50"
+                    >
+                      Sync
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => loadFromGoogleSheet(true)}
+                      disabled={cloudSync.status === 'saving' || cloudSync.status === 'loading'}
+                      title="Reload latest data from Google Sheet"
+                      className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 disabled:opacity-50"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                    </button>
+                  </>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={toggleTheme}
+                title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+                aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+                className="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors"
+              >
+                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              </button>
+              <button
+                type="button"
+                onClick={() => setNewTaskModalOpen(true)}
+                className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 inline-flex items-center gap-1.5 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">New Task</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setNewProjectModalOpen(true)}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">New Program</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Global Dependency Filter Bar: Family -> Model -> Phase -> Side -> Process */}
+          <div className="px-4 lg:px-6 py-2 bg-slate-50/90 dark:bg-slate-800/90 border-t border-slate-200/80 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+            <div className="grid w-full grid-cols-2 items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
+              <span className="col-span-2 inline-flex w-full items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 sm:col-auto sm:mr-1 sm:w-auto">
+                <SlidersHorizontal className="w-3.5 h-3.5 text-slate-400 dark:text-slate-400" />
+                <span>Global Scope</span>
+              </span>
+
+              {[
+                {
+                  key: 'family',
+                  label: 'Family',
+                  ariaLabel: 'Global Family Filter',
+                  value: globalFamily,
+                  options: availableFamilies,
+                  allLabel: 'All Families',
+                  onChange: handleGlobalFamilyChange
+                },
+                {
+                  key: 'model',
+                  label: 'Model',
+                  ariaLabel: 'Global Model Filter',
+                  value: globalModel,
+                  options: availableModels,
+                  allLabel: 'All Models',
+                  onChange: handleGlobalModelChange
+                },
+                {
+                  key: 'phase',
+                  label: 'Phase',
+                  ariaLabel: 'Global Phase Filter',
+                  value: globalPhase,
+                  options: availablePhases,
+                  allLabel: 'All Phases',
+                  onChange: handleGlobalPhaseChange
+                },
+                {
+                  key: 'side',
+                  label: 'Side',
+                  ariaLabel: 'Global Side Filter',
+                  value: globalSide,
+                  options: availableSides,
+                  allLabel: 'All Sides',
+                  onChange: handleGlobalSideChange
+                },
+                {
+                  key: 'process',
+                  label: 'Process',
+                  ariaLabel: 'Global Process Filter',
+                  value: globalProcess,
+                  options: availableProcesses,
+                  allLabel: 'All Processes',
+                  onChange: setGlobalProcess,
+                  fullWidthOnMobile: true
+                }
+              ].map((filter) => (
+                <React.Fragment key={filter.key}>
+                  {filter.key !== 'family' && (
+                    <ChevronRight className="hidden 2xl:block w-3.5 h-3.5 text-slate-300 dark:text-slate-600" />
+                  )}
+                  <ScopeFilterSelect
+                    label={filter.label}
+                    ariaLabel={filter.ariaLabel}
+                    value={filter.value}
+                    options={filter.options}
+                    allLabel={filter.allLabel}
+                    onChange={filter.onChange}
+                    fullWidthOnMobile={Boolean(filter.fullWidthOnMobile)}
+                  />
+                </React.Fragment>
+              ))}
+
+              {isGlobalFilterActive && (
+                <button
+                  type="button"
+                  onClick={handleResetGlobalFilters}
+                  className="col-span-2 inline-flex w-full items-center justify-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950 border border-rose-200 dark:border-rose-800 hover:bg-rose-100 dark:hover:bg-rose-900 transition-colors sm:col-auto sm:w-auto sm:justify-start"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Reset</span>
+                </button>
+              )}
+            </div>
+
+            <div className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums flex items-center gap-3">
+              <span>
+                NPI Scope: <strong className="text-slate-800 dark:text-slate-200">{scopedProjects.length}</strong> prog ·{' '}
+                <strong className="text-slate-800 dark:text-slate-200">{globalStats.activeLineCount}</strong> lines
+              </span>
+              <span className="text-slate-300 dark:text-slate-300">|</span>
+              <span>
+                Prod Records: <strong className="text-slate-800 dark:text-slate-200">{scopedProductionRecords.length}</strong> rows
+              </span>
+            </div>
+          </div>
+        </header>
+
+        {/* Main Scroll Surface */}
+        <main className="flex-1 p-4 lg:p-6 max-w-[1600px] w-full mx-auto space-y-6">
+          {(() => {
+            switch (activeView) {
+              case 'overview':
+                return (
+                  <OverviewView
+                    projects={scopedProjects}
+                    records={scopedProductionRecords}
+                    tasks={scopedTasks}
+                    gateRecords={gateRecords}
+                    masterSpecs={masterSpecs}
+                    cpkRecords={scopedCpkRecords}
+                    costProjects={costProjects}
+                    customerFeedback={customerFeedback}
+                    lastUploadBatch={lastUploadBatch}
+                    globalSide={globalSide}
+                    onOpenKpiDrilldown={setKpiDrilldown}
+                    onOpenGate={navigateToGate}
+                    onOpenCpkChart={(rec) => setActiveCpkChartRecord(rec)}
+                    onOpenCpkImport={() => setCpkImportModalOpen(true)}
+                    onSelectTask={(id) => setActiveTaskDrawerId(id)}
+                    onSwitchView={setActiveView}
+                  />
+                );
+              case 'projects':
+                return (
+                  <ProjectsMatrixView
+                    projects={scopedProjects}
+                    globalSide={globalSide}
+                    onOpenGate={navigateToGate}
+                    onAddMatrixRow={(project) =>
+                      setMatrixModalState({ project, row: null })
+                    }
+                    onEditMatrixRow={(project, row) =>
+                      setMatrixModalState({ project, row })
+                    }
+                    onDeleteMatrixRow={(project, row) =>
+                      setDeletingMatrixRow({ project, row })
+                    }
+                  />
+                );
+              case 'timeline':
+                return (
+                  <BuildTimelineGanttView
+                    projects={scopedProjects}
+                    gateRecords={gateRecords}
+                    globalSide={globalSide}
+                    scheduleOverrides={scheduleOverrides}
+                    onOpenGate={navigateToGate}
+                    onEditSchedule={(target) => setEditingScheduleTarget(target)}
+                  />
+                );
+              case 'tasks':
+                return (
+                  <TasksManagerView
+                    tasks={scopedTasks}
+                    onSelectTask={(id) => setActiveTaskDrawerId(id)}
+                    onUpdateTaskStatus={handleUpdateTaskStatus}
+                    onOpenNewTask={() => setNewTaskModalOpen(true)}
+                  />
+                );
+              case 'gates':
+                return (
+                  <GateSignOffView
+                    projects={scopedProjects.length > 0 ? scopedProjects : projects}
+                    selectedProject={
+                      scopedProjects.find((p) => p.id === selectedProject.id) ||
+                      scopedProjects[0] ||
+                      selectedProject
+                    }
+                    onSelectProject={(id) => {
+                      setSelectedProjectId(id);
+                      const p = projects.find((x) => x.id === id);
+                      if (p) {
+                        const variants = getLineVariantsForProject(p).filter(
+                          (v) => globalSide === 'ALL' || v.side === globalSide
+                        );
+                        const firstLine = variants[0]?.key || getLineVariantsForProject(p)[0]?.key || 'ME11-RHS';
+                        setSelectedGateId(p.currentGateId);
+                        setSelectedLineKey(firstLine);
+                        setSelectedLineKeys([firstLine]);
+                      }
+                    }}
+                    globalSide={globalSide}
+                    selectedLineKey={selectedLineKey}
+                    selectedLineKeys={selectedLineKeys}
+                    onUpdateSelectedLines={(keys, primaryKey) => {
+                      setSelectedLineKeys(keys);
+                      if (primaryKey) setSelectedLineKey(primaryKey);
+                    }}
+                    selectedGateId={selectedGateId}
+                    onSelectGate={setSelectedGateId}
+                    gateRecords={gateRecords}
+                    tasks={tasks}
+                    onOpenGate={navigateToGate}
+                    onToggleCriterion={handleToggleCriterion}
+                    onOpenSignOffModal={(approverIdx, targetKeys) =>
+                      setSignOffModal({
+                        projectId: (
+                          scopedProjects.find((p) => p.id === selectedProject.id) ||
+                          scopedProjects[0] ||
+                          selectedProject
+                        ).id,
+                        lineKeys: targetKeys,
+                        gateId: selectedGateId,
+                        approverIndex: approverIdx
+                      })
+                    }
+                    onFinalizeGate={handleFinalizeGate}
+                    onAddEvidence={handleAddGateEvidence}
+                    onSelectTask={(id) => setActiveTaskDrawerId(id)}
+                  />
+                );
+              case 'cpk':
+                return (
+                  <CpkMasterSpecsView
+                    masterSpecs={masterSpecs}
+                    cpkRecords={scopedCpkRecords}
+                    uploadHistory={cpkUploadHistory}
+                    lastUploadBatch={lastUploadBatch}
+                    onOpenCpkChart={(rec) => setActiveCpkChartRecord(rec)}
+                    onOpenCpkImport={() => setCpkImportModalOpen(true)}
+                    onGenerateFfmSpecs={handleGenerateFfmMasterSpecs}
+                    onOpenNewSpec={() => setNewMasterSpecModalOpen(true)}
+                    onEditSpec={(spec) => setEditingMasterSpec(spec)}
+                    onDeleteSpec={handleDeleteMasterSpec}
+                  />
+                );
+              case 'costs':
+                return (
+                  <CostSavingView
+                    items={scopedCostProjects}
+                    allItemsCount={costProjects.length}
+                    onOpenNew={() => setNewCostModalOpen(true)}
+                    onEdit={(item) => setEditingCostProject(item)}
+                    onDelete={(item) => setDeletingCostProject(item)}
+                    onUpdateStage={handleUpdateCostStage}
+                    onUpdateFeasibility={handleUpdateCostFeasibility}
+                    onImportFile={handleImportCostCsv}
+                  />
+                );
+              case 'feedback':
+                return (
+                  <CustomerFeedbackView
+                    items={scopedCustomerFeedback}
+                    onOpenNew={() => setNewFeedbackModalOpen(true)}
+                    onEdit={(item) => setEditingFeedback(item)}
+                    onDelete={(item) => setDeletingFeedback(item)}
+                    onToggle8D={handleToggleFeedback8D}
+                    onUpdateStatus={handleUpdateFeedbackStatus}
+                    onImportFile={handleImportFeedbackCsv}
+                  />
+                );
+              case 'production':
+                return (
+                  <ProductionRecordsView
+                    records={scopedProductionRecords}
+                    onOpenNewRecord={() => setNewProdRecordModalOpen(true)}
+                    onEditRecord={(rec) => setEditingProdRecord(rec)}
+                    onDeleteRecord={(rec) => setDeletingProdRecord(rec)}
+                  />
+                );
+              default:
+                return null;
+            }
+          })()}
+        </main>
+      </div>
+
+      {/* Task Detail Slide-Over Drawer */}
+      {activeDrawerTask && (
+        <TaskDetailDrawer
+          task={activeDrawerTask}
+          project={projectMap[activeDrawerTask.projectId]}
+          gate={gateMap[activeDrawerTask.gateId]}
+          onClose={() => setActiveTaskDrawerId(null)}
+          onUpdateStatus={(st) => handleUpdateTaskStatus(activeDrawerTask.id, st)}
+          onUpdateCategory={(category) => handleUpdateTaskCategory(activeDrawerTask.id, category)}
+          onAddNote={(txt) => handleAddTaskNote(activeDrawerTask.id, txt)}
+          onJumpToGate={() => {
+            const pid = activeDrawerTask.projectId;
+            const gid = activeDrawerTask.gateId;
+            setActiveTaskDrawerId(null);
+            navigateToGate(pid, gid);
+          }}
+        />
+      )}
+
+      {/* New NPI Program Modal */}
+      {kpiDrilldown && (
+        <KpiDeepDiveModal
+          kpiKey={kpiDrilldown}
+          projects={scopedProjects}
+          records={scopedProductionRecords}
+          gateRecords={gateRecords}
+          globalSide={globalSide}
+          globalScope={{ family: globalFamily, model: globalModel, phase: globalPhase, side: globalSide, process: globalProcess }}
+          costProjects={scopedCostProjects}
+          customerFeedback={scopedCustomerFeedback}
+          onClose={() => setKpiDrilldown(null)}
+        />
+      )}
+
+      {newProjectModalOpen && (
+        <NewProjectModal
+          onClose={() => setNewProjectModalOpen(false)}
+          onSubmit={handleCreateProject}
+        />
+      )}
+
+      {/* New Task Modal */}
+      {newTaskModalOpen && (
+        <NewTaskModal
+          projects={projects}
+          onClose={() => setNewTaskModalOpen(false)}
+          onSubmit={handleCreateTask}
+        />
+      )}
+
+      {/* New / Edit Production Record Modal */}
+      {(newProdRecordModalOpen || editingProdRecord) && (
+        <NewProductionRecordModal
+          initialRecord={editingProdRecord}
+          onClose={() => {
+            setNewProdRecordModalOpen(false);
+            setEditingProdRecord(null);
+          }}
+          onSubmit={(form) => {
+            if (editingProdRecord) {
+              handleUpdateProductionRecord(editingProdRecord.id, form);
+            } else {
+              handleAddProductionRecord(form);
+            }
+          }}
+        />
+      )}
+
+      {/* Delete Production Record Confirmation Modal */}
+      {deletingProdRecord && (
+        <DeleteProductionRecordModal
+          record={deletingProdRecord}
+          onClose={() => setDeletingProdRecord(null)}
+          onConfirm={() => handleDeleteProductionRecord(deletingProdRecord)}
+        />
+      )}
+
+      {/* Build Matrix Row Create / Edit Modal */}
+      {matrixModalState && (
+        <BuildMatrixRowModal
+          project={matrixModalState.project}
+          initialRow={matrixModalState.row}
+          onClose={() => setMatrixModalState(null)}
+          onSubmit={(form) =>
+            handleSaveBuildMatrixRow(
+              matrixModalState.project.id,
+              matrixModalState.row || null,
+              form
+            )
+          }
+        />
+      )}
+
+      {/* Delete Build Matrix Row Confirmation Modal */}
+      {deletingMatrixRow && (
+        <DeleteBuildMatrixRowModal
+          project={deletingMatrixRow.project}
+          row={deletingMatrixRow.row}
+          onClose={() => setDeletingMatrixRow(null)}
+          onConfirm={() =>
+            handleDeleteBuildMatrixRow(
+              deletingMatrixRow.project.id,
+              deletingMatrixRow.row
+            )
+          }
+        />
+      )}
+
+      {/* Edit Gantt Schedule Modal */}
+      {editingScheduleTarget && (
+        <EditScheduleModal
+          target={editingScheduleTarget}
+          onClose={() => setEditingScheduleTarget(null)}
+          onSubmit={(scheduleForm) =>
+            handleSaveScheduleOverride(
+              editingScheduleTarget.project.id,
+              editingScheduleTarget.rowKeys,
+              scheduleForm
+            )
+          }
+        />
+      )}
+
+      {/* Interactive Process Capability (Cpk) Chart Modal */}
+      {activeCpkChartRecord && (
+        <ProcessCapabilityChartModal
+          record={activeCpkChartRecord}
+          spec={masterSpecs.find((s) => s.id === activeCpkChartRecord.specId)}
+          onClose={() => setActiveCpkChartRecord(null)}
+          onUpdateMeasurement={handleUpdateCpkMeasurement}
+          onEditMasterSpec={(spec) => {
+            setActiveCpkChartRecord(null);
+            setEditingMasterSpec(spec);
+          }}
+        />
+      )}
+
+      {/* Create / Edit Master Specification Modal */}
+      {(newMasterSpecModalOpen || editingMasterSpec) && (
+        <MasterSpecModal
+          initialSpec={editingMasterSpec}
+          modelOptions={masterSpecModelOptions}
+          onClose={() => {
+            setNewMasterSpecModalOpen(false);
+            setEditingMasterSpec(null);
+          }}
+          onSubmit={(form) => handleSaveMasterSpec(form, editingMasterSpec?.id || null)}
+        />
+      )}
+
+      {/* Excel / CSV Process Capability Import Pipeline Modal */}
+      {cpkImportModalOpen && (
+        <CpkImportPipelineModal
+          masterSpecs={masterSpecs}
+          defaultModel={globalModel !== 'ALL' ? globalModel : selectedProject?.model || 'X4151'}
+          defaultPhase={globalPhase !== 'ALL' ? globalPhase : 'EVT'}
+          defaultSide={globalSide !== 'ALL' ? globalSide : 'RHS'}
+          onClose={() => setCpkImportModalOpen(false)}
+          onImport={handleImportCpkRecords}
+        />
+      )}
+
+      {/* Create / Edit Cost Saving Project Modal */}
+      {(newCostModalOpen || editingCostProject) && (
+        <CostSavingModal
+          initialItem={editingCostProject}
+          defaultModel={globalModel !== 'ALL' ? globalModel : selectedProject?.model || 'X4151'}
+          defaultFamily={globalFamily !== 'ALL' ? globalFamily : 'MB14"'}
+          defaultPhase={globalPhase !== 'ALL' ? globalPhase : 'EVT'}
+          onClose={() => {
+            setNewCostModalOpen(false);
+            setEditingCostProject(null);
+          }}
+          onSubmit={(form) => handleSaveCostProject(form, editingCostProject?.id || null)}
+        />
+      )}
+
+      {/* Delete Cost Saving Project Confirmation Modal */}
+      {deletingCostProject && (
+        <DeleteCostSavingModal
+          item={deletingCostProject}
+          onClose={() => setDeletingCostProject(null)}
+          onConfirm={() => handleDeleteCostProject(deletingCostProject)}
+        />
+      )}
+
+      {/* Create / Edit Customer Feedback Modal */}
+      {(newFeedbackModalOpen || editingFeedback) && (
+        <CustomerFeedbackModal
+          initialItem={editingFeedback}
+          defaultModel={globalModel !== 'ALL' ? globalModel : 'X3082'}
+          onClose={() => {
+            setNewFeedbackModalOpen(false);
+            setEditingFeedback(null);
+          }}
+          onSubmit={(form) => handleSaveFeedback(form, editingFeedback?.id || null)}
+        />
+      )}
+
+      {/* Delete Customer Feedback Confirmation Modal */}
+      {deletingFeedback && (
+        <DeleteCustomerFeedbackModal
+          item={deletingFeedback}
+          onClose={() => setDeletingFeedback(null)}
+          onConfirm={() => handleDeleteFeedback(deletingFeedback)}
+        />
+      )}
+
+      {/* Cost initiative CSV / Excel import preview (merge or replace) */}
+      {costImportDraft && (
+        <ImportMergePreviewModal
+          kind="cost"
+          fileName={costImportDraft.fileName}
+          summary={{
+            added: costImportDraft.adds.length,
+            updated: costImportDraft.updates.length,
+            removed: costImportDraft.removed.length,
+            unchanged: costImportDraft.unchangedCount,
+            duplicates: costImportDraft.duplicateCount
+          }}
+          samples={[
+            ...costImportDraft.adds.slice(0, 6).map((item) => ({
+              tag: 'Add',
+              primary: item.title,
+              secondary: `${item.model} · ${item.familyGroup} · ${item.stage}`
+            })),
+            ...costImportDraft.updates.slice(0, 6).map((change) => ({
+              tag: 'Update',
+              primary: change.label,
+              secondary: `Changes: ${change.changed.join(', ')}`
+            }))
+          ]}
+          removedSamples={costImportDraft.removed.slice(0, 6).map((item) => `${item.id} · ${item.title}`)}
+          onClose={() => setCostImportDraft(null)}
+          onConfirm={handleConfirmCostImport}
+        />
+      )}
+
+      {/* Customer feedback CSV / Excel import preview (merge or replace) */}
+      {feedbackImportDraft && (
+        <ImportMergePreviewModal
+          kind="feedback"
+          fileName={feedbackImportDraft.fileName}
+          summary={{
+            added: feedbackImportDraft.adds.length,
+            updated: feedbackImportDraft.updates.length,
+            removed: feedbackImportDraft.removed.length,
+            unchanged: feedbackImportDraft.unchangedCount,
+            duplicates: feedbackImportDraft.duplicateCount
+          }}
+          samples={[
+            ...feedbackImportDraft.adds.slice(0, 6).map((item) => ({
+              tag: 'Add',
+              primary: `${item.model} · ${item.issueItem}`,
+              secondary: `${item.location} · ${item.feedbackDate} · ${item.category}`
+            })),
+            ...feedbackImportDraft.updates.slice(0, 6).map((change) => ({
+              tag: 'Update',
+              primary: change.label,
+              secondary: `Changes: ${change.changed.join(', ')}`
+            }))
+          ]}
+          removedSamples={feedbackImportDraft.removed.slice(0, 6).map(
+            (item) => `${item.id} · ${item.model} · ${item.issueItem}`
+          )}
+          onClose={() => setFeedbackImportDraft(null)}
+          onConfirm={handleConfirmFeedbackImport}
+        />
+      )}
+
+      {/* Save conflict: local edits are kept until the user picks a version */}
+      {syncConflict && (
+        <SyncConflictModal
+          revision={syncConflict.revision}
+          remoteMeta={syncConflict.remoteMeta}
+          local={buildWorkspacePayload()}
+          remote={syncConflict.remote}
+          loading={syncConflict.loading}
+          error={syncConflict.error}
+          onKeepLocal={handleConflictKeepLocal}
+          onUseRemote={handleConflictUseRemote}
+        />
+      )}
+
+      {/* Functional Gate Sign-Off Modal */}
+      {signOffModal && (() => {
+        const modalProj = projectMap[signOffModal.projectId];
+        const modalPrimaryKey = signOffModal.lineKeys?.[0];
+        const modalDossier =
+          gateRecords[signOffModal.projectId]?.[modalPrimaryKey]?.[signOffModal.gateId];
+        const modalApprover = modalDossier?.approvers?.[signOffModal.approverIndex];
+        if (!modalProj || !modalApprover) return null;
+        return (
+          <ApproverSignOffModal
+            project={modalProj}
+            selectedLineKeys={signOffModal.lineKeys}
+            allLineVariants={getLineVariantsForProject(modalProj)}
+            gate={gateMap[signOffModal.gateId]}
+            approver={modalApprover}
+            signerEmail={cloudSync.userEmail || ''}
+            onClose={() => setSignOffModal(null)}
+            onSubmit={(decision, remark, targetKeys, signerEmail) =>
+              handleSubmitApproverDecision(
+                signOffModal.projectId,
+                targetKeys,
+                signOffModal.gateId,
+                signOffModal.approverIndex,
+                decision,
+                remark,
+                signerEmail
+              )
+            }
+          />
+        );
+      })()}
+
+      {/* Toast Notification */}
+      {toast && (
+        <div
+          className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-lg border text-xs font-semibold flex items-center gap-2 ${
+            toast.tone === 'warning'
+              ? 'bg-amber-950 text-amber-100 dark:text-amber-100 border-amber-800'
+              : 'bg-slate-900 dark:bg-slate-700 text-white border-slate-700'
+          }`}
+        >
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 dark:text-emerald-400 shrink-0" />
+          <span>{toast.message}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+</script>

@@ -1,0 +1,3592 @@
+<script type="text/babel" data-presets="react">
+// ============================================================================
+// CORE FFM NPI CONSTANTS (PHASE ORDER, SIDE ORDER & 9-GATE WORKSTREAM)
+// ============================================================================
+
+const PHASE_ORDER = ['P1', 'P2', 'EVT', 'DVT', 'PVT', 'MP'];
+const SIDE_ORDER = ['RHS', 'LHS', 'Single'];
+
+const NPI_GATES = [
+  { id: 'prep', code: 'G1', short: 'Preparing', label: 'Preparing (Pre-BBR)' },
+  { id: 'bbr', code: 'G2', short: 'BBR', label: 'Before Build Review (BBR)' },
+  { id: 'brr', code: 'G3', short: 'BRR', label: 'Build Readiness Review (BRR)' },
+  { id: 'mbo', code: 'G4', short: 'MBO & OK2B', label: 'MBO & OK2B Pilot Release' },
+  { id: 'main', code: 'G5', short: 'Main Build', label: 'Main Build Execution' },
+  { id: 'oqc', code: 'G6', short: 'Final Insp.', label: 'Final Inspection (OQC & PPBR)' },
+  { id: 'ship', code: 'G7', short: 'Shipment', label: 'OK2S & ETD Shipment' },
+  { id: 'mih', code: 'G8', short: 'FATP MIH', label: 'FATP Material In-House (MIH)' },
+  { id: 'pbr', code: 'G9', short: 'PBR', label: 'Post Build Review (PBR)' }
+];
+
+// ============================================================================
+// PROJECTS & COST SAVING MODULE (NMB REV3 20261118: DASHBOARD & PROJECTS)
+// ============================================================================
+
+const COST_SAVING_CATEGORIES = [
+  'FDB Sub-Assy Retrofit',
+  'Assembly Automation',
+  'Inspection / AOI Auto',
+  'Accessory / Foam Auto',
+  'Design / Material VA/VE'
+];
+
+const COST_SAVING_STAGES = [
+  'RFP / Studying',
+  'DFM & Quotation',
+  'Pending KZW / NMB Approval',
+  'OK2Tool / Sample Prep',
+  'P/O Issued / Setup',
+  'Completed / Qualified',
+  'Dropped / Over Budget'
+];
+
+const FEASIBILITY_STATUSES = ['Go', 'Pending', 'No-go'];
+
+// NMB Financial Baseline: ~฿56,000 / HC / month (2 shifts incl. OT; ฿25k/HC/shift base) & 30-month ROI cap
+const NMB_HC_MONTHLY_SAVING_THB = 56000;
+const NMB_MAX_ROI_MONTHS = 30;
+const NMB_AUTHORIZED_BUDGET_THB = 34160000;
+const NMB_HC_TARGET = 55;
+
+const INITIAL_COST_PROJECTS = [
+  // MacMini Family (X3784 / X4171)
+  {
+    id: 'CI-01',
+    title: 'Auto Phase 5 #1 (FDB Bearing Sub-Assy)',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'MP',
+    side: 'Single',
+    category: 'FDB Sub-Assy Retrofit',
+    vendor: 'Major',
+    hcReduction: 4,
+    budgetThb: 1140000,
+    quotedCostThb: 358284,
+    feasibility: 'Go',
+    stage: 'OK2Tool / Sample Prep',
+    fyTarget: 'FY2026',
+    owner: 'Kanpitcha',
+    notes: 'Modify pallets/fixtures on common X3439 machine; OK2Tool ongoing.'
+  },
+  {
+    id: 'CI-02',
+    title: 'Auto Assy End Cap to Sleeve (FDB)',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'MP',
+    side: 'Single',
+    category: 'FDB Sub-Assy Retrofit',
+    vendor: 'NMB Internal',
+    hcReduction: 1,
+    budgetThb: 285000,
+    quotedCostThb: 0,
+    feasibility: 'Go',
+    stage: 'OK2Tool / Sample Prep',
+    fyTarget: 'FY2026',
+    owner: 'Kanpitcha',
+    notes: 'Retrofit existing sub-assembly machine; zero external CapEx.'
+  },
+  {
+    id: 'CI-03',
+    title: 'Auto Laser Welding (FDB)',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'MP',
+    side: 'Single',
+    category: 'FDB Sub-Assy Retrofit',
+    vendor: 'NMB Internal',
+    hcReduction: 1,
+    budgetThb: 285000,
+    quotedCostThb: 15200,
+    feasibility: 'Go',
+    stage: 'OK2Tool / Sample Prep',
+    fyTarget: 'FY2026',
+    owner: 'Kanpitcha',
+    notes: 'Retrofit existing laser welding machine; tooling mod ฿15.2k.'
+  },
+  {
+    id: 'CI-04',
+    title: 'Auto Helium Hub/Shaft Joint (FDB)',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'MP',
+    side: 'Single',
+    category: 'FDB Sub-Assy Retrofit',
+    vendor: 'NMB Internal',
+    hcReduction: 1,
+    budgetThb: 285000,
+    quotedCostThb: 48728,
+    feasibility: 'Go',
+    stage: 'OK2Tool / Sample Prep',
+    fyTarget: 'FY2026',
+    owner: 'Kanpitcha',
+    notes: 'Retrofit existing press joint machine for X3784/X4171.'
+  },
+  {
+    id: 'CI-05',
+    title: 'Auto Helium Laser Welding (FDB)',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'MP',
+    side: 'Single',
+    category: 'FDB Sub-Assy Retrofit',
+    vendor: 'NMB Internal',
+    hcReduction: 1,
+    budgetThb: 285000,
+    quotedCostThb: 76539,
+    feasibility: 'Go',
+    stage: 'OK2Tool / Sample Prep',
+    fyTarget: 'FY2026',
+    owner: 'Kanpitcha',
+    notes: 'Retrofit existing laser welding machine; 1 HC/shift saved.'
+  },
+  {
+    id: 'CI-06',
+    title: 'Semi-Auto Screw Assembly (XY Coordinate Pallet)',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'EVT',
+    side: 'Single',
+    category: 'Assembly Automation',
+    vendor: 'ICON',
+    hcReduction: 4,
+    budgetThb: 2280000,
+    quotedCostThb: 2600000,
+    feasibility: 'Go',
+    stage: 'P/O Issued / Setup',
+    fyTarget: 'FY2026',
+    owner: 'Umarporn',
+    notes: 'KZW approved; P/O issued for ฿2.60M (11.6 mo ROI), vendor setup in progress.'
+  },
+  {
+    id: 'CI-07',
+    title: 'Packing Tray Thickness Reduction (0.8mm → 0.6mm)',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'EVT',
+    side: 'Single',
+    category: 'Design / Material VA/VE',
+    vendor: 'Optimus',
+    hcReduction: 0,
+    budgetThb: 0,
+    quotedCostThb: 0,
+    annualMaterialSavingThb: 540000,
+    feasibility: 'Pending',
+    stage: 'OK2Tool / Sample Prep',
+    fyTarget: 'FY2026',
+    owner: 'Rungnapa',
+    notes: 'Uses existing thermoforming mold; direct material cost down, sample prep.'
+  },
+  {
+    id: 'CI-08',
+    title: 'Combine Laser Mark & Swaging Bushing to Pillow',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'EVT',
+    side: 'Single',
+    category: 'Assembly Automation',
+    vendor: 'Maxwell',
+    hcReduction: 3,
+    budgetThb: 1710000,
+    quotedCostThb: 0,
+    feasibility: 'No-go',
+    stage: 'Dropped / Over Budget',
+    fyTarget: 'FY2027',
+    owner: 'Umarporn',
+    notes: 'DEB quoted ฿8.0M (47.6 mo ROI) — exceeds 30-month cap; marked No-go.'
+  },
+  {
+    id: 'CI-09',
+    title: 'Supplier Pre-Cut & Pre-Stripped Lead Wires',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'EVT',
+    side: 'Single',
+    category: 'Design / Material VA/VE',
+    vendor: 'IME',
+    hcReduction: 1,
+    budgetThb: 0,
+    quotedCostThb: 0,
+    feasibility: 'Pending',
+    stage: 'OK2Tool / Sample Prep',
+    fyTarget: 'FY2026',
+    owner: 'Rungnapa',
+    notes: 'Cancels manual wire cutting bench at NMB line; sample evaluation.'
+  },
+  {
+    id: 'CI-10',
+    title: 'Auto Stator Assembly & Laser/Current Soldering',
+    model: 'X4171',
+    familyGroup: 'MacMini',
+    phase: 'EVT',
+    side: 'Single',
+    category: 'Assembly Automation',
+    vendor: 'ICON',
+    hcReduction: 5,
+    budgetThb: 4250000,
+    quotedCostThb: 0,
+    feasibility: 'Pending',
+    stage: 'DFM & Quotation',
+    fyTarget: 'FY2027',
+    owner: 'Umarporn',
+    notes: 'Auto wire arrangement & laser/current soldering; DFM & quotation ongoing.'
+  },
+  {
+    id: 'CI-11',
+    title: 'Auto Final Rotor Assembly (Pick-and-Place)',
+    model: 'X4171',
+    familyGroup: 'MacMini',
+    phase: 'EVT',
+    side: 'Single',
+    category: 'Assembly Automation',
+    vendor: 'ICON',
+    hcReduction: 3,
+    budgetThb: 2550000,
+    quotedCostThb: 0,
+    feasibility: 'Pending',
+    stage: 'DFM & Quotation',
+    fyTarget: 'FY2027',
+    owner: 'Umarporn',
+    notes: 'Automated part transfer to final rotor assy; DFM & quotation ongoing.'
+  },
+  {
+    id: 'CI-12',
+    title: 'Auto Accessory Assembly (Grommet/Foam/Tape/Pull Tab)',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'EVT',
+    side: 'Single',
+    category: 'Accessory / Foam Auto',
+    vendor: 'RounTech',
+    hcReduction: 13,
+    budgetThb: 7410000,
+    quotedCostThb: 0,
+    feasibility: 'No-go',
+    stage: 'Dropped / Over Budget',
+    fyTarget: 'FY2028',
+    owner: 'Umarporn',
+    notes: 'Dropped in POM tracking due to feed instability & CapEx risk; split to Sub-12.'
+  },
+  {
+    id: 'CI-12B',
+    title: 'Sub-12: Auto FPC/Pillow Tape & Dimension Check',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    phase: 'EVT',
+    side: 'Single',
+    category: 'Accessory / Foam Auto',
+    vendor: 'ICON',
+    hcReduction: 2,
+    budgetThb: 1140000,
+    quotedCostThb: 0,
+    feasibility: 'Pending',
+    stage: 'RFP / Studying',
+    fyTarget: 'FY2027',
+    owner: 'Umarporn',
+    notes: 'Targeted replacement for full CI-12 cell; establishing RFP.'
+  },
+
+  // MB16" Family (X3439 / X3083 / X4152)
+  {
+    id: 'CI-13',
+    title: 'Auto Scan FPC + Pillow Assy Insertion to Stator',
+    model: 'X3083',
+    familyGroup: 'MB16"',
+    phase: 'MP',
+    side: 'RHS & LHS',
+    category: 'Assembly Automation',
+    vendor: 'Maxwell',
+    hcReduction: 1,
+    budgetThb: 570000,
+    quotedCostThb: 595000,
+    feasibility: 'Go',
+    stage: 'Completed / Qualified',
+    fyTarget: 'FY2026',
+    owner: 'Piyasak',
+    notes: 'Deployed on common X3439/X3083; actual ฿595k, ROI 10.6 mo.'
+  },
+  {
+    id: 'CI-14',
+    title: 'Auto Transfer Front of Auto Inspection',
+    model: 'X3083',
+    familyGroup: 'MB16"',
+    phase: 'MP',
+    side: 'RHS & LHS',
+    category: 'Inspection / AOI Auto',
+    vendor: 'Maxwell',
+    hcReduction: 1,
+    budgetThb: 570000,
+    quotedCostThb: 890000,
+    feasibility: 'Pending',
+    stage: 'Completed / Qualified',
+    fyTarget: 'FY2026',
+    owner: 'Piyasak',
+    notes: 'Transfers palletized fans directly into auto inspection; ROI 15.9 mo.'
+  },
+  {
+    id: 'CI-15',
+    title: 'Auto Hub Tape Assembly & Visual Inspection',
+    model: 'X3083',
+    familyGroup: 'MB16"',
+    phase: 'MP',
+    side: 'RHS & LHS',
+    category: 'Accessory / Foam Auto',
+    vendor: 'ICON',
+    hcReduction: 2,
+    budgetThb: 1140000,
+    quotedCostThb: 2150000,
+    feasibility: 'Pending',
+    stage: 'Completed / Qualified',
+    fyTarget: 'FY2026',
+    owner: 'Chanoknan',
+    notes: 'Implemented on X3083 premium line; actual ฿2.15M, 2 HC/shift.'
+  },
+  {
+    id: 'CI-16',
+    title: 'Combine Hub Tape & Press Pull Tab (X3083 / X4152)',
+    model: 'X4152',
+    familyGroup: 'MB16"',
+    phase: 'EVT',
+    side: 'RHS & LHS',
+    category: 'Accessory / Foam Auto',
+    vendor: 'ICON',
+    hcReduction: 1,
+    budgetThb: 1140000,
+    quotedCostThb: 938000,
+    feasibility: 'Pending',
+    stage: 'RFP / Studying',
+    fyTarget: 'FY2027',
+    owner: 'Chanoknan',
+    notes: 'Integrates pull-tab press inside auto hub tape cell; ROI 8.4 mo.'
+  },
+
+  // MB14" Family (X3466 / X3082 / X4151)
+  {
+    id: 'CI-17',
+    title: 'Auto Press Pull Tape & Accessory Assy (X3082 / X4151)',
+    model: 'X4151',
+    familyGroup: 'MB14"',
+    phase: 'EVT',
+    side: 'RHS & LHS',
+    category: 'Accessory / Foam Auto',
+    vendor: 'FineBridge',
+    hcReduction: 5,
+    budgetThb: 3400000,
+    quotedCostThb: 5856477,
+    feasibility: 'Pending',
+    stage: 'Completed / Qualified',
+    fyTarget: 'FY2026',
+    owner: 'Touchakorn',
+    notes: 'Fully qualified on X3082/X4151 (฿5.86M / $177k); reduces 5 HC/shift.'
+  },
+  {
+    id: 'CI-18',
+    title: 'Proliferate Auto Foam & Press Pull Tab (X3466)',
+    model: 'X3466',
+    familyGroup: 'MB14"',
+    phase: 'MP',
+    side: 'RHS & LHS',
+    category: 'Accessory / Foam Auto',
+    vendor: 'FineBridge',
+    hcReduction: 4,
+    budgetThb: 3400000,
+    quotedCostThb: 1660000,
+    feasibility: 'Pending',
+    stage: 'Pending KZW / NMB Approval',
+    fyTarget: 'FY2027',
+    owner: 'Touchakorn',
+    notes: 'Proliferation from X3082; quoted ฿1.66M vs ฿3.40M budget (ROI 7.4 mo).'
+  },
+  {
+    id: 'CI-19',
+    title: 'Scan FPC + Insert Pillow Assy (X3466 / X3082 / X4151)',
+    model: 'X3082',
+    familyGroup: 'MB14"',
+    phase: 'MP',
+    side: 'RHS & LHS',
+    category: 'Assembly Automation',
+    vendor: 'Maxwell',
+    hcReduction: 1,
+    budgetThb: 850000,
+    quotedCostThb: 720000,
+    feasibility: 'Pending',
+    stage: 'Pending KZW / NMB Approval',
+    fyTarget: 'FY2027',
+    owner: 'Patcharapong',
+    notes: 'Proliferated from MB16"; quoted ฿720k vs ฿850k budget (ROI 12.9 mo).'
+  },
+
+  // iMac Family (X2867 / X3721)
+  {
+    id: 'CI-20',
+    title: 'Cancel Cover Adhesive Application (Design Influence)',
+    model: 'X3721',
+    familyGroup: 'iMac',
+    phase: 'MP',
+    side: 'RHS & LHS',
+    category: 'Design / Material VA/VE',
+    vendor: 'MTCE / NMB',
+    hcReduction: 3,
+    budgetThb: 0,
+    quotedCostThb: 0,
+    feasibility: 'Pending',
+    stage: 'Pending KZW / NMB Approval',
+    fyTarget: 'FY2026',
+    owner: 'Umarporn',
+    notes: 'Eliminates adhesive dispense, cleaning, AOI & adhesive scrap; 3 HC saved.'
+  },
+  {
+    id: 'CI-21',
+    title: 'Auto AOI Adhesive & Cover Assembly (X2867 / X3721)',
+    model: 'X3721',
+    familyGroup: 'iMac',
+    phase: 'MP',
+    side: 'RHS & LHS',
+    category: 'Inspection / AOI Auto',
+    vendor: 'Maxwell',
+    hcReduction: 1,
+    budgetThb: 1140000,
+    quotedCostThb: 625220,
+    feasibility: 'Pending',
+    stage: 'DFM & Quotation',
+    fyTarget: 'FY2026',
+    owner: 'Umarporn',
+    notes: 'Quoted ฿625.2k vs ฿1.14M budget (ROI 5.6 mo); under FY26 evaluation.'
+  }
+];
+
+
+function computeCostSavingMetrics(item) {
+  const hc = Math.max(0, Number(item?.hcReduction) || 0);
+  const budgetThb = Math.max(0, Number(item?.budgetThb) || 0);
+  const quotedCostThb = Math.max(0, Number(item?.quotedCostThb) || 0);
+  const extraAnnualMatThb = Math.max(0, Number(item?.annualMaterialSavingThb) || 0);
+
+  const monthlySavingThb = hc * NMB_HC_MONTHLY_SAVING_THB + extraAnnualMatThb / 12;
+  const annualSavingThb = monthlySavingThb * 12;
+  const budgetVarianceThb = budgetThb - quotedCostThb;
+  const roiMonths =
+    quotedCostThb > 0 && monthlySavingThb > 0 ? quotedCostThb / monthlySavingThb : 0;
+
+  return {
+    hc,
+    budgetThb,
+    quotedCostThb,
+    monthlySavingThb,
+    annualSavingThb,
+    budgetVarianceThb,
+    roiMonths
+  };
+}
+
+function formatThbCompact(val) {
+  const num = Number(val) || 0;
+  const abs = Math.abs(num);
+  const sign = num < 0 ? '-' : '';
+  if (abs >= 1000000) return `${sign}฿${(abs / 1000000).toFixed(2)}M`;
+  if (abs >= 1000) return `${sign}฿${(abs / 1000).toFixed(0)}k`;
+  return `${sign}฿${abs.toFixed(0)}`;
+}
+
+function formatThbExact(val) {
+  const num = Number(val) || 0;
+  return `฿${Math.round(num).toLocaleString()}`;
+}
+
+function exportCostProjectsCsv(items) {
+  const header =
+    'ID,ProjectTitle,Model,Family,Phase,Category,Vendor,HCReduction,BudgetTHB,QuotedActualTHB,MonthlySavingTHB,AnnualSavingTHB,ROIMonths,Feasibility,Stage,FYTarget,Owner';
+  const rows = items.map((p) => {
+    const m = computeCostSavingMetrics(p);
+    return [
+      csvText(p.id),
+      csvText(p.title),
+      csvText(p.model),
+      csvText(p.familyGroup),
+      csvText(p.phase),
+      csvText(p.category),
+      csvText(p.vendor),
+      m.hc,
+      m.budgetThb,
+      m.quotedCostThb,
+      Math.round(m.monthlySavingThb),
+      Math.round(m.annualSavingThb),
+      m.roiMonths.toFixed(1),
+      csvText(p.feasibility),
+      csvText(p.stage),
+      csvText(p.fyTarget || 'FY2026'),
+      csvText(p.owner)
+    ].join(',');
+  });
+  triggerCsvDownload('Cost_initiative_and_automation_Projects_Export.csv', [header, ...rows].join('\n'));
+}
+
+// ============================================================================
+// CUSTOMER FEEDBACK & 8D FACA MODULE (SOURCE: FFM CUSTOMER FEEDBACK Y2026)
+// ============================================================================
+
+const CUSTOMER_FEEDBACK_LOCATIONS = ['QSMC', 'FXLH', 'QMH', 'HHCD', 'Foxconn', 'Q-Edge'];
+const FEEDBACK_ISSUE_CATEGORIES = ['Function', 'Cosmetic', 'Noise', 'Dimension', 'Packaging'];
+const FEEDBACK_TYPES = ['FA', 'Feedback', 'Claim'];
+
+// FY2026 FFM site KPI targets (program scorecard).
+const KPI_TARGETS = {
+  fpy: 98, // FPY > 98%
+  fy: 99.5, // FY > 99.5%
+  efficiency: 90, // Line efficiency > 90%
+  customerClaims: 5, // Customer claims FY2026 < 5 issues
+  annualSavingThb: 10000000, // Annual cost saving FY2026 > 10M THB
+  mihAchievement: 100 // Shipment to MIH achieved 100%
+};
+const FEEDBACK_SEVERITIES = ['Critical', 'Major', 'Minor'];
+const EIGHT_D_STEPS = [
+  { key: 'd1d3', label: 'D1-3' },
+  { key: 'd4', label: 'D4' },
+  { key: 'd5', label: 'D5' },
+  { key: 'd6', label: 'D6' },
+  { key: 'd7', label: 'D7' },
+  { key: 'd8', label: 'D8' }
+];
+
+const INITIAL_CUSTOMER_FEEDBACK = [
+  {
+    id: 'CF-26-01',
+    no: 1,
+    location: 'QSMC',
+    feedbackDate: '2026-01-14',
+    facaNo: 'FACA-2601-01',
+    severity: 'Major',
+    model: 'X3439',
+    familyGroup: 'MB16"',
+    dateCode: '2552',
+    build: 'NPI',
+    phase: 'DVT',
+    buildConfig: 'DVT',
+    side: 'RHS & LHS',
+    issueCategory: 'Function',
+    issueItem: 'No spin',
+    ngQty: 1,
+    rtvDate: '2026-01-18',
+    category: 'FA',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'FA completed; isolated single unit solder open.'
+  },
+  {
+    id: 'CF-26-02',
+    no: 2,
+    location: 'FXLH',
+    feedbackDate: '2026-01-15',
+    facaNo: '',
+    severity: 'Minor',
+    model: 'X3784',
+    familyGroup: 'MacMini',
+    dateCode: '2601',
+    build: 'NPI',
+    phase: 'EVT',
+    buildConfig: 'EVTG',
+    side: 'Single',
+    issueCategory: 'Cosmetic',
+    issueItem: 'Screw contamination / mark',
+    ngQty: 1,
+    rtvDate: '',
+    category: 'Feedback',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'Operator glove & tray handling reinforced.'
+  },
+  {
+    id: 'CF-26-03',
+    no: 3,
+    location: 'QMH',
+    feedbackDate: '2026-01-12',
+    facaNo: '',
+    severity: 'Minor',
+    model: 'X3439',
+    familyGroup: 'MB16"',
+    dateCode: '2601',
+    build: 'NPI',
+    phase: 'PVT',
+    buildConfig: 'PPVT',
+    side: 'RHS & LHS',
+    issueCategory: 'Cosmetic',
+    issueItem: 'Pull tab lifting / wrinkle',
+    ngQty: 4,
+    rtvDate: '',
+    category: 'Feedback',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'Pull tab pressing jig pressure verified.'
+  },
+  {
+    id: 'CF-26-04',
+    no: 4,
+    location: 'QSMC',
+    feedbackDate: '2026-01-13',
+    facaNo: 'FACA-2601-04',
+    severity: 'Major',
+    model: 'X2867',
+    familyGroup: 'iMac',
+    dateCode: '2551',
+    build: 'MP',
+    phase: 'MP',
+    buildConfig: 'MP',
+    side: 'RHS & LHS',
+    issueCategory: 'Function',
+    issueItem: 'No spin',
+    ngQty: 1,
+    rtvDate: '2026-01-19',
+    category: 'FA',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'RTV verified; D1–D8 closed with QSMC.'
+  },
+  {
+    id: 'CF-26-05',
+    no: 5,
+    location: 'HHCD',
+    feedbackDate: '2026-01-23',
+    facaNo: 'FACA-2601-05',
+    severity: 'Major',
+    model: 'X3439',
+    familyGroup: 'MB16"',
+    dateCode: '2602',
+    build: 'NPI',
+    phase: 'PVT',
+    buildConfig: 'PPVT',
+    side: 'RHS & LHS',
+    issueCategory: 'Function',
+    issueItem: 'No spin',
+    ngQty: 1,
+    rtvDate: '2026-01-27',
+    category: 'FA',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'FPC connector pin damage at FATP handling.'
+  },
+  {
+    id: 'CF-26-06',
+    no: 6,
+    location: 'QSMC',
+    feedbackDate: '2026-01-28',
+    facaNo: 'FACA-2601-06',
+    severity: 'Major',
+    model: 'X2689',
+    familyGroup: 'Display',
+    dateCode: '2603',
+    build: 'NPI',
+    phase: 'PVT',
+    buildConfig: 'PPVT',
+    side: 'RHS & LHS',
+    issueCategory: 'Noise',
+    issueItem: 'CQA noise abnormal',
+    ngQty: 1,
+    rtvDate: '2026-02-02',
+    category: 'FA',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'Acoustic screening threshold correlated with QSMC.'
+  },
+  {
+    id: 'CF-26-07',
+    no: 7,
+    location: 'QSMC',
+    feedbackDate: '2026-01-29',
+    facaNo: '',
+    severity: 'Minor',
+    model: 'X2689',
+    familyGroup: 'Display',
+    dateCode: '2603',
+    build: 'MP',
+    phase: 'MP',
+    buildConfig: 'MP',
+    side: 'RHS & LHS',
+    issueCategory: 'Cosmetic',
+    issueItem: 'Stain on cover surface',
+    ngQty: 1,
+    rtvDate: '',
+    category: 'Feedback',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'Adhesive wipe verification added to VMI.'
+  },
+  {
+    id: 'CF-26-08',
+    no: 8,
+    location: 'QSMC',
+    feedbackDate: '2026-01-29',
+    facaNo: 'FACA-2601-08',
+    severity: 'Major',
+    model: 'X2689',
+    familyGroup: 'Display',
+    dateCode: '2603',
+    build: 'NPI',
+    phase: 'DVT',
+    buildConfig: 'PRB',
+    side: 'RHS & LHS',
+    issueCategory: 'Noise',
+    issueItem: 'Noise (ORT)',
+    ngQty: 1,
+    rtvDate: '2026-02-03',
+    category: 'FA',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'PRB ORT sample correlated; closed.'
+  },
+  {
+    id: 'CF-26-09',
+    no: 9,
+    location: 'QSMC',
+    feedbackDate: '2026-01-29',
+    facaNo: 'FACA-2601-09',
+    severity: 'Major',
+    model: 'X2689',
+    familyGroup: 'Display',
+    dateCode: '2603',
+    build: 'NPI',
+    phase: 'DVT',
+    buildConfig: 'PRB',
+    side: 'RHS & LHS',
+    issueCategory: 'Noise',
+    issueItem: 'Buzzing noise',
+    ngQty: 2,
+    rtvDate: '2026-02-03',
+    category: 'FA',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'Rotor balance & sleeve check completed.'
+  },
+  {
+    id: 'CF-26-10',
+    no: 10,
+    location: 'QSMC',
+    feedbackDate: '2026-02-03',
+    facaNo: '',
+    severity: 'Minor',
+    model: 'X3083',
+    familyGroup: 'MB16"',
+    dateCode: '2604',
+    build: 'NPI',
+    phase: 'P2',
+    buildConfig: 'P2',
+    side: 'RHS & LHS',
+    issueCategory: 'Cosmetic',
+    issueItem: 'Screw abnormal seating',
+    ngQty: 1,
+    rtvDate: '',
+    category: 'Feedback',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'Torque driver bit replaced & verified.'
+  },
+  {
+    id: 'CF-26-11',
+    no: 11,
+    location: 'FXLH',
+    feedbackDate: '2026-02-04',
+    facaNo: 'FACA-2602-11',
+    severity: 'Minor',
+    model: 'X2977',
+    familyGroup: 'MacMini',
+    dateCode: '2604',
+    build: 'MP',
+    phase: 'MP',
+    buildConfig: 'MP',
+    side: 'Single',
+    issueCategory: 'Cosmetic',
+    issueItem: 'Screw scratch',
+    ngQty: 1,
+    rtvDate: '2026-02-08',
+    category: 'Feedback',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Open', d7: 'Open', d8: 'Open' },
+    nmbStatus: 'Open',
+    customerStatus: 'Open',
+    remark: 'Awaiting FXLH verification of updated screw bit sleeve.'
+  },
+  {
+    id: 'CF-26-12',
+    no: 12,
+    location: 'QSMC',
+    feedbackDate: '2026-02-05',
+    facaNo: 'FACA-2602-12',
+    severity: 'Major',
+    model: 'X3083',
+    familyGroup: 'MB16"',
+    dateCode: '2604',
+    build: 'NPI',
+    phase: 'P1',
+    buildConfig: 'P1',
+    side: 'RHS & LHS',
+    issueCategory: 'Noise',
+    issueItem: 'Buzzing noise',
+    ngQty: 1,
+    rtvDate: '2026-02-10',
+    category: 'FA',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Open', d7: 'Open', d8: 'Open' },
+    nmbStatus: 'Open',
+    customerStatus: 'Open',
+    remark: 'Sleeve ID burr 30X inspection & ECM audit ongoing.'
+  },
+  {
+    id: 'CF-26-13',
+    no: 13,
+    location: 'QMH',
+    feedbackDate: '2026-02-09',
+    facaNo: 'FACA-2602-13',
+    severity: 'Major',
+    model: 'X3439',
+    familyGroup: 'MB16"',
+    dateCode: '2605',
+    build: 'NPI',
+    phase: 'PVT',
+    buildConfig: 'PPVT',
+    side: 'RHS & LHS',
+    issueCategory: 'Function',
+    issueItem: 'ORT fail (speed drop)',
+    ngQty: 1,
+    rtvDate: '2026-02-14',
+    category: 'FA',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Open', d6: 'Open', d7: 'Open', d8: 'Open' },
+    nmbStatus: 'Open',
+    customerStatus: 'Open',
+    remark: 'FDB teardown & bearing lubrication analysis in progress.'
+  },
+  {
+    id: 'CF-26-14',
+    no: 14,
+    location: 'QSMC',
+    feedbackDate: '2026-02-13',
+    facaNo: 'FACA-2602-14',
+    severity: 'Major',
+    model: 'X3082',
+    familyGroup: 'MB14"',
+    dateCode: '2605',
+    build: 'NPI',
+    phase: 'P1',
+    buildConfig: 'P1',
+    side: 'RHS & LHS',
+    issueCategory: 'Function',
+    issueItem: 'Fan does not spin',
+    ngQty: 1,
+    rtvDate: '2026-02-17',
+    category: 'FA',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Closed' },
+    nmbStatus: 'Closed',
+    customerStatus: 'Closed',
+    remark: 'Root cause confirmed; closed with QSMC.'
+  },
+  {
+    id: 'CF-26-15',
+    no: 15,
+    location: 'QSMC',
+    feedbackDate: '2026-10-15',
+    facaNo: 'FACA-2610-15',
+    severity: 'Critical',
+    model: 'X3082',
+    familyGroup: 'MB14"',
+    dateCode: '2641',
+    build: 'MP',
+    phase: 'MP',
+    buildConfig: 'MP',
+    side: 'RHS & LHS',
+    issueCategory: 'Cosmetic',
+    issueItem: 'FPC liner pull tab lifting (> 0.50mm wing gap)',
+    ngQty: 12,
+    rtvDate: '2026-10-19',
+    category: 'Claim',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Open', d8: 'Open' },
+    nmbStatus: 'Open',
+    customerStatus: 'Open',
+    remark: 'ICON heated press (65–85°C, 100–200N) + AOI Prog 17 (0.45mm USL) deployed.'
+  },
+  {
+    id: 'CF-26-16',
+    no: 16,
+    location: 'QSMC',
+    feedbackDate: '2026-10-22',
+    facaNo: 'FACA-2610-16',
+    severity: 'Critical',
+    model: 'X3082',
+    familyGroup: 'MB14"',
+    dateCode: '2642',
+    build: 'MP',
+    phase: 'MP',
+    buildConfig: 'MP',
+    side: 'RHS',
+    issueCategory: 'Cosmetic',
+    issueItem: 'Incorrect APN laser mark (ME11 vs MP11)',
+    ngQty: 50,
+    rtvDate: '2026-10-25',
+    category: 'Claim',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Closed', d7: 'Closed', d8: 'Open' },
+    nmbStatus: 'Open',
+    customerStatus: 'Open',
+    remark: '8,730 pcs JIT Hub sorted; inline OCR barcode reader + dual sign-off active.'
+  },
+  {
+    id: 'CF-26-17',
+    no: 17,
+    location: 'QSMC',
+    feedbackDate: '2026-11-12',
+    facaNo: 'FACA-2611-17',
+    severity: 'Major',
+    model: 'X3083',
+    familyGroup: 'MB16"',
+    dateCode: '2645',
+    build: 'MP',
+    phase: 'MP',
+    buildConfig: 'MP',
+    side: 'RHS & LHS',
+    issueCategory: 'Packaging',
+    issueItem: 'Carton box damage during transit',
+    ngQty: 8,
+    rtvDate: '',
+    category: 'Claim',
+    eightD: { d1d3: 'Closed', d4: 'Closed', d5: 'Closed', d6: 'Open', d7: 'Open', d8: 'Open' },
+    nmbStatus: 'Open',
+    customerStatus: 'Open',
+    remark: 'Switching to X3439 2-layer carton + 1010mm corner pole (Nov 23 CQE update).'
+  }
+];
+
+function exportCustomerFeedbackCsv(items) {
+  const header =
+    'No,Location,FeedbackDate,FACA,Severity,Model,Family,DateCode,Build,BuildConfig,IssueCategory,IssueItem,NGQty,RTVDate,Category,D1-D3,D4,D5,D6,D7,FinalD8,NMBStatus,CustomerStatus,Remark';
+  const rows = items.map((c, idx) =>
+    [
+      c.no || idx + 1,
+      csvText(c.location),
+      csvText(c.feedbackDate),
+      csvText(c.facaNo || ''),
+      csvText(c.severity || ''),
+      csvText(c.model),
+      csvText(c.familyGroup || ''),
+      csvText(c.dateCode || ''),
+      csvText(c.build || ''),
+      csvText(c.buildConfig || ''),
+      csvText(c.issueCategory || ''),
+      csvText(c.issueItem || ''),
+      c.ngQty || 0,
+      csvText(c.rtvDate || ''),
+      csvText(c.category || 'Feedback'),
+      csvText(c.eightD?.d1d3 || 'Open'),
+      csvText(c.eightD?.d4 || 'Open'),
+      csvText(c.eightD?.d5 || 'Open'),
+      csvText(c.eightD?.d6 || 'Open'),
+      csvText(c.eightD?.d7 || 'Open'),
+      csvText(c.eightD?.d8 || 'Open'),
+      csvText(c.nmbStatus || 'Open'),
+      csvText(c.customerStatus || 'Open'),
+      csvText(c.remark || '')
+    ].join(',')
+  );
+  triggerCsvDownload('FFM_Customer_feedback_Export.csv', [header, ...rows].join('\n'));
+}
+
+const PROCESS_STEPS = [
+  '1. Preparation & IQC',
+  '2. Rotor Assembly',
+  '3. Pillow Stator Assy',
+  '4. Fan Assembly',
+  '5. Fan Test & Accessory',
+  '6. Final Inspection (OQC)'
+];
+
+// Tasks & AIL categories — every action item carries one of these.
+const TASK_CATEGORIES = ['Yield and Scrap', 'Cost reduction', 'Customer feedback', 'DOE'];
+
+// Items logged before the category field existed stay "Uncategorised" until someone sets them.
+const TASK_UNCATEGORISED = 'Uncategorised';
+
+const TASK_CATEGORY_STYLES = {
+  'Yield and Scrap': 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800',
+  'Cost reduction': 'bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800',
+  'Customer feedback': 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800',
+  DOE: 'bg-violet-50 dark:bg-violet-950 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-800',
+  [TASK_UNCATEGORISED]: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800'
+};
+
+function normalizeTask(task) {
+  if (!task || typeof task !== 'object') return task;
+  const category = TASK_CATEGORIES.includes(task.category) ? task.category : TASK_UNCATEGORISED;
+  return { ...task, category };
+}
+
+// Production stations map onto the numbered process steps used by tasks and the AIL register.
+const PROCESS_STEP_BY_STATION = {
+  'Bearing Assy (FDB)': '2. Rotor Assembly',
+  'Rotor Assembly': '2. Rotor Assembly',
+  'Pillow Stator Assy': '3. Pillow Stator Assy',
+  'Fan Assembly': '4. Fan Assembly',
+  'Fan Test & Accessory': '5. Fan Test & Accessory',
+  'Final Inspection (OQC)': '6. Final Inspection (OQC)'
+};
+
+// One process step per entity: tasks carry it directly, production records by station.
+function getProcessStep(entity) {
+  if (!entity) return null;
+  if (entity.processStep) return entity.processStep;
+  if (entity.station) return PROCESS_STEP_BY_STATION[entity.station] || null;
+  return null;
+}
+
+const PRODUCTION_STATIONS = [
+  'Bearing Assy (FDB)',
+  'Rotor Assembly',
+  'Pillow Stator Assy',
+  'Fan Assembly',
+  'Fan Test & Accessory',
+  'Final Inspection (OQC)'
+];
+
+const DOWNTIME_CATEGORIES = [
+  'Equipment / Machine',
+  'Material / IQC Hold',
+  'Changeover / Setup',
+  'Tester / Calibration',
+  'Operator / Line Balance',
+  'Other'
+];
+
+// ============================================================================
+// MASTER SPECIFICATIONS LIBRARY (CTQ PARAMETERS FOR PROCESS CAPABILITY / CPK)
+// ============================================================================
+
+const INITIAL_MASTER_SPECS = [
+  {
+    id: 'SPEC-BRG-TIR',
+    code: 'BRG_TIR',
+    name: 'Bearing Runout (TIR)',
+    station: 'Bearing Assy (FDB)',
+    unit: 'mm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.005,
+    usl: 0.015,
+    cpkTarget: 1.33,
+    metrology: 'Laser TIR Gauge',
+    docRef: 'SPC-FDB-01 Rev.C',
+    samplingPlan: '100% Inline'
+  },
+  {
+    id: 'SPEC-ROT-IMB',
+    code: 'ROT_IMB',
+    name: 'Static Rotor Imbalance',
+    station: 'Rotor Assembly',
+    unit: 'mg-cm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 1.5,
+    usl: 5.0,
+    cpkTarget: 1.33,
+    metrology: 'Auto-Balancer MC08',
+    docRef: 'SPC-ROT-02 Rev.B',
+    samplingPlan: '100% Inline'
+  },
+  {
+    id: 'SPEC-SLD-HT',
+    code: 'SLD_HT',
+    name: 'Solder Height to Datum -A-',
+    station: 'Pillow Stator Assy',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 0.2,
+    nominal: 0.35,
+    usl: 0.55,
+    cpkTarget: 1.33,
+    metrology: '3D AOI / OMM',
+    docRef: 'SPC-PIL-04 Rev.A',
+    samplingPlan: '32 pcs / Lot'
+  },
+  {
+    id: 'SPEC-DYN-ZMAX',
+    code: 'DYN_ZMAX',
+    name: 'Dynamic Zmax Height',
+    station: 'Fan Test & Accessory',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 9.65,
+    nominal: 9.85,
+    usl: 10.05,
+    cpkTarget: 1.33,
+    metrology: 'Dynamic Tester MC104',
+    docRef: 'SPC-DYN-01 Rev.D',
+    samplingPlan: '100% Inline'
+  },
+  {
+    id: 'SPEC-DYN-ZPARA',
+    code: 'DYN_ZPARA',
+    name: 'Dynamic Z Parallelism',
+    station: 'Fan Test & Accessory',
+    unit: 'mm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.08,
+    usl: 0.25,
+    cpkTarget: 1.33,
+    metrology: 'Dynamic Tester MC104',
+    docRef: 'SPC-DYN-02 Rev.D',
+    samplingPlan: '100% Inline'
+  },
+  {
+    id: 'SPEC-TAPE-CONC',
+    code: 'TAPE_CONC',
+    name: 'Hub Tape Concentricity',
+    station: 'Rotor Assembly',
+    unit: 'mm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.1,
+    usl: 0.3,
+    cpkTarget: 1.33,
+    metrology: 'OMM Vision System',
+    docRef: 'SPC-ROT-05 Rev.A',
+    samplingPlan: '32 pcs / Lot'
+  },
+  {
+    id: 'SPEC-COV-GAP',
+    code: 'COV_GAP',
+    name: 'Cover–Impeller Gap',
+    station: 'Fan Assembly',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 0.2,
+    nominal: 0.35,
+    usl: 0.5,
+    cpkTarget: 1.33,
+    metrology: 'Laser Gap Profiler',
+    docRef: 'SPC-FAN-03 Rev.B',
+    samplingPlan: '32 pcs / Lot'
+  },
+  {
+    id: 'SPEC-PIL-FOAM',
+    code: 'PIL_FOAM',
+    name: 'Pillow Foam Offset',
+    station: 'Fan Test & Accessory',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: -0.25,
+    nominal: 0.0,
+    usl: 0.25,
+    cpkTarget: 1.33,
+    metrology: 'OMM Optical',
+    docRef: 'SPC-ACC-01 Rev.B',
+    samplingPlan: '32 pcs / Lot'
+  }
+];
+
+// Extended FFM Standard Master Specification Library for 1-click generation
+const FFM_STANDARD_MASTER_SPEC_LIBRARY = [
+  ...INITIAL_MASTER_SPECS,
+  {
+    id: 'SPEC-AXIAL-PLAY',
+    code: 'AXIAL_PLAY',
+    name: 'FDB Axial Play',
+    station: 'Bearing Assy (FDB)',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 0.015,
+    nominal: 0.03,
+    usl: 0.045,
+    cpkTarget: 1.33,
+    metrology: 'Auto Axial Play Tester',
+    docRef: 'SPC-FDB-02 Rev.B',
+    samplingPlan: '100% Inline'
+  },
+  {
+    id: 'SPEC-DYN-ZMIN',
+    code: 'DYN_ZMIN',
+    name: 'Dynamic Zmin',
+    station: 'Fan Test & Accessory',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 9.45,
+    nominal: 9.65,
+    usl: 9.85,
+    cpkTarget: 1.33,
+    metrology: 'Dynamic Tester MC104',
+    docRef: 'SPC-DYN-03 Rev.D',
+    samplingPlan: '100% Inline'
+  },
+  {
+    id: 'SPEC-DYN-WT',
+    code: 'DYN_WT',
+    name: 'Dynamic W+T Runout',
+    station: 'Fan Test & Accessory',
+    unit: 'mm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.07,
+    usl: 0.2,
+    cpkTarget: 1.33,
+    metrology: 'Dynamic Tester MC104',
+    docRef: 'SPC-DYN-04 Rev.C',
+    samplingPlan: '100% Inline'
+  },
+  {
+    id: 'SPEC-COV-HT-IN',
+    code: 'COV_HT_IN',
+    name: 'Cover Height Inlet',
+    station: 'Final Inspection (OQC)',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 9.7,
+    nominal: 10.0,
+    usl: 10.36,
+    cpkTarget: 1.33,
+    metrology: 'OMM / Height Gauge',
+    docRef: 'SPC-OQC-01 Rev.C',
+    samplingPlan: '32 pcs / Lot'
+  },
+  {
+    id: 'SPEC-COV-HT-OUT',
+    code: 'COV_HT_OUT',
+    name: 'Cover Height Outlet',
+    station: 'Final Inspection (OQC)',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 9.7,
+    nominal: 10.0,
+    usl: 10.36,
+    cpkTarget: 1.33,
+    metrology: 'OMM / Height Gauge',
+    docRef: 'SPC-OQC-02 Rev.C',
+    samplingPlan: '32 pcs / Lot'
+  },
+  {
+    id: 'SPEC-FAN-FLAT',
+    code: 'FAN_FLAT',
+    name: 'Fan Flatness (Mg Cover)',
+    station: 'Final Inspection (OQC)',
+    unit: 'mm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.06,
+    usl: 0.18,
+    cpkTarget: 1.33,
+    metrology: '100% Inline OMM Flatness',
+    docRef: 'SPC-OQC-04 Rev.B',
+    samplingPlan: '100% Inline (Ka Shui)'
+  },
+  {
+    id: 'SPEC-MAG-POF',
+    code: 'MAG_POF',
+    name: 'Magnet–Hub Pull-Out Force',
+    station: 'Rotor Assembly',
+    unit: 'N',
+    specType: 'lower',
+    lsl: 150.0,
+    nominal: 240.0,
+    usl: null,
+    cpkTarget: 1.33,
+    metrology: 'Push-Pull Force Gauge',
+    docRef: 'SPC-ROT-06 Rev.B',
+    samplingPlan: '5 pcs / Shift (IPQC)'
+  },
+  {
+    id: 'SPEC-BST-LOAD',
+    code: 'BST_LOAD',
+    name: 'Pillow BST Load @ 6mm',
+    station: 'Pillow Stator Assy',
+    unit: 'N',
+    specType: 'lower',
+    lsl: 100.0,
+    nominal: 125.0,
+    usl: null,
+    cpkTarget: 1.33,
+    metrology: 'Universal Load Tester',
+    docRef: 'SPC-PIL-01 Rev.A',
+    samplingPlan: '5 pcs / Lot'
+  }
+];
+
+const INITIAL_PRODUCTION_RECORDS = [
+  {
+    id: 'REC-3082-MP-R',
+    model: 'X3082',
+    familyGroup: 'MB14"',
+    phase: 'MP',
+    station: 'Fan Assembly',
+    config: 'MP-POR',
+    side: 'RHS',
+    input: 3600,
+    plannedTimeHr: 10.6,
+    date: '2026-11-13',
+    defectItems: [
+      { id: 'd1', mode: 'Z Para OOS', falloutQty: 15, salvageQty: 9 },
+      { id: 'd2', mode: 'Magnet Crack', falloutQty: 4, salvageQty: 0 },
+      { id: 'd3', mode: 'Contam Pillow (SPA/FVMI)', falloutQty: 19, salvageQty: 19 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Equipment / Machine', reason: 'EP702 dispensing nozzle swap & purge', durationMin: 24 },
+      { id: 'dt2', category: 'Tester / Calibration', reason: 'Dynamic tester master verification', durationMin: 18 }
+    ]
+  },
+  {
+    id: 'REC-3082-MP-L',
+    model: 'X3082',
+    familyGroup: 'MB14"',
+    phase: 'MP',
+    station: 'Fan Test & Accessory',
+    config: 'MP-POR',
+    side: 'LHS',
+    input: 3600,
+    plannedTimeHr: 10.6,
+    date: '2026-11-13',
+    defectItems: [
+      { id: 'd1', mode: 'Zmax Over Spec', falloutQty: 11, salvageQty: 4 },
+      { id: 'd2', mode: 'Low Magnet-Hub POF Sample', falloutQty: 5, salvageQty: 0 },
+      { id: 'd3', mode: 'FPC Contact Pin / Scratch Cover', falloutQty: 25, salvageQty: 25 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Tester / Calibration', reason: 'Function test top pogo-pin cleaning', durationMin: 30 },
+      { id: 'dt2', category: 'Material / IQC Hold', reason: 'Low-oxygen hub lot verification wait', durationMin: 18 }
+    ]
+  },
+  {
+    id: 'REC-3083-MP-R',
+    model: 'X3083',
+    familyGroup: 'MB16"',
+    phase: 'MP',
+    station: 'Rotor Assembly',
+    config: 'MP-POR',
+    side: 'RHS',
+    input: 3400,
+    plannedTimeHr: 10.0,
+    date: '2026-11-13',
+    defectItems: [
+      { id: 'd1', mode: 'Memtech Impeller Runout (TIR)', falloutQty: 49, salvageQty: 34 },
+      { id: 'd2', mode: 'Dynamic W+T OOS', falloutQty: 16, salvageQty: 6 },
+      { id: 'd3', mode: 'Contam Cover', falloutQty: 12, salvageQty: 12 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Equipment / Machine', reason: 'Auto-balancer chuck realignment', durationMin: 28 },
+      { id: 'dt2', category: 'Changeover / Setup', reason: 'Impeller tray feeder jam clearance', durationMin: 20 }
+    ]
+  },
+  {
+    id: 'REC-3083-MP-L',
+    model: 'X3083',
+    familyGroup: 'MB16"',
+    phase: 'MP',
+    station: 'Fan Test & Accessory',
+    config: 'MP-POR',
+    side: 'LHS',
+    input: 3400,
+    plannedTimeHr: 10.0,
+    date: '2026-11-13',
+    defectItems: [
+      { id: 'd1', mode: 'MC104 Parallelism Z3 Shift', falloutQty: 32, salvageQty: 14 },
+      { id: 'd2', mode: 'FRN Acoustic Noise', falloutQty: 11, salvageQty: 0 },
+      { id: 'd3', mode: 'Contam Cover / Dent Pillow', falloutQty: 40, salvageQty: 40 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Tester / Calibration', reason: 'MC104 Z3 sensor offset check & master run', durationMin: 36 },
+      { id: 'dt2', category: 'Material / IQC Hold', reason: 'Sleeve ID burr 30X audit pause', durationMin: 18 }
+    ]
+  },
+  {
+    id: 'REC-4151-P1-11R',
+    model: 'X4151',
+    familyGroup: 'MB14"',
+    phase: 'P1',
+    station: 'Fan Assembly',
+    config: 'MP11',
+    side: 'RHS',
+    input: 500,
+    plannedTimeHr: 1.5,
+    date: '2026-09-29',
+    defectItems: [
+      { id: 'd1', mode: 'Dynamic Para / TIR', falloutQty: 10, salvageQty: 4 },
+      { id: 'd2', mode: 'Motor Lock / No Spin', falloutQty: 4, salvageQty: 0 },
+      { id: 'd3', mode: 'Shaft Protrusion / Hub Tape Bubble', falloutQty: 25, salvageQty: 25 },
+      { id: 'd4', mode: 'S/C Cover & Pillow', falloutQty: 10, salvageQty: 10 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Changeover / Setup', reason: 'P1 MP11 fixture setup & first-article check', durationMin: 9 }
+    ]
+  },
+  {
+    id: 'REC-4151-P1-11L',
+    model: 'X4151',
+    familyGroup: 'MB14"',
+    phase: 'P1',
+    station: 'Fan Assembly',
+    config: 'MP11',
+    side: 'LHS',
+    input: 500,
+    plannedTimeHr: 1.5,
+    date: '2026-09-29',
+    defectItems: [
+      { id: 'd1', mode: 'Wires Bare / Hipot', falloutQty: 4, salvageQty: 0 },
+      { id: 'd2', mode: 'Hub Tape Bubble', falloutQty: 32, salvageQty: 32 },
+      { id: 'd3', mode: 'C/T Cover & Pillow', falloutQty: 16, salvageQty: 16 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Changeover / Setup', reason: 'LHS docking nest changeover', durationMin: 7 }
+    ]
+  },
+  {
+    id: 'REC-4151-P1-15R',
+    model: 'X4151',
+    familyGroup: 'MB14"',
+    phase: 'P1',
+    station: 'Final Inspection (OQC)',
+    config: 'MP15',
+    side: 'RHS',
+    input: 440,
+    plannedTimeHr: 1.25,
+    date: '2026-09-29',
+    defectItems: [
+      { id: 'd1', mode: 'Dent Pillow', falloutQty: 1, salvageQty: 0 },
+      { id: 'd2', mode: 'Zmax / Zpara OOS', falloutQty: 4, salvageQty: 2 },
+      { id: 'd3', mode: 'No Liner FPC', falloutQty: 4, salvageQty: 4 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Tester / Calibration', reason: 'OQC height gauge correlation check', durationMin: 5 }
+    ]
+  },
+  {
+    id: 'REC-4151-P1-15L',
+    model: 'X4151',
+    familyGroup: 'MB14"',
+    phase: 'P1',
+    station: 'Final Inspection (OQC)',
+    config: 'MP15',
+    side: 'LHS',
+    input: 440,
+    plannedTimeHr: 1.25,
+    date: '2026-09-29',
+    defectItems: [
+      { id: 'd1', mode: 'Cover Gap Low', falloutQty: 2, salvageQty: 1 },
+      { id: 'd2', mode: 'Dent Pillow', falloutQty: 1, salvageQty: 0 },
+      { id: 'd3', mode: 'Pull Tab Liner', falloutQty: 3, salvageQty: 3 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Other', reason: 'Lot segregation & OQC labeling', durationMin: 4 }
+    ]
+  },
+  {
+    id: 'REC-4152-P1-11R',
+    model: 'X4152',
+    familyGroup: 'MB16"',
+    phase: 'P1',
+    station: 'Pillow Stator Assy',
+    config: 'MP11',
+    side: 'RHS',
+    input: 600,
+    plannedTimeHr: 1.8,
+    date: '2026-10-18',
+    defectItems: [
+      { id: 'd1', mode: 'Dynamic W+T OOS', falloutQty: 11, salvageQty: 6 },
+      { id: 'd2', mode: 'Shine Line Pillow', falloutQty: 7, salvageQty: 4 },
+      { id: 'd3', mode: 'Cover ADH Contam', falloutQty: 16, salvageQty: 16 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Equipment / Machine', reason: 'Stator press-fit sensor reset', durationMin: 9 }
+    ]
+  },
+  {
+    id: 'REC-4152-P1-14R',
+    model: 'X4152',
+    familyGroup: 'MB16"',
+    phase: 'P1',
+    station: 'Fan Assembly',
+    config: 'MP14',
+    side: 'RHS',
+    input: 570,
+    plannedTimeHr: 1.8,
+    date: '2026-10-18',
+    defectItems: [
+      { id: 'd1', mode: 'Ka Shui Mg Cover Bulging', falloutQty: 59, salvageQty: 45 },
+      { id: 'd2', mode: 'Fan Flatness / Cover Height OOS', falloutQty: 32, salvageQty: 24 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Material / IQC Hold', reason: 'Ka Shui cover 100% OMM flatness sorting gate', durationMin: 10 },
+      { id: 'dt2', category: 'Tester / Calibration', reason: 'FTA probe force recalibration (< 18.0 N)', durationMin: 5 }
+    ]
+  },
+  {
+    id: 'REC-4152-P1-14L',
+    model: 'X4152',
+    familyGroup: 'MB16"',
+    phase: 'P1',
+    station: 'Fan Assembly',
+    config: 'MP14',
+    side: 'LHS',
+    input: 570,
+    plannedTimeHr: 1.8,
+    date: '2026-10-18',
+    defectItems: [
+      { id: 'd1', mode: 'Ka Shui Mg Cover Height OOS', falloutQty: 55, salvageQty: 42 },
+      { id: 'd2', mode: 'ICT Pallet No Spin', falloutQty: 7, salvageQty: 0 },
+      { id: 'd3', mode: 'Adhesive Squeeze-out', falloutQty: 22, salvageQty: 22 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Material / IQC Hold', reason: 'Ka Shui LHS cover lot segregation', durationMin: 8 },
+      { id: 'dt2', category: 'Equipment / Machine', reason: 'ICT pallet contact cleaning', durationMin: 5 }
+    ]
+  },
+  {
+    id: 'REC-4026-P2-21L',
+    model: 'X4026',
+    familyGroup: 'MB14"',
+    phase: 'P2',
+    station: 'Fan Assembly',
+    config: 'MP21',
+    side: 'LHS',
+    input: 484,
+    plannedTimeHr: 1.4,
+    date: '2026-08-26',
+    defectItems: [
+      { id: 'd1', mode: 'Scratch Cover', falloutQty: 3, salvageQty: 0 },
+      { id: 'd2', mode: 'Shine Line Pillow', falloutQty: 3, salvageQty: 0 },
+      { id: 'd3', mode: 'Contam Cover', falloutQty: 2, salvageQty: 0 },
+      { id: 'd4', mode: 'Cover Inlet Low', falloutQty: 2, salvageQty: 0 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Changeover / Setup', reason: 'MP21 copy tooling validation', durationMin: 9 }
+    ]
+  },
+  {
+    id: 'REC-4026-P2-23L',
+    model: 'X4026',
+    familyGroup: 'MB14"',
+    phase: 'P2',
+    station: 'Fan Test & Accessory',
+    config: 'MP23',
+    side: 'LHS',
+    input: 434,
+    plannedTimeHr: 1.25,
+    date: '2026-08-26',
+    defectItems: [
+      { id: 'd1', mode: 'Rotor Imbalance', falloutQty: 7, salvageQty: 7 },
+      { id: 'd2', mode: 'Contam Cover / Pillow', falloutQty: 3, salvageQty: 0 },
+      { id: 'd3', mode: 'Scratch / Burr Pillow', falloutQty: 3, salvageQty: 0 }
+    ],
+    downtimeEvents: [
+      { id: 'dt1', category: 'Equipment / Machine', reason: 'Auto-noise fixture cycle check', durationMin: 8 }
+    ]
+  }
+];
+
+function computeProductionMetrics(rec) {
+  const input = Math.max(0, Number(rec.input) || 0);
+  const defectItems = Array.isArray(rec.defectItems) ? rec.defectItems : [];
+  const downtimeEvents = Array.isArray(rec.downtimeEvents) ? rec.downtimeEvents : [];
+
+  // Fallout = initial rejected defects before salvage
+  const fallout =
+    defectItems.length > 0
+      ? defectItems.reduce((sum, d) => sum + Math.max(0, Number(d.falloutQty) || 0), 0)
+      : Math.max(0, Number(rec.fallout) || 0);
+
+  // Salvage = recovered/reworked units from initial fallout (clamped <= fallout per defect)
+  const salvage =
+    defectItems.length > 0
+      ? defectItems.reduce((sum, d) => {
+          const f = Math.max(0, Number(d.falloutQty) || 0);
+          const s = Math.min(f, Math.max(0, Number(d.salvageQty) || 0));
+          return sum + s;
+        }, 0)
+      : Math.min(fallout, Math.max(0, Number(rec.salvage) || 0));
+
+  const netReject = Math.max(0, fallout - salvage);
+  const downtimeMin =
+    downtimeEvents.length > 0
+      ? downtimeEvents.reduce((sum, e) => sum + Math.max(0, Number(e.durationMin) || 0), 0)
+      : Math.max(0, (Number(rec.downtimeHr) || 0) * 60);
+  const downtimeHr = downtimeMin / 60;
+  const plannedTimeHr = Math.max(0, Number(rec.plannedTimeHr) || 0);
+  const runTimeHr = Math.max(0, plannedTimeHr - downtimeHr);
+
+  // FPY = (Input - Fallout) / Input
+  const fpy = input > 0 ? Math.max(0, ((input - fallout) / input) * 100) : 0;
+  // FY = (Input - Fallout + Salvage) / Input
+  const fy = input > 0 ? Math.min(100, Math.max(0, ((input - fallout + salvage) / input) * 100)) : 0;
+
+  const finalGood = Math.max(0, input - netReject);
+  const uph = plannedTimeHr > 0 ? finalGood / plannedTimeHr : 0;
+  const inputUph = runTimeHr > 0 ? input / runTimeHr : 0;
+  const efficiency = inputUph > 0 ? Math.min(100, (uph / inputUph) * 100) : 0;
+
+  return {
+    input,
+    plannedTimeHr,
+    fallout,
+    salvage,
+    netReject,
+    downtimeMin,
+    downtimeHr,
+    runTimeHr,
+    fpy,
+    fy,
+    uph,
+    efficiency
+  };
+}
+
+// ============================================================================
+// GANTT TIMELINE HELPERS & SIDE-PRIORITY / READINESS SEQUENCING
+// ============================================================================
+
+const GANTT_STAGES = [
+  {
+    id: 'prep',
+    label: 'Prep / BBR / BRR',
+    startKey: 'prepStart',
+    endKey: 'brrEnd',
+    gateId: 'brr',
+    barClass: 'bg-slate-700 text-white border-slate-800'
+  },
+  {
+    id: 'mbo',
+    label: 'MBO & OK2B',
+    startKey: 'mboStart',
+    endKey: 'mboEnd',
+    gateId: 'mbo',
+    barClass: 'bg-amber-500 text-white border-amber-600'
+  },
+  {
+    id: 'main',
+    label: 'Main Build',
+    startKey: 'mainStart',
+    endKey: 'mainEnd',
+    gateId: 'main',
+    barClass: 'bg-blue-600 text-white border-blue-700'
+  },
+  {
+    id: 'oqc',
+    label: 'Final OQC',
+    startKey: 'oqcStart',
+    endKey: 'oqcEnd',
+    gateId: 'oqc',
+    barClass: 'bg-indigo-600 text-white border-indigo-700'
+  }
+];
+
+function parseIsoDate(iso) {
+  const [y, m, d] = (iso || todayIso()).split('-').map(Number);
+  return new Date(Date.UTC(y || 2026, (m || 1) - 1, d || 1));
+}
+
+function addDaysIso(iso, deltaDays) {
+  const dt = parseIsoDate(iso);
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(dt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function diffDaysIso(startIso, endIso) {
+  const ms = parseIsoDate(endIso).getTime() - parseIsoDate(startIso).getTime();
+  return Math.round(ms / 86400000);
+}
+
+function formatShortDate(iso) {
+  if (!iso) return '—';
+  const dt = parseIsoDate(iso);
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${months[dt.getUTCMonth()]} ${dt.getUTCDate()}`;
+}
+
+function getDefaultScheduleForRow(project, row) {
+  const mih = row?.fatpMih || project?.mihDate?.split('/')[0]?.trim() || '2026-12-24';
+  const etd = addDaysIso(mih, -4);
+  const oqcEnd = addDaysIso(etd, -2);
+  const oqcStart = addDaysIso(oqcEnd, -2);
+  const mainEnd = addDaysIso(oqcStart, -1);
+  const mainStart = addDaysIso(mainEnd, -5);
+  const mboEnd = addDaysIso(mainStart, -1);
+  const mboStart = addDaysIso(mboEnd, -2);
+  const brrEnd = addDaysIso(mboStart, -1);
+  const prepStart = addDaysIso(brrEnd, -5);
+  const pbr = addDaysIso(mih, 4);
+
+  return {
+    prepStart,
+    brrEnd,
+    mboStart,
+    mboEnd,
+    mainStart,
+    mainEnd,
+    oqcStart,
+    oqcEnd,
+    etd,
+    mih,
+    pbr
+  };
+}
+
+function getLineReadinessInfo(lineGates = {}) {
+  const allStatuses = Object.values(lineGates).map((g) => g.status);
+  if (allStatuses.includes('Blocked')) {
+    return { rank: 3, label: 'Hold', tone: 'rose', hasHold: true };
+  }
+  if (lineGates.brr?.status === 'Approved') {
+    return { rank: 0, label: 'MBO Ready', tone: 'emerald', hasHold: false };
+  }
+  if (lineGates.bbr?.status === 'Approved') {
+    return { rank: 1, label: 'BRR Ready', tone: 'blue', hasHold: false };
+  }
+  return { rank: 2, label: 'Preparing', tone: 'amber', hasHold: false };
+}
+
+function buildSequencedGanttItems(project, visibleMatrix, projGateLines, scheduleOverrides, sequenceMode) {
+  const enriched = visibleMatrix.map((row) => {
+    const side = row.side || 'RHS';
+    const key = `${row.config}-${side}`;
+    const lineGates = projGateLines[key] || {};
+    const readiness = getLineReadinessInfo(lineGates);
+    const manual = scheduleOverrides[`${project.id}::${key}`] || null;
+    const baseSchedule = manual || getDefaultScheduleForRow(project, row);
+    const qty = computeBuildMatrixRow(row).totalProduction;
+
+    return {
+      row,
+      side,
+      key,
+      readiness,
+      manual,
+      baseSchedule,
+      qty
+    };
+  });
+
+  const sidePriorityOrder =
+    sequenceMode === 'rhs-first' ? ['RHS', 'LHS', 'Single'] : ['LHS', 'RHS', 'Single'];
+
+  enriched.sort((a, b) => {
+    if (sequenceMode === 'readiness') {
+      if (a.readiness.rank !== b.readiness.rank) return a.readiness.rank - b.readiness.rank;
+      const mihCmp = a.baseSchedule.mih.localeCompare(b.baseSchedule.mih);
+      if (mihCmp !== 0) return mihCmp;
+      const sCmp = sidePriorityOrder.indexOf(a.side) - sidePriorityOrder.indexOf(b.side);
+      if (sCmp !== 0) return sCmp;
+      return a.row.config.localeCompare(b.row.config, undefined, { numeric: true });
+    }
+
+    const sCmp = sidePriorityOrder.indexOf(a.side) - sidePriorityOrder.indexOf(b.side);
+    if (sCmp !== 0) return sCmp;
+    const mihCmp = a.baseSchedule.mih.localeCompare(b.baseSchedule.mih);
+    if (mihCmp !== 0) return mihCmp;
+    return a.row.config.localeCompare(b.row.config, undefined, { numeric: true });
+  });
+
+  const items = [];
+  let seqNum = 1;
+  let prevSide = null;
+  let prevMainEnd = null;
+
+  enriched.forEach((entry) => {
+    if (prevSide && prevSide !== entry.side && prevMainEnd) {
+      const convStart = addDaysIso(prevMainEnd, 1);
+      const convEnd = addDaysIso(convStart, 1);
+      items.push({
+        type: 'conversion',
+        id: `${project.id}-conv-${prevSide}-${entry.side}-${seqNum}`,
+        fromSide: prevSide,
+        toSide: entry.side,
+        label: `Line Conversion ${prevSide} → ${entry.side}`,
+        sublabel: 'Docking fixture, OMM nest & auto-tester changeover (2d)',
+        startIso: convStart,
+        endIso: convEnd
+      });
+    }
+
+    const schedule = entry.manual
+      ? entry.baseSchedule
+      : entry.readiness.hasHold && sequenceMode === 'readiness'
+      ? {
+          ...entry.baseSchedule,
+          mboStart: addDaysIso(entry.baseSchedule.mboStart, 4),
+          mboEnd: addDaysIso(entry.baseSchedule.mboEnd, 4),
+          mainStart: addDaysIso(entry.baseSchedule.mainStart, 4),
+          mainEnd: addDaysIso(entry.baseSchedule.mainEnd, 4)
+        }
+      : entry.baseSchedule;
+
+    items.push({
+      type: 'build',
+      id: `${project.id}-${entry.key}`,
+      seqNum: seqNum++,
+      label: entry.row.config,
+      sideBadge: entry.side,
+      sublabel: entry.row.vendors,
+      qty: entry.qty,
+      rowKeys: [entry.key],
+      primaryLineKey: entry.key,
+      schedule,
+      hasHold: entry.readiness.hasHold,
+      readiness: entry.readiness,
+      isManualOverride: Boolean(entry.manual)
+    });
+
+    prevSide = entry.side;
+    prevMainEnd = schedule.mainEnd;
+  });
+
+  return items;
+}
+
+// ============================================================================
+// INITIAL NPI PROJECTS & MULTI-VENDOR SPLIT BUILD MATRICES
+// ============================================================================
+
+const INITIAL_PROJECTS = [
+  {
+    id: 'PRJ-X4151',
+    model: 'X4151',
+    familyGroup: 'MB14"',
+    family: 'MB 14" FDB Fan Module',
+    phase: 'EVT',
+    side: 'RHS & LHS',
+    spec: '5,400 RPM · 12V 5A · W278×L246×H10 mm · 48 g · BST 100N @ 6mm',
+    lineSpec: 'X3082 Auto Line @ 340 UPH · HC 34.25 (FDB 3.5 + Fan 30.75)',
+    moRange: 'SPP0860–SPP0867',
+    customer: 'QSMC',
+    etdDate: '2026-12-20 / 2027-01-21',
+    mihDate: '2026-12-24 / 2027-01-25',
+    pm: 'Horikawa / Saengtian',
+    leader: 'Touchakorn',
+    owner: 'Patcharapong, Phalita',
+    currentGateId: 'mbo',
+    status: 'On Track',
+    fpy: 96.1,
+    fy: 98.9,
+    uph: 340,
+    eff: 91.2,
+    buildMatrix: [
+      {
+        config: 'ME11',
+        side: 'RHS',
+        apnRev: '610-00873-03 / Rev.02',
+        code7E: '7E-4151R-11',
+        vendors: 'Anjie Pillow (DOE1-3) · KHC Cover · Memtech Impeller · Avary FPC · RC Bushing',
+        fbu: 188,
+        main: 623,
+        rel: 57,
+        mbo: 30,
+        iqc: 15,
+        oqc: 15,
+        doe: 20,
+        estYieldLoss: 35,
+        fatpMih: '2026-12-24',
+        total: 983
+      },
+      {
+        config: 'ME11',
+        side: 'LHS',
+        apnRev: '610-00872-03 / Rev.02',
+        code7E: '7E-4151L-11',
+        vendors: 'Anjie Pillow (DOE1-3) · KHC Cover · Memtech Impeller · Avary FPC · RC Bushing',
+        fbu: 188,
+        main: 623,
+        rel: 57,
+        mbo: 30,
+        iqc: 15,
+        oqc: 15,
+        doe: 20,
+        estYieldLoss: 38,
+        fatpMih: '2026-12-24',
+        total: 986
+      },
+      {
+        config: 'ME12',
+        side: 'RHS',
+        apnRev: '610-00873-03 / Rev.02',
+        code7E: '7E-4151R-12',
+        vendors: 'KHC Pillow · KHC Cover · Memtech Impeller · Flexium FPC · Non-RC Bushing',
+        fbu: 188,
+        main: 623,
+        rel: 57,
+        mbo: 30,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 35,
+        fatpMih: '2026-12-24',
+        total: 973
+      },
+      {
+        config: 'ME12',
+        side: 'LHS',
+        apnRev: '610-00872-03 / Rev.02',
+        code7E: '7E-4151L-12',
+        vendors: 'KHC Pillow · KHC Cover · Memtech Impeller · Flexium FPC · Non-RC Bushing',
+        fbu: 188,
+        main: 623,
+        rel: 57,
+        mbo: 30,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 38,
+        fatpMih: '2026-12-24',
+        total: 976
+      },
+      {
+        config: 'ME13',
+        side: 'RHS',
+        apnRev: '610-00873-03 / Rev.02',
+        code7E: '7E-4151R-13',
+        vendors: 'Anjie Pillow (DOE1-3) · KHC Cover · Lotes Impeller · Avary FPC · POR Foam',
+        fbu: 0,
+        main: 623,
+        rel: 57,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 32,
+        estYieldLoss: 28,
+        fatpMih: '2027-01-25',
+        total: 790
+      },
+      {
+        config: 'ME13',
+        side: 'LHS',
+        apnRev: '610-00872-03 / Rev.02',
+        code7E: '7E-4151L-13',
+        vendors: 'Anjie Pillow (DOE1-3) · KHC Cover · Lotes Impeller · Avary FPC · POR Foam',
+        fbu: 0,
+        main: 623,
+        rel: 57,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 32,
+        estYieldLoss: 28,
+        fatpMih: '2027-01-25',
+        total: 790
+      },
+      {
+        config: 'ME14',
+        side: 'RHS',
+        apnRev: '610-00873-03 / Rev.02',
+        code7E: '7E-4151R-14',
+        vendors: 'KHC Pillow · KHC Cover · Lotes Impeller · Flexium FPC · POR Foam',
+        fbu: 0,
+        main: 623,
+        rel: 57,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 28,
+        fatpMih: '2027-01-25',
+        total: 768
+      },
+      {
+        config: 'ME14',
+        side: 'LHS',
+        apnRev: '610-00872-03 / Rev.02',
+        code7E: '7E-4151L-14',
+        vendors: 'KHC Pillow · KHC Cover · Lotes Impeller · Flexium FPC · POR Foam',
+        fbu: 0,
+        main: 623,
+        rel: 57,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 28,
+        fatpMih: '2027-01-25',
+        total: 768
+      }
+    ]
+  },
+  {
+    id: 'PRJ-X4152',
+    model: 'X4152',
+    familyGroup: 'MB16"',
+    family: 'MB 16" High-Output FDB Fan',
+    phase: 'EVT',
+    side: 'RHS & LHS',
+    spec: '7,200 RPM · 6V 5A · W300×L300×H10 mm · 54 g · POR Spec',
+    lineSpec: 'X3083 Auto Line @ 340 UPH · 100% OMM Cover Sorting Gate',
+    moRange: 'SPP0848–SPP0859',
+    customer: 'Quanta (QSMC)',
+    etdDate: '2026-12-11 / 2027-01-11',
+    mihDate: '2026-12-15 / 2027-01-15',
+    pm: 'Horikawa / Saengtian',
+    leader: 'Piyasak',
+    owner: 'Chanoknan',
+    currentGateId: 'prep',
+    status: 'At Risk',
+    fpy: 97.1,
+    fy: 99.1,
+    uph: 340,
+    eff: 90.4,
+    buildMatrix: [
+      {
+        config: 'ME11',
+        side: 'RHS',
+        apnRev: '610-00911-01 / Rev.01',
+        code7E: '7E-4152R-11',
+        vendors: 'Anjie Pillow (DOE1-3) · KHC Tapered Cover · Memtech Impeller · Avary FPC',
+        fbu: 256,
+        main: 446,
+        rel: 57,
+        mbo: 30,
+        iqc: 15,
+        oqc: 15,
+        doe: 20,
+        estYieldLoss: 28,
+        fatpMih: '2026-12-15',
+        total: 867
+      },
+      {
+        config: 'ME11',
+        side: 'LHS',
+        apnRev: '610-00910-01 / Rev.01',
+        code7E: '7E-4152L-11',
+        vendors: 'Anjie Pillow (DOE1-3) · KHC Tapered Cover · Memtech Impeller · Avary FPC',
+        fbu: 256,
+        main: 446,
+        rel: 57,
+        mbo: 30,
+        iqc: 15,
+        oqc: 15,
+        doe: 20,
+        estYieldLoss: 28,
+        fatpMih: '2026-12-15',
+        total: 867
+      },
+      {
+        config: 'ME12',
+        side: 'RHS',
+        apnRev: '610-00911-01 / Rev.01',
+        code7E: '7E-4152R-12',
+        vendors: 'KHC Pillow · KHC Tapered Cover · Memtech Impeller · Flexium FPC · RC Bushing',
+        fbu: 0,
+        main: 446,
+        rel: 57,
+        mbo: 25,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 22,
+        fatpMih: '2026-12-15',
+        total: 590
+      },
+      {
+        config: 'ME12',
+        side: 'LHS',
+        apnRev: '610-00910-01 / Rev.01',
+        code7E: '7E-4152L-12',
+        vendors: 'KHC Pillow · KHC Tapered Cover · Memtech Impeller · Flexium FPC · RC Bushing',
+        fbu: 0,
+        main: 446,
+        rel: 57,
+        mbo: 25,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 22,
+        fatpMih: '2026-12-15',
+        total: 590
+      },
+      {
+        config: 'ME13',
+        side: 'RHS',
+        apnRev: '610-00911-01 / Rev.01',
+        code7E: '7E-4152R-13',
+        vendors: 'Anjie Pillow · Ka Shui Mg Cover (HOLD - 100% OMM) · Lotes Impeller · Avary FPC',
+        fbu: 0,
+        main: 445,
+        rel: 57,
+        mbo: 25,
+        iqc: 20,
+        oqc: 15,
+        doe: 25,
+        estYieldLoss: 35,
+        fatpMih: '2026-12-29',
+        total: 622
+      },
+      {
+        config: 'ME13',
+        side: 'LHS',
+        apnRev: '610-00910-01 / Rev.01',
+        code7E: '7E-4152L-13',
+        vendors: 'Anjie Pillow · Ka Shui Mg Cover (HOLD - 100% OMM) · Lotes Impeller · Avary FPC',
+        fbu: 0,
+        main: 445,
+        rel: 57,
+        mbo: 25,
+        iqc: 20,
+        oqc: 15,
+        doe: 25,
+        estYieldLoss: 35,
+        fatpMih: '2026-12-29',
+        total: 622
+      },
+      {
+        config: 'ME14',
+        side: 'RHS',
+        apnRev: '610-00911-01 / Rev.01',
+        code7E: '7E-4152R-14',
+        vendors: 'KHC Pillow · KHC Cover · Lotes Impeller · Flexium FPC · RC Bushing',
+        fbu: 0,
+        main: 445,
+        rel: 57,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 20,
+        fatpMih: '2027-01-15',
+        total: 582
+      },
+      {
+        config: 'ME14',
+        side: 'LHS',
+        apnRev: '610-00910-01 / Rev.01',
+        code7E: '7E-4152L-14',
+        vendors: 'KHC Pillow · KHC Cover · Lotes Impeller · Flexium FPC · RC Bushing',
+        fbu: 0,
+        main: 445,
+        rel: 57,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 20,
+        fatpMih: '2027-01-15',
+        total: 582
+      },
+      {
+        config: 'ME15',
+        side: 'RHS',
+        apnRev: '610-00911-01 / Rev.01',
+        code7E: '7E-4152R-15',
+        vendors: 'Extended Verification · Qualified POR Materials & Single-Source Accessories',
+        fbu: 0,
+        main: 445,
+        rel: 57,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 20,
+        fatpMih: '2027-01-15',
+        total: 582
+      },
+      {
+        config: 'ME15',
+        side: 'LHS',
+        apnRev: '610-00910-01 / Rev.01',
+        code7E: '7E-4152L-15',
+        vendors: 'Extended Verification · Qualified POR Materials & Single-Source Accessories',
+        fbu: 0,
+        main: 445,
+        rel: 57,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 20,
+        fatpMih: '2027-01-15',
+        total: 582
+      },
+      {
+        config: 'ME16',
+        side: 'RHS',
+        apnRev: '610-00911-01 / Rev.01',
+        code7E: '7E-4152R-16',
+        vendors: 'Extended Verification · Ka Shui Mg Cover Split (HOLD - Supplier Commit)',
+        fbu: 0,
+        main: 445,
+        rel: 57,
+        mbo: 20,
+        iqc: 20,
+        oqc: 15,
+        doe: 15,
+        estYieldLoss: 30,
+        fatpMih: '2027-01-15',
+        total: 602
+      },
+      {
+        config: 'ME16',
+        side: 'LHS',
+        apnRev: '610-00910-01 / Rev.01',
+        code7E: '7E-4152L-16',
+        vendors: 'Extended Verification · Ka Shui Mg Cover Split (HOLD - Supplier Commit)',
+        fbu: 0,
+        main: 445,
+        rel: 57,
+        mbo: 20,
+        iqc: 20,
+        oqc: 15,
+        doe: 15,
+        estYieldLoss: 30,
+        fatpMih: '2027-01-15',
+        total: 602
+      }
+    ]
+  },
+  {
+    id: 'PRJ-X4026',
+    model: 'X4026',
+    familyGroup: 'MB14"',
+    family: 'MB 14" LHS-Only (Common X4151 LHS)',
+    phase: 'EVT',
+    side: 'LHS',
+    spec: 'DC5V 3.0W · Model 01246270B-CW · BST 100N @ 6mm',
+    lineSpec: 'X4026 Line @ 340 UPH · HC 37.5 (FDB 3.5 + Fan 34)',
+    moRange: 'SPP0868–SPP0871',
+    customer: 'Foxconn',
+    etdDate: '2027-01-08',
+    mihDate: '2027-01-12',
+    pm: 'Horikawa / Saengtian',
+    leader: 'Touchakorn',
+    owner: 'Patcharapong, Phalita',
+    currentGateId: 'mbo',
+    status: 'On Track',
+    fpy: 97.3,
+    fy: 98.6,
+    uph: 350,
+    eff: 90.8,
+    buildMatrix: [
+      {
+        config: 'ME11',
+        side: 'LHS',
+        apnRev: '610-00942-01 / Rev.03',
+        code7E: '7E-4026L-11',
+        vendors: 'LY POR Foam · Recycle Bushing · Memtech Copy Tooling',
+        fbu: 87,
+        main: 324,
+        rel: 74,
+        mbo: 25,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 20,
+        fatpMih: '2027-01-12',
+        total: 570
+      },
+      {
+        config: 'ME12',
+        side: 'LHS',
+        apnRev: '610-00942-01 / Rev.03',
+        code7E: '7E-4026L-12',
+        vendors: 'JPond POR Foam · Non-Recycle Bushing · Memtech Copy Tooling',
+        fbu: 87,
+        main: 324,
+        rel: 74,
+        mbo: 25,
+        iqc: 15,
+        oqc: 15,
+        doe: 10,
+        estYieldLoss: 20,
+        fatpMih: '2027-01-12',
+        total: 570
+      },
+      {
+        config: 'ME13',
+        side: 'LHS',
+        apnRev: '610-00942-01 / Rev.03',
+        code7E: '7E-4026L-13',
+        vendors: 'LY 0.25mm Thicker Foam (Double-Drive POR) · Recycle Bushing',
+        fbu: 0,
+        main: 324,
+        rel: 74,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 20,
+        estYieldLoss: 18,
+        fatpMih: '2027-01-12',
+        total: 486
+      },
+      {
+        config: 'ME14',
+        side: 'LHS',
+        apnRev: '610-00942-01 / Rev.03',
+        code7E: '7E-4026L-14',
+        vendors: 'Boyd 0.25mm Thicker Foam (Double-Drive POR) · Non-Recycle Bushing',
+        fbu: 0,
+        main: 324,
+        rel: 74,
+        mbo: 20,
+        iqc: 15,
+        oqc: 15,
+        doe: 20,
+        estYieldLoss: 18,
+        fatpMih: '2027-01-12',
+        total: 486
+      }
+    ]
+  }
+];
+
+// ============================================================================
+// INITIAL PROCESS CAPABILITY (CPK) RECORDS & STATISTICAL PIPELINE ENGINE
+// ============================================================================
+
+const INITIAL_CPK_RECORDS = [
+  // X4151 EVT RHS
+  { id: 'CPK-4151R-TIR', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-BRG-TIR', mean: 0.0052, stdDev: 0.00202, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4151R-IMB', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-ROT-IMB', mean: 1.72, stdDev: 0.72, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4151R-SLD', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-SLD-HT', mean: 0.41, stdDev: 0.056, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151R-ZMAX', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.89, stdDev: 0.049, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4151R-ZPARA', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.095, stdDev: 0.041, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4151R-TAPE', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-TAPE-CONC', mean: 0.14, stdDev: 0.057, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151R-GAP', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-COV-GAP', mean: 0.36, stdDev: 0.035, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151R-FOAM', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-PIL-FOAM', mean: 0.06, stdDev: 0.072, sampleSize: 32, date: '2026-11-20' },
+
+  // X4151 EVT LHS
+  { id: 'CPK-4151L-TIR', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-BRG-TIR', mean: 0.0055, stdDev: 0.00201, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4151L-IMB', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-ROT-IMB', mean: 1.95, stdDev: 0.85, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4151L-SLD', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-SLD-HT', mean: 0.36, stdDev: 0.044, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151L-ZMAX', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.86, stdDev: 0.041, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4151L-ZPARA', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.088, stdDev: 0.036, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4151L-TAPE', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-TAPE-CONC', mean: 0.155, stdDev: 0.058, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151L-GAP', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-COV-GAP', mean: 0.35, stdDev: 0.032, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151L-FOAM', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-PIL-FOAM', mean: 0.03, stdDev: 0.059, sampleSize: 32, date: '2026-11-20' },
+
+  // X4152 EVT RHS
+  { id: 'CPK-4152R-TIR', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-BRG-TIR', mean: 0.0049, stdDev: 0.0020, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4152R-IMB', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-ROT-IMB', mean: 1.60, stdDev: 0.68, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4152R-SLD', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-SLD-HT', mean: 0.35, stdDev: 0.042, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4152R-ZMAX', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.85, stdDev: 0.038, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4152R-ZPARA', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.082, stdDev: 0.034, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4152R-TAPE', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-TAPE-CONC', mean: 0.11, stdDev: 0.041, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4152R-GAP', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-COV-GAP', mean: 0.34, stdDev: 0.033, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4152R-FOAM', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-PIL-FOAM', mean: 0.01, stdDev: 0.052, sampleSize: 32, date: '2026-11-20' },
+
+  // X4026 EVT LHS
+  { id: 'CPK-4026L-TIR', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-BRG-TIR', mean: 0.0051, stdDev: 0.00205, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4026L-IMB', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-ROT-IMB', mean: 2.1, stdDev: 0.91, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4026L-SLD', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-SLD-HT', mean: 0.42, stdDev: 0.052, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4026L-ZMAX', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.86, stdDev: 0.042, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4026L-ZPARA', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.085, stdDev: 0.036, sampleSize: 64, date: '2026-11-20' },
+  { id: 'CPK-4026L-TAPE', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-TAPE-CONC', mean: 0.12, stdDev: 0.044, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4026L-GAP', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-COV-GAP', mean: 0.35, stdDev: 0.031, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4026L-FOAM', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-PIL-FOAM', mean: 0.02, stdDev: 0.056, sampleSize: 32, date: '2026-11-20' }
+];
+
+function normalCdf(z) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989422804014327 * Math.exp((-z * z) / 2);
+  const prob =
+    d * t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  return z > 0 ? 1 - prob : prob;
+}
+
+function computeCapabilityStats(rec, spec) {
+  if (!rec || !spec) {
+    return { cpk: 0, cp: null, cpl: null, cpu: null, ppm: 0 };
+  }
+  const mean = Number(rec.mean) || 0;
+  const sd = Math.max(0.00001, Number(rec.stdDev) || 0.00001);
+  const hasLsl = spec.specType !== 'upper' && spec.lsl !== null && spec.lsl !== '';
+  const hasUsl = spec.specType !== 'lower' && spec.usl !== null && spec.usl !== '';
+  const lsl = hasLsl ? Number(spec.lsl) : null;
+  const usl = hasUsl ? Number(spec.usl) : null;
+
+  const cpl = lsl !== null ? (mean - lsl) / (3 * sd) : null;
+  const cpu = usl !== null ? (usl - mean) / (3 * sd) : null;
+  const cp = lsl !== null && usl !== null ? (usl - lsl) / (6 * sd) : null;
+
+  let cpk = 0;
+  if (cpl !== null && cpu !== null) cpk = Math.min(cpl, cpu);
+  else if (cpu !== null) cpk = cpu;
+  else if (cpl !== null) cpk = cpl;
+
+  const lowerFail = lsl !== null ? normalCdf((lsl - mean) / sd) : 0;
+  const upperFail = usl !== null ? 1 - normalCdf((usl - mean) / sd) : 0;
+  const ppm = Math.max(0, Math.round((lowerFail + upperFail) * 1000000));
+
+  return {
+    cpk: Number.isFinite(cpk) ? cpk : 0,
+    cp: cp !== null && Number.isFinite(cp) ? cp : null,
+    cpl: cpl !== null && Number.isFinite(cpl) ? cpl : null,
+    cpu: cpu !== null && Number.isFinite(cpu) ? cpu : null,
+    ppm
+  };
+}
+
+function getCpkTone(cpk) {
+  if (cpk > 1.33) {
+    return {
+      key: 'green',
+      label: 'Capable',
+      cellClass: 'bg-emerald-50 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700 hover:bg-emerald-100 dark:hover:bg-emerald-900',
+      badgeClass: 'bg-emerald-50 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700'
+    };
+  }
+  if (cpk >= 1.0) {
+    return {
+      key: 'yellow',
+      label: 'Marginal',
+      cellClass: 'bg-yellow-50 dark:bg-yellow-950 text-yellow-900 dark:text-yellow-100 border-yellow-300 dark:border-yellow-700 hover:bg-yellow-100 dark:hover:bg-yellow-900',
+      badgeClass: 'bg-yellow-50 dark:bg-yellow-950 text-yellow-900 dark:text-yellow-100 border-yellow-300 dark:border-yellow-700'
+    };
+  }
+  return {
+    key: 'orange',
+    label: 'Incapable',
+    cellClass: 'bg-orange-50 dark:bg-orange-950 text-orange-900 dark:text-orange-100 border-orange-300 dark:border-orange-700 hover:bg-orange-100 dark:hover:bg-orange-900',
+    badgeClass: 'bg-orange-50 dark:bg-orange-950 text-orange-900 dark:text-orange-100 border-orange-300 dark:border-orange-700'
+  };
+}
+
+function formatSpecNum(val, spec) {
+  const num = Number(val);
+  if (!Number.isFinite(num)) return '—';
+  const abs = Math.abs(num);
+  if (spec?.unit === 'N') return num.toFixed(1);
+  if (abs > 0 && abs < 0.05) return num.toFixed(4);
+  return num.toFixed(3);
+}
+
+function parseCsvText(text) {
+  const cleaned = (text || '').replace(/^\uFEFF/, '').trim();
+  if (!cleaned) return { headers: [], rows: [] };
+  const lines = cleaned.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length < 2) return { headers: [], rows: [] };
+
+  const delimiter = lines[0].includes('\t') && !lines[0].includes(',') ? '\t' : ',';
+  const splitLine = (line) => {
+    const out = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          cur += '"';
+          i += 1;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (ch === delimiter && !inQuotes) {
+        out.push(cur.trim());
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    out.push(cur.trim());
+    return out;
+  };
+
+  const headers = splitLine(lines[0]).map((h) => h.replace(/^"|"$/g, '').trim());
+  const rows = lines.slice(1).map((line) => {
+    const cells = splitLine(line);
+    const obj = {};
+    headers.forEach((h, idx) => {
+      obj[h] = cells[idx] !== undefined ? cells[idx].replace(/^"|"$/g, '').trim() : '';
+    });
+    return obj;
+  });
+
+  return { headers, rows };
+}
+
+async function loadSheetJsLib() {
+  if (typeof window !== 'undefined' && window.XLSX) return window.XLSX;
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js';
+    script.async = true;
+    script.onload = () => {
+      if (window.XLSX) resolve(window.XLSX);
+      else reject(new Error('Excel parser failed to initialize.'));
+    };
+    script.onerror = () => reject(new Error('Unable to load Excel (.xlsx) parser. Please upload a .csv file.'));
+    document.head.appendChild(script);
+  });
+}
+
+async function parseUploadedTabularFile(file) {
+  const name = (file?.name || '').toLowerCase();
+  if (name.endsWith('.csv') || name.endsWith('.tsv') || name.endsWith('.txt')) {
+    const text = await file.text();
+    return parseCsvText(text);
+  }
+  if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
+    const XLSX = await loadSheetJsLib();
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const firstSheet = wb.SheetNames[0];
+    const ws = wb.Sheets[firstSheet];
+    const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    if (!aoa || aoa.length < 2) return { headers: [], rows: [] };
+    const headers = aoa[0].map((h) => String(h || '').trim());
+    const rows = aoa
+      .slice(1)
+      .filter((r) => r.some((cell) => String(cell || '').trim() !== ''))
+      .map((r) => {
+        const obj = {};
+        headers.forEach((h, i) => {
+          obj[h] = r[i] !== undefined ? r[i] : '';
+        });
+        return obj;
+      });
+    return { headers, rows };
+  }
+  throw new Error('Unsupported file type. Please upload .xlsx, .xls, or .csv.');
+}
+
+function findMatchingSpec(colHeader, masterSpecs) {
+  const norm = String(colHeader || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  if (!norm) return null;
+
+  return (
+    masterSpecs.find((s) => {
+      const codeNorm = s.code.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const nameNorm = s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return norm === codeNorm || norm === nameNorm || norm.includes(codeNorm);
+    }) || null
+  );
+}
+
+function inferFamilyFromModel(model) {
+  const m = String(model || '').toUpperCase();
+  if (['X3083', 'X4152', 'X3439', 'X4285'].includes(m)) return 'MB16"';
+  if (m === 'X3721') return 'iMac';
+  if (m === 'X3784') return 'MacMini';
+  if (m === 'X2689') return 'Display';
+  return 'MB14"';
+}
+
+function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) {
+  const warnings = [];
+  const findCol = (aliases) =>
+    headers.find((h) => {
+      const n = h.toLowerCase().replace(/[^a-z0-9]/g, '');
+      // Short aliases (n, no, id, sn) must match exactly; substring matching
+      // would wrongly pick columns such as "Mean" or "Nominal".
+      return aliases.some((a) =>
+        a.length <= 2 ? n === a : n === a || n.startsWith(a) || n.endsWith(a)
+      );
+    }) || null;
+
+  const modelCol = findCol(['model', 'product']);
+  const phaseCol = findCol(['phase', 'stage']);
+  const sideCol = findCol(['side', 'fanside']);
+  const configCol = findCol(['config', 'cfg']);
+  const paramCol = findCol(['paramcode', 'parameter', 'param', 'speccode']);
+  const meanCol = findCol(['mean', 'avg', 'average']);
+  const stdCol = findCol(['stddev', 'stdev', 'sigma', 'std']);
+  const nCol = findCol(['samplesize', 'count', 'qty', 'n']);
+
+  // Format 1: Pre-aggregated Summary Sheet (ParamCode + Mean + StdDev)
+  if (paramCol && meanCol && stdCol) {
+    const records = [];
+    rows.forEach((r, idx) => {
+      const spec = findMatchingSpec(r[paramCol], masterSpecs);
+      if (!spec) {
+        warnings.push(`Row ${idx + 2}: Parameter "${r[paramCol]}" did not match any Master Spec.`);
+        return;
+      }
+      const mean = Number(r[meanCol]);
+      const sd = Number(r[stdCol]);
+      if (Number.isNaN(mean) || Number.isNaN(sd) || sd <= 0) {
+        warnings.push(`Row ${idx + 2}: Invalid Mean/StdDev for ${spec.code}.`);
+        return;
+      }
+      const model = String(r[modelCol] || defaults.model || 'X4151').toUpperCase().trim();
+      const phase = String(r[phaseCol] || defaults.phase || 'EVT').toUpperCase().trim();
+      const side = String(r[sideCol] || defaults.side || 'RHS').toUpperCase().trim();
+      const config = String(r[configCol] || defaults.config || 'ME11').toUpperCase().trim();
+      const sampleSize = Math.max(5, Number(r[nCol]) || 32);
+
+      records.push({
+        id: `CPK-IMP-${model}-${side}-${spec.code}-${idx}`,
+        model,
+        familyGroup: inferFamilyFromModel(model),
+        phase,
+        side,
+        config,
+        specId: spec.id,
+        mean,
+        stdDev: sd,
+        sampleSize,
+        date: todayIso(),
+        sourceFile: fileName
+      });
+    });
+
+    return {
+      format: `Pre-Aggregated Summary (${rows.length} rows)`,
+      matchedSpecs: Array.from(new Set(records.map((r) => r.specId))),
+      unmappedColumns: [],
+      records,
+      warnings
+    };
+  }
+
+  // Format 2: Wide Raw Measurement Format (e.g., OMM / Dynamic Tester export: 1 row per measured unit)
+  const metaCols = new Set(
+    [
+      modelCol,
+      phaseCol,
+      sideCol,
+      configCol,
+      findCol(['serial', 'sn', 'unit', 'sample', 'no', 'id', 'date', 'time'])
+    ].filter(Boolean)
+  );
+  const specColMap = [];
+  const unmappedColumns = [];
+
+  headers.forEach((h) => {
+    if (metaCols.has(h)) return;
+    const spec = findMatchingSpec(h, masterSpecs);
+    if (spec) {
+      specColMap.push({ header: h, spec });
+    } else {
+      const numericVals = rows
+        .map((r) => r[h])
+        .filter((v) => v !== '' && v !== null && v !== undefined)
+        .map(Number)
+        .filter((n) => !Number.isNaN(n));
+      if (numericVals.length >= 2) {
+        const n = numericVals.length;
+        const mean = numericVals.reduce((a, b) => a + b, 0) / n;
+        const variance = numericVals.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / (n - 1);
+        const sd = Math.max(0.0005, Math.sqrt(variance));
+        const cleanCode = h
+          .toUpperCase()
+          .replace(/[^A-Z0-9]+/g, '_')
+          .replace(/^_|_$/g, '')
+          .slice(0, 14);
+        unmappedColumns.push({
+          header: h,
+          suggestedCode: cleanCode || 'PARAM_NEW',
+          suggestedName: h.replace(/_/g, ' '),
+          count: n,
+          mean,
+          stdDev: sd,
+          suggestedLsl: Number((mean - 4.5 * sd).toFixed(4)),
+          suggestedNominal: Number(mean.toFixed(4)),
+          suggestedUsl: Number((mean + 4.5 * sd).toFixed(4)),
+          unit: 'mm'
+        });
+      }
+    }
+  });
+
+  if (specColMap.length === 0) {
+    warnings.push(
+      'No columns matched existing Master Spec codes. Use the Auto-Generate Master Spec panel below to register uploaded columns.'
+    );
+    return {
+      format: `Wide Raw Measurements (${rows.length} units)`,
+      matchedSpecs: [],
+      unmappedColumns,
+      records: [],
+      warnings
+    };
+  }
+
+  // Group raw readings by Model x Phase x Side x Config
+  const grouped = new Map();
+  rows.forEach((r) => {
+    const model = String((modelCol && r[modelCol]) || defaults.model || 'X4151').toUpperCase().trim();
+    const phase = String((phaseCol && r[phaseCol]) || defaults.phase || 'EVT').toUpperCase().trim();
+    const side = String((sideCol && r[sideCol]) || defaults.side || 'RHS').toUpperCase().trim();
+    const config = String((configCol && r[configCol]) || defaults.config || 'ME11').toUpperCase().trim();
+    const gKey = `${model}::${phase}::${side}::${config}`;
+    if (!grouped.has(gKey)) {
+      grouped.set(gKey, { model, phase, side, config, rows: [] });
+    }
+    grouped.get(gKey).rows.push(r);
+  });
+
+  const records = [];
+  grouped.forEach((grp) => {
+    specColMap.forEach(({ header, spec }) => {
+      const vals = grp.rows
+        .map((r) => r[header])
+        .filter((v) => v !== '' && v !== null && v !== undefined)
+        .map(Number)
+        .filter((n) => !Number.isNaN(n));
+      if (vals.length < 2) return;
+
+      const n = vals.length;
+      const mean = vals.reduce((a, b) => a + b, 0) / n;
+      const variance = vals.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / (n - 1);
+      const sd = Math.max(0.0001, Math.sqrt(variance));
+
+      records.push({
+        id: `CPK-RAW-${grp.model}-${grp.side}-${grp.config}-${spec.code}`,
+        model: grp.model,
+        familyGroup: inferFamilyFromModel(grp.model),
+        phase: grp.phase,
+        side: grp.side,
+        config: grp.config,
+        specId: spec.id,
+        mean: Number(mean.toFixed(5)),
+        stdDev: Number(sd.toFixed(5)),
+        sampleSize: n,
+        rawValues: vals,
+        date: todayIso(),
+        sourceFile: fileName
+      });
+    });
+  });
+
+  return {
+    format: `Wide Raw Measurements (${rows.length} units · ${specColMap.length} matched params)`,
+    matchedSpecs: specColMap.map((s) => s.spec.id),
+    unmappedColumns,
+    records,
+    warnings
+  };
+}
+
+/**
+ * Escapes one CSV cell and neutralizes spreadsheet formula injection: a value a
+ * user typed that starts with =, +, -, @, tab or CR would otherwise run as a
+ * formula when the exported file is opened in Excel.
+ */
+function csvText(value) {
+  const text = value === null || value === undefined ? '' : String(value);
+  const safe = /^[=+\-@\t\r]/.test(text.trim()) ? `'${text}` : text;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Allocates the next human-readable ID for a collection, e.g. `CI-15`.
+ *
+ * The number is the highest suffix already in use + 1, so deleting a record can
+ * never hand its ID to a new one (a reused ID would silently merge the new
+ * record with stale gate/import references). The candidate is also checked
+ * against the full ID set to catch suffixes the numeric scan cannot see
+ * (e.g. `CI-12B`).
+ */
+function nextId(prefix, items) {
+  const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^${escaped}(\\d+)$`);
+  const used = new Set(
+    (Array.isArray(items) ? items : [])
+      .map((item) => String((item && item.id) || ''))
+      .filter(Boolean)
+  );
+  let highest = 0;
+  used.forEach((id) => {
+    const match = id.match(pattern);
+    if (match) highest = Math.max(highest, Number(match[1]));
+  });
+  let seq = highest + 1;
+  let candidate = `${prefix}${String(seq).padStart(2, '0')}`;
+  while (used.has(candidate)) {
+    seq += 1;
+    candidate = `${prefix}${String(seq).padStart(2, '0')}`;
+  }
+  return candidate;
+}
+
+/**
+ * Case number shown to users. It is the numeric suffix of the `CF-26-` id, so
+ * the displayed number and the id can never disagree.
+ */
+function caseNoFromId(id) {
+  return Number(String(id).replace(/^CF-26-/, '')) || 1;
+}
+
+/**
+ * Resolves uploaded column headers to aliases.
+ *
+ * Exact (normalized) matches win over fuzzy ones, so a file exported from this
+ * app maps "IssueCategory" to the category alias instead of stealing it for
+ * "issue", and "Build" is not confused with "BuildConfig". Fuzzy matching only
+ * fills the gaps for hand-made sheets ("Project Title", "NG Qty").
+ */
+function createColumnFinder(headers) {
+  const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const normalizedHeaders = (Array.isArray(headers) ? headers : []).map((header) => ({
+    label: header,
+    key: normalize(header)
+  }));
+  return (aliases) => {
+    const keys = (Array.isArray(aliases) ? aliases : [aliases]).map(normalize);
+    const exact = normalizedHeaders.find((h) => keys.includes(h.key));
+    if (exact) return exact.label;
+    const fuzzy = normalizedHeaders.find((h) =>
+      keys.some((key) =>
+        key.length <= 2
+          ? h.key === key || h.key.startsWith(key)
+          : h.key === key || h.key.startsWith(key) || h.key.endsWith(key)
+      )
+    );
+    return fuzzy ? fuzzy.label : null;
+  };
+}
+
+// Human labels for the persisted workspace slices, used by the save-conflict diff.
+const PAYLOAD_SLICE_LABELS = {
+  projects: 'Programs',
+  tasks: 'Tasks',
+  gateRecords: 'Gate records',
+  productionRecords: 'Production records',
+  masterSpecs: 'Master specs',
+  cpkRecords: 'Cpk measurements',
+  costProjects: 'Cost initiatives',
+  customerFeedback: 'Customer feedback',
+  scheduleOverrides: 'Schedule overrides'
+};
+
+function payloadRecordLabel(slice, key, item) {
+  if (item && typeof item === 'object') {
+    if (slice === 'projects') return `${item.id || key} · ${item.model || ''}`.trim();
+    if (slice === 'tasks') return `${item.id || key} · ${item.title || ''}`.trim();
+    if (slice === 'masterSpecs') return `${item.code || item.id || key} · ${item.parameter || ''}`.trim();
+    if (slice === 'costProjects') return `${item.id || key} · ${item.title || ''}`.trim();
+    if (slice === 'customerFeedback') {
+      return `${item.id || key} · ${item.model || ''} · ${item.issueItem || ''}`.trim();
+    }
+    if (item.id) return String(item.id);
+  }
+  return String(key);
+}
+
+/**
+ * Compares the unsaved local workspace with the copy another user saved.
+ * Returns one entry per slice that differs, split by side:
+ *   onlyMine   — records this browser has that the saved copy does not
+ *   onlyTheirs — records the saved copy has that this browser does not
+ *   differing  — records present on both sides with different content
+ * Purely read-only: nothing here mutates either payload.
+ */
+function diffWorkspacePayloads(local, remote) {
+  const toEntries = (value) => {
+    if (Array.isArray(value)) {
+      return value.map((item, index) => [String(item && item.id != null ? item.id : index), item]);
+    }
+    if (value && typeof value === 'object') {
+      return Object.keys(value).map((key) => [key, value[key]]);
+    }
+    return [];
+  };
+
+  const slices = [];
+  Object.keys(PAYLOAD_SLICE_LABELS).forEach((slice) => {
+    const mineEntries = toEntries(local && local[slice]);
+    const theirsEntries = toEntries(remote && remote[slice]);
+    if (mineEntries.length === 0 && theirsEntries.length === 0) return;
+
+    const mine = new Map(mineEntries);
+    const theirs = new Map(theirsEntries);
+    const onlyMine = [];
+    const onlyTheirs = [];
+    const differing = [];
+
+    mine.forEach((item, key) => {
+      if (!theirs.has(key)) {
+        onlyMine.push(payloadRecordLabel(slice, key, item));
+        return;
+      }
+      if (JSON.stringify(item) !== JSON.stringify(theirs.get(key))) {
+        differing.push(payloadRecordLabel(slice, key, item));
+      }
+    });
+    theirs.forEach((item, key) => {
+      if (!mine.has(key)) onlyTheirs.push(payloadRecordLabel(slice, key, item));
+    });
+
+    if (onlyMine.length > 0 || onlyTheirs.length > 0 || differing.length > 0) {
+      slices.push({ slice, label: PAYLOAD_SLICE_LABELS[slice], onlyMine, onlyTheirs, differing });
+    }
+  });
+  return slices;
+}
+
+function triggerCsvDownload(filename, csv) {
+  // UTF-8 BOM so Excel shows Thai text and the ฿ sign instead of mojibake.
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function buildSampleCpkCsv(mode = 'wide') {
+  if (mode === 'summary') {
+    return [
+      'Model,Phase,Side,Config,ParamCode,Mean,StdDev,SampleSize',
+      'X4151,EVT,RHS,ME11,BRG_TIR,0.0051,0.0018,64',
+      'X4151,EVT,RHS,ME11,ROT_IMB,1.75,0.65,64',
+      'X4151,EVT,RHS,ME11,SLD_HT,0.37,0.042,32',
+      'X4151,EVT,LHS,ME11,DYN_ZMAX,9.86,0.039,64',
+      'X4151,EVT,LHS,ME11,COV_GAP,0.355,0.031,32'
+    ].join('\n');
+  }
+
+  // Generate 64 realistic OMM / Dynamic Tester rows for X4151 EVT RHS & LHS
+  const header = 'SerialNo,Model,Phase,Side,Config,BRG_TIR,ROT_IMB,SLD_HT,DYN_ZMAX,DYN_ZPARA,COV_GAP,FAN_FLAT';
+  const lines = [header];
+  const pseudoNorm = (seed) => {
+    const u1 = Math.max(0.001, ((Math.sin(seed * 12.9898) * 43758.5453) % 1 + 1) % 1);
+    const u2 = Math.max(0.001, ((Math.sin(seed * 78.233) * 19341.123) % 1 + 1) % 1);
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  };
+
+  ['RHS', 'LHS'].forEach((side, sIdx) => {
+    for (let i = 1; i <= 32; i++) {
+      const seed = (sIdx + 1) * 100 + i;
+      const tir = Math.max(0.001, 0.0051 + pseudoNorm(seed + 1) * 0.0018).toFixed(4);
+      const imb = Math.max(0.2, (side === 'RHS' ? 1.75 : 1.95) + pseudoNorm(seed + 2) * 0.65).toFixed(3);
+      const sld = (0.37 + pseudoNorm(seed + 3) * 0.042).toFixed(3);
+      const zmax = (9.86 + pseudoNorm(seed + 4) * 0.039).toFixed(3);
+      const zpara = Math.max(0.01, 0.088 + pseudoNorm(seed + 5) * 0.032).toFixed(3);
+      const gap = (0.355 + pseudoNorm(seed + 6) * 0.031).toFixed(3);
+      const flat = Math.max(0.01, 0.072 + pseudoNorm(seed + 7) * 0.024).toFixed(3);
+      lines.push(
+        `SN-4151${side[0]}-${String(i).padStart(3, '0')},X4151,EVT,${side},ME11,${tir},${imb},${sld},${zmax},${zpara},${gap},${flat}`
+      );
+    }
+  });
+  return lines.join('\n');
+}
+
+function exportMasterSpecsCsv(masterSpecs) {
+  const header = 'Code,ParameterName,Model,Station,SpecType,LSL,Nominal,USL,Unit,TargetCpk,Metrology,ControlPlanDoc,SamplingPlan';
+  const rows = masterSpecs.map((s) =>
+    [
+      csvText(s.code),
+      csvText(s.name),
+      csvText(s.model || ''),
+      csvText(s.station),
+      csvText(s.specType),
+      s.lsl ?? '',
+      s.nominal ?? '',
+      s.usl ?? '',
+      csvText(s.unit),
+      s.cpkTarget,
+      csvText(s.metrology),
+      csvText(s.docRef),
+      csvText(s.samplingPlan)
+    ].join(',')
+  );
+  triggerCsvDownload('FFM_Master_Specifications.csv', [header, ...rows].join('\n'));
+}
+
+const INITIAL_TASKS = [
+  {
+    id: 'TSK-201',
+    projectId: 'PRJ-X4151',
+    gateId: 'mbo',
+    processStep: '3. Pillow Stator Assy',
+    category: 'Yield and Scrap',
+    title: 'Verify hub press-fit 0.86 mm CA & Anjie ED bake baseline before MBO release',
+    owner: 'Patcharapong J.',
+    priority: 'High',
+    status: 'In Progress',
+    dueDate: '2026-11-25',
+    description:
+      'Confirm hub press-fit length reduction (0.90 → 0.86 mm) eliminates hub tape bubble defects and verify Anjie pillow ED bake gloss spec prior to ME11/ME12 MBO start.',
+    updates: [
+      { author: 'Patcharapong J.', time: '2h ago', text: 'First 120-pc trial run showed 0 hub tape bubbles; logging Cpk for MBO OK2B.' }
+    ]
+  },
+  {
+    id: 'TSK-202',
+    projectId: 'PRJ-X4152',
+    gateId: 'prep',
+    processStep: '1. Preparation & IQC',
+    category: 'Yield and Scrap',
+    title: 'Enforce 100% inline OMM flatness sorting gate for Ka Shui Mg covers (ME13/ME16)',
+    owner: 'Kanya R.',
+    priority: 'Critical',
+    status: 'Blocked',
+    dueDate: '2026-11-28',
+    description:
+      'Isolate bulging Ka Shui magnesium covers via 100% inline OMM optical screening and verify FTA probe force < 18.0 N before opening BBR/BRR for ME13 & ME16.',
+    updates: [
+      { author: 'Kanya R.', time: '1h ago', text: 'ME13 & ME16 held at G1 Preparing until Ka Shui OMM sorted lot clears IQC.' }
+    ]
+  },
+  {
+    id: 'TSK-203',
+    projectId: 'PRJ-X4151',
+    gateId: 'oqc',
+    processStep: '6. Final Inspection (OQC)',
+    category: 'Customer feedback',
+    title: 'Submit X4151L PPBR FACA report (95.8% FPY vs 96.0% target) to MTCE/KZW',
+    owner: 'Touchakorn T.',
+    priority: 'High',
+    status: 'In Progress',
+    dueDate: '2026-12-03',
+    description:
+      'Per PEN-81-0002 Rev B, issue formal FACA report covering X4151L bearing runout Cpk (1.58) and dynamic balance PPM (230) ahead of PBR.',
+    updates: [
+      { author: 'Touchakorn T.', time: 'Yesterday', text: 'Drafting FACA Pareto comparing Memtech vs Lotes impeller balance dispersion.' }
+    ]
+  },
+  {
+    id: 'TSK-204',
+    projectId: 'PRJ-X4026',
+    gateId: 'mbo',
+    processStep: '4. Fan Assembly',
+    category: 'Cost reduction',
+    title: 'Stage LY / JPond POR & 0.25 mm thicker foam kits (SPP0868–SPP0871) for MBO',
+    owner: 'Supachai M.',
+    priority: 'Medium',
+    status: 'To Do',
+    dueDate: '2026-12-18',
+    description:
+      'Complete line-side kitting for ME11–ME14 LHS splits and verify zero foam wrinkle defects across auto-accessory station.',
+    updates: []
+  },
+  {
+    id: 'TSK-205',
+    projectId: 'PRJ-X4152',
+    gateId: 'prep',
+    processStep: '5. Fan Test & Accessory',
+    category: 'DOE',
+    title: 'Calibrate Height Gauge vs OMM correlation & POR foam 875-14134 changeover',
+    owner: 'Chanoknan J.',
+    priority: 'High',
+    status: 'Done',
+    dueDate: '2026-11-20',
+    description:
+      'Confirm cancellation of 875-16800 thicker foam on 100% EVT line and lock POR foam 875-14134 work instructions.',
+    updates: [
+      { author: 'Chanoknan J.', time: 'Nov 20', text: 'POR foam 875-14134 locked on ME11, ME12, ME14, ME15.' }
+    ]
+  }
+];
+
+// ============================================================================
+// DOMAIN HELPERS & INITIAL STATE BUILDERS
+// ============================================================================
+
+function getDefaultCriteriaForGate(gateId) {
+  const map = {
+    prep: [
+      { label: 'Stage-Kickoff Checklist (10-Step Spindle BOM, IC & +R Label CL)', category: 'Governance' },
+      { label: 'FAT / SAT Machine Qualification (PMM-85-0003) & PIOE Line Layout', category: 'Equipment' },
+      { label: 'POR vs Alternate Vendor Split Matrix & MO (SPP) Alignment', category: 'Materials' }
+    ],
+    bbr: [
+      { label: 'Raw Material Availability & IQC 100% OMM Optical Sorting Disposition', category: 'IQC / Quality' },
+      { label: 'Fixture Calibration & FTA Probe Force Verification (< 18.0 N)', category: 'Tooling' },
+      { label: 'P1/P2 FMEA Lessons Learned & Master/Blocked System Check', category: 'Engineering' }
+    ],
+    brr: [
+      { label: 'Line Parameter Calibration & Auto-Dispensing / Docking Setup', category: 'Process' },
+      { label: 'Work Order Instruction Sheets (WI) & Operator Certifications', category: 'Production' },
+      { label: 'Line-Side Material Kitting Verified 1 Week Prior to MBO', category: 'Materials' }
+    ],
+    mbo: [
+      { label: 'MBO Pilot Lot Run & First-Article Dimensional / Dynamic Audit', category: 'Engineering' },
+      { label: 'FDB Helium Leak & Bearing Runout Cpk Baseline Check', category: 'Quality' },
+      { label: 'Formal OK2B Sign-Off for Main Build Execution', category: 'Governance' }
+    ],
+    main: [
+      { label: 'Main Build Execution @ Target Line UPH (340 UPH) & Efficiency (> 90%)', category: 'Production' },
+      { label: 'Inline Dynamic Balance (PPM), Acoustic QA & Hipot Screening', category: 'Process' },
+      { label: 'MTCE REL / EE / EM / Safety Demand Allocation Segregated', category: 'Reliability' }
+    ],
+    oqc: [
+      { label: 'Final OQC Dimensional (Cover Height/Flatness) & Visual Audit', category: 'Quality' },
+      { label: 'PPBR Yield Gate Check (FACA Issued if FPY < Target or FR > 1.0%)', category: 'Governance' },
+      { label: 'Serialized Traceability & Packaging Drop/Carton Verification', category: 'OQC' }
+    ],
+    ship: [
+      { label: 'OK2S (OK to Ship) Customer Engineering Package Approved', category: 'Governance' },
+      { label: 'FBU + Main Shipment Quantity Reconciliation vs Matrix', category: 'Logistics' },
+      { label: 'ETD Export & Cold-Chain / Anti-Static Packing Release', category: 'Logistics' }
+    ],
+    mih: [
+      { label: 'FATP Material In-House (MIH) Arrival Confirmed (100% On-Time KPI)', category: 'Customer' },
+      { label: 'FATP IQC Correlation & Functional Spin Verification Passed', category: 'Quality' },
+      { label: 'Zero Incoming Customer Escapes Logged', category: 'Customer' }
+    ],
+    pbr: [
+      { label: 'Post Build Review (PBR) Yield, Cpk & Defect Pareto Closed', category: 'Governance' },
+      { label: 'Engineering Change / Tooling Action Items Assigned for Next Gate', category: 'Engineering' },
+      { label: 'RBR & 6-Week Ramp Monitoring Plan Baseline Locked', category: 'Production' }
+    ]
+  };
+  return map[gateId] || [];
+}
+
+function getSideList(sideStr = '') {
+  if (sideStr.includes('RHS') && sideStr.includes('LHS')) return ['RHS', 'LHS'];
+  if (sideStr.includes('LHS')) return ['LHS'];
+  if (sideStr.includes('RHS')) return ['RHS'];
+  return ['Single'];
+}
+
+function getFamilyGroup(item) {
+  if (!item) return 'Other';
+  if (item.familyGroup) return item.familyGroup;
+  const fam = (item.family || '').toLowerCase();
+  if (fam.includes('14')) return 'MB14"';
+  if (fam.includes('16')) return 'MB16"';
+  if (fam.includes('imac')) return 'iMac';
+  if (fam.includes('mini')) return 'MacMini';
+  if (fam.includes('display')) return 'Display';
+  return item.family || 'Other';
+}
+
+// ============================================================================
+// FISCAL YEAR & SHIPMENT-TO-MIH KPI HELPERS
+// ============================================================================
+
+/**
+ * MinebeaMitsumi fiscal year: 1 April – 31 March. `fyStartYear` is the calendar
+ * year the fiscal year opens in, so FY2026 = 2026-04-01 … 2027-03-31.
+ */
+const FISCAL_YEAR_START_MONTH = 4;
+const KPI_FISCAL_YEAR = 2026;
+
+function fiscalYearWindow(fyStartYear) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const start = `${fyStartYear}-${pad(FISCAL_YEAR_START_MONTH)}-01`;
+  // Day 0 of the month after the fiscal year ends = its last day.
+  const end = new Date(Date.UTC(fyStartYear + 1, FISCAL_YEAR_START_MONTH - 1, 0))
+    .toISOString()
+    .slice(0, 10);
+  return { start, end };
+}
+
+/**
+ * Calendar date (YYYY-MM-DD) in the plant's time zone. Every record date, export
+ * filename and "today" marker goes through this one helper: deriving a date from
+ * toISOString() used UTC, so anything saved before 07:00 Bangkok landed on the
+ * previous day, and a hard-coded constant froze the app on its deploy date.
+ */
+const APP_TIME_ZONE = 'Asia/Bangkok';
+const APP_DATE_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  timeZone: APP_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+});
+
+function todayIso(now = new Date()) {
+  const parts = APP_DATE_FORMATTER.formatToParts(now);
+  const part = (type) => (parts.find((p) => p.type === type) || {}).value || '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+/**
+ * Date the line's G8 MIH gate was last approved, or null when it is not approved
+ * or carries no usable date. Evidence links and criterion toggles also write audit
+ * entries, so only approval records are considered; an undated approval returns
+ * null (it cannot be shown to be late).
+ */
+function mihApprovalIso(gateRecords, projectId, lineKey, today = todayIso()) {
+  const gate = gateRecords?.[projectId]?.[lineKey]?.mih;
+  if (!gate || gate.status !== 'Approved') return null;
+
+  const parse = (value) => {
+    const time = String(value || '');
+    if (/^Today/i.test(time)) return today;
+    const match = time.match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : null;
+  };
+
+  const fromApprovers = (Array.isArray(gate.approvers) ? gate.approvers : [])
+    .filter((approver) => /approv/i.test(String((approver && (approver.decision || approver.status)) || '')))
+    .map((approver) => parse(approver.updatedAt || approver.date || approver.signedAt || approver.time))
+    .filter(Boolean);
+  const fromAuditLog = (Array.isArray(gate.auditLog) ? gate.auditLog : [])
+    .filter((entry) => {
+      const action = String((entry && entry.action) || '');
+      return /signed/i.test(action) && /approv/i.test(action);
+    })
+    .map((entry) => parse(entry.time))
+    .filter(Boolean);
+
+  const dates = (fromApprovers.length ? fromApprovers : fromAuditLog).sort();
+  return dates.length ? dates[dates.length - 1] : null;
+}
+
+/**
+ * Shipment-to-MIH achievement for one fiscal year.
+ *
+ * Achievement is measured only against lines whose FATP MIH date has arrived, so
+ * a line that is not due yet cannot count as a miss. The all-lines figure is kept
+ * separately as forecast coverage (`forecastAchieved` / `tracked`).
+ *
+ * A line whose approval is dated after its MIH date counts as late, not achieved;
+ * an approval with no usable date is accepted (it cannot be shown to be late).
+ */
+function summarizeMihAchievement(lines, options = {}) {
+  const { today = todayIso(), fiscalYear = KPI_FISCAL_YEAR } = options;
+  const window = fiscalYearWindow(fiscalYear);
+  const summary = {
+    fiscalYear,
+    window,
+    tracked: 0,
+    forecastAchieved: 0,
+    due: 0,
+    onTime: 0,
+    late: 0,
+    nextDue: null,
+    pct: 0
+  };
+
+  (Array.isArray(lines) ? lines : []).forEach((entry) => {
+    summary.tracked += 1;
+    if (entry && entry.approved) summary.forecastAchieved += 1;
+
+    const due = String((entry && entry.fatpMih) || '');
+    if (!due) return; // an undated line is forecast only
+    if (due < window.start || due > window.end) return; // outside this fiscal year
+
+    if (due <= today) {
+      summary.due += 1;
+      const approvedAt = entry.approvedAt || null;
+      if (entry.approved && (!approvedAt || approvedAt <= due)) {
+        summary.onTime += 1;
+      } else if (entry.approved) {
+        summary.late += 1;
+      }
+    } else if (!summary.nextDue || due < summary.nextDue) {
+      summary.nextDue = due;
+    }
+  });
+
+  summary.pct = summary.due > 0 ? (summary.onTime / summary.due) * 100 : 0;
+  return summary;
+}
+
+function getLineVariantsForProject(project) {
+  if (!project) return [];
+  const defaultSides = getSideList(project.side);
+  const variants = [];
+  (project.buildMatrix || []).forEach((row) => {
+    const calc = computeBuildMatrixRow(row);
+    const sides = row.side ? [row.side] : defaultSides;
+    sides.forEach((side) => {
+      variants.push({
+        key: `${row.config}-${side}`,
+        config: row.config,
+        side,
+        apnRev: row.apnRev || '—',
+        code7E: row.code7E || '—',
+        vendors: row.vendors,
+        fatpMih: row.fatpMih || project.mihDate || '',
+        qty: calc.totalProduction
+      });
+    });
+  });
+  return variants;
+}
+
+function computeBuildMatrixRow(row) {
+  const fbu = Math.max(0, Number(row?.fbu) || 0);
+  const main = Math.max(0, Number(row?.main) || 0);
+  const rel = Math.max(0, Number(row?.rel) || 0);
+  const mbo = Math.max(0, Number(row?.mbo) || 0);
+  const iqc = Math.max(0, Number(row?.iqc) || 0);
+  const oqc = Math.max(0, Number(row?.oqc) || 0);
+  const doe = Math.max(0, Number(row?.doe) || 0);
+  const estYieldLoss = Math.max(0, Number(row?.estYieldLoss) || 0);
+
+  const shipmentReq = fbu + main + rel;
+  const additionalReq = mbo + iqc + oqc + doe + estYieldLoss;
+  const totalProduction = shipmentReq + additionalReq;
+
+  return {
+    fbu,
+    main,
+    rel,
+    mbo,
+    iqc,
+    oqc,
+    doe,
+    estYieldLoss,
+    shipmentReq,
+    additionalReq,
+    totalProduction
+  };
+}
+
+function computeProgramGateDependency(project, gateId, lineGateMap) {
+  const variants = getLineVariantsForProject(project);
+  if (variants.length === 0) {
+    return { status: 'Pending', approvedCount: 0, totalCount: 0, blockedLines: [], activeLines: [] };
+  }
+
+  let approvedCount = 0;
+  const blockedLines = [];
+  const activeLines = [];
+
+  variants.forEach((v) => {
+    const st = lineGateMap?.[v.key]?.[gateId]?.status || 'Pending';
+    if (st === 'Approved') approvedCount += 1;
+    else if (st === 'Blocked') blockedLines.push(v.key);
+    else if (st === 'In Review' || st === 'Conditional') activeLines.push(v.key);
+  });
+
+  let status = 'Pending';
+  if (approvedCount === variants.length) status = 'Approved';
+  else if (blockedLines.length > 0) status = 'Blocked';
+  else if (activeLines.length > 0 || approvedCount > 0) status = 'In Review';
+
+  return { status, approvedCount, totalCount: variants.length, blockedLines, activeLines };
+}
+
+// A single Config/Side gate is signed off cross-functionally by exactly two authorized
+// functions: Engineering Manager (Horikawa or Saengtian) and QA Manager (Ronilo or Panida).
+function getSignOffRosterForProject() {
+  return {
+    em: {
+      role: 'Engineering Manager',
+      defaultName: 'Horikawa / Saengtian',
+      options: ['Horikawa', 'Saengtian']
+    },
+    qa: {
+      role: 'QA Manager',
+      defaultName: 'Ronilo / Panida',
+      options: ['Ronilo', 'Panida']
+    }
+  };
+}
+
+function createSingleGateDossier(project, gate, variant, initialStatus, leaderName, engName, customOverride = {}) {
+  const scopeTag = `${project.model} ${project.phase} · ${variant.config} ${variant.side}`;
+  const isPast = initialStatus === 'Approved';
+  const isActive = initialStatus === 'In Review' || initialStatus === 'Blocked' || initialStatus === 'Conditional';
+  const roster = getSignOffRosterForProject();
+
+  const baseCriteria = getDefaultCriteriaForGate(gate.id).map((item, cIdx) => ({
+    id: `${project.id}-${variant.key}-${gate.id}-c${cIdx}`,
+    label: item.label,
+    category: item.category,
+    checked: isPast ? true : isActive ? cIdx < 2 : false
+  }));
+
+  const baseApprovers = [
+    {
+      role: roster.em.role,
+      name: isPast ? roster.em.options[0] : roster.em.defaultName,
+      options: roster.em.options,
+      decision: isPast ? 'Approved' : isActive ? 'Approved' : 'Pending',
+      remark: isPast ? `${scopeTag} verified under PEN-81-0002 Rev B.` : isActive ? 'Tracking FATP MIH commitment.' : '',
+      updatedAt: isPast ? '2026-11-19 16:40' : isActive ? '2026-11-21 09:15' : ''
+    },
+    {
+      role: roster.qa.role,
+      name: isPast ? roster.qa.options[0] : roster.qa.defaultName,
+      options: roster.qa.options,
+      decision: isPast ? 'Approved' : 'Pending',
+      remark: isPast ? 'IQC OMM & P1/P2 CA readiness verified.' : '',
+      updatedAt: isPast ? '2026-11-20 11:30' : ''
+    },
+  ];
+
+  // Evidence is append-only: the Google Drive links that back a gate decision stay
+  // attached to the dossier (and its audit trail) for later retrieval.
+  const evidenceFolder = `https://drive.google.com/drive/folders/1FFM-PEN81-${project.id.replace('PRJ-', '')}-${variant.key}-${gate.code}`;
+  const baseEvidence = isPast
+    ? [
+        {
+          id: `${project.id}-${variant.key}-${gate.id}-ev1`,
+          label: `${gate.code} ${gate.short} · signed gate pack (PDF)`,
+          url: `https://drive.google.com/file/d/1${project.id.replace('PRJ-', '')}${gate.code}RevB/view`,
+          addedBy: roster.em.options[0],
+          addedAt: '2026-11-20 15:00'
+        },
+        {
+          id: `${project.id}-${variant.key}-${gate.id}-ev2`,
+          label: `${gate.code} ${gate.short} · build matrix & MO SPP evidence`,
+          url: evidenceFolder,
+          addedBy: roster.qa.options[0],
+          addedAt: '2026-11-20 15:05'
+        }
+      ]
+    : isActive
+    ? [
+        {
+          id: `${project.id}-${variant.key}-${gate.id}-ev1`,
+          label: `${gate.code} ${gate.short} · gate evidence (in progress)`,
+          url: evidenceFolder,
+          addedBy: roster.em.options[0],
+          addedAt: '2026-11-21 09:20'
+        }
+      ]
+    : [];
+
+  const gateIdx = NPI_GATES.findIndex((g) => g.id === gate.id);
+  return {
+    gateId: gate.id,
+    status: customOverride.status || initialStatus,
+    targetDate: customOverride.targetDate || `2026-12-${String(Math.min(28, 2 + gateIdx * 3)).padStart(2, '0')}`,
+    criteria: customOverride.criteria || baseCriteria,
+    approvers: customOverride.approvers || baseApprovers,
+    evidence: customOverride.evidence || baseEvidence,
+    auditLog:
+      customOverride.auditLog ||
+      (isPast
+        ? [
+            {
+              actor: 'PEN-81-0002 Gate Board',
+              action: `${scopeTag} · ${gate.code} (${gate.short}) Approved & Locked`,
+              time: '2026-11-20 15:00',
+              note: 'All individual line exit criteria satisfied.'
+            }
+          ]
+        : [])
+  };
+}
+
+function createInitialGateRecords() {
+  const allRecords = {};
+
+  INITIAL_PROJECTS.forEach((project) => {
+    const variants = getLineVariantsForProject(project);
+    const projectLineRecords = {};
+
+    variants.forEach((variant) => {
+      const gateMapForLine = {};
+      const isX4151Batch2 = project.id === 'PRJ-X4151' && (variant.config === 'ME13' || variant.config === 'ME14');
+      const isX4152KaShuiHold = project.id === 'PRJ-X4152' && (variant.config === 'ME13' || variant.config === 'ME16');
+
+      NPI_GATES.forEach((gate, idx) => {
+        let initialStatus = 'Pending';
+        let customOverride = {};
+        const roster = getSignOffRosterForProject();
+
+        if (project.id === 'PRJ-X4151') {
+          if (idx < 3) {
+            initialStatus = 'Approved';
+          } else if (idx === 3) {
+            initialStatus = isX4151Batch2 ? 'Pending' : 'In Review';
+            if (!isX4151Batch2) {
+              customOverride = {
+                targetDate: '2026-11-26',
+                approvers: [
+                  { role: roster.em.role, name: 'Horikawa', options: roster.em.options, decision: 'Approved', remark: 'BRR closed; Batch 1 ETD Dec 20 / MIH Dec 24 locked.', updatedAt: '2026-11-20 16:00' },
+                  { role: roster.qa.role, name: roster.qa.defaultName, options: roster.qa.options, decision: 'Pending', remark: '', updatedAt: '' }
+                ],
+                auditLog: [
+                  { actor: 'Touchakorn (Program Leader)', action: `Opened ${variant.config} ${variant.side} MBO & OK2B`, time: '2026-11-21 09:30', note: 'BRR completed; Batch 1 MBO pilot ready.' }
+                ]
+              };
+            }
+          }
+        } else if (project.id === 'PRJ-X4152') {
+          if (idx === 0) {
+            initialStatus = isX4152KaShuiHold ? 'Blocked' : 'In Review';
+            if (isX4152KaShuiHold) {
+              customOverride = {
+                targetDate: '2026-12-04',
+                approvers: [
+                  { role: roster.em.role, name: 'Horikawa', options: roster.em.options, decision: 'Approved', remark: 'Build window shifted to Dec 7–18.', updatedAt: '2026-11-20 14:00' },
+                  { role: roster.qa.role, name: 'Panida', options: roster.qa.options, decision: 'Rejected', remark: `Hold ${variant.config} (${variant.side}) until 100% OMM flatness gate & FTA probe < 18.0 N verified.`, updatedAt: '2026-11-21 10:15' }
+                ],
+                auditLog: [
+                  { actor: 'Panida (QA Manager)', action: `Hold ${variant.config} ${variant.side} in Preparing`, time: '2026-11-21 10:15', note: 'Ka Shui Mg cover bulging containment required prior to BBR/BRR.' }
+                ]
+              };
+            } else {
+              customOverride = {
+                targetDate: '2026-12-04',
+                approvers: [
+                  { role: roster.em.role, name: 'Horikawa', options: roster.em.options, decision: 'Approved', remark: 'KHC tapered cover pull ETD Nov 27 / MIH Dec 3.', updatedAt: '2026-11-20 14:00' },
+                  { role: roster.qa.role, name: roster.qa.defaultName, options: roster.qa.options, decision: 'Pending', remark: '', updatedAt: '' }
+                ]
+              };
+            }
+          }
+        } else if (project.id === 'PRJ-X4026') {
+          if (idx < 3) {
+            initialStatus = 'Approved';
+          } else if (idx === 3) {
+            initialStatus = 'In Review';
+            customOverride = {
+              targetDate: '2026-12-21',
+              approvers: [
+                { role: roster.em.role, name: 'Horikawa', options: roster.em.options, decision: 'Approved', remark: 'BRR closed; FATP MIH Jan 12, 2027 confirmed.', updatedAt: '2026-11-20 15:10' },
+                { role: roster.qa.role, name: roster.qa.defaultName, options: roster.qa.options, decision: 'Pending', remark: '', updatedAt: '' }
+              ],
+              auditLog: [
+                { actor: 'Touchakorn (Program Leader)', action: `Opened ${variant.config} LHS MBO & OK2B`, time: '2026-11-21 10:00', note: 'BRR completed; staging foam splits for Dec 21 MBO.' }
+              ]
+            };
+          }
+        }
+
+        gateMapForLine[gate.id] = createSingleGateDossier(
+          project,
+          gate,
+          variant,
+          initialStatus,
+          project.leader,
+          project.owner,
+          customOverride
+        );
+      });
+
+      projectLineRecords[variant.key] = gateMapForLine;
+    });
+
+    allRecords[project.id] = projectLineRecords;
+  });
+
+  return allRecords;
+}
+
+// ============================================================================
+// SHARED UI ATOMS
+// ============================================================================
+
+function TaskCategoryBadge({ category }) {
+  const label = TASK_CATEGORY_STYLES[category] ? category : TASK_UNCATEGORISED;
+  return (
+    <span
+      className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold border whitespace-nowrap ${TASK_CATEGORY_STYLES[label]}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+function StatusBadge({ status }) {
+  const palette = {
+    Approved: 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800',
+    'On Track': 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800',
+    'Active MP': 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800',
+    'OK2S Complete': 'bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800',
+    Done: 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800',
+    'In Review': 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800',
+    'In Progress': 'bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800',
+    Conditional: 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800',
+    Blocked: 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800',
+    'At Risk': 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800',
+    Rejected: 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800',
+    Pending: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800',
+    'To Do': 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800',
+    Critical: 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800',
+    High: 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800',
+    Medium: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800'
+  };
+
+  return (
+    <span
+      className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold border whitespace-nowrap ${
+        palette[status] || 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800'
+      }`}
+    >
+      {status}
+    </span>
+  );
+}
+
+</script>

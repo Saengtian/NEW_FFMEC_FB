@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Local preview harness (dev-only; served via `bun .preview/serve.mjs`)
+.preview/
+
+# Build scratch output
+tools/.styles.tmp.css
+
+# Freebuff workspace metadata
+.freebuff/
+
+# Secrets and local credentials
+.env
+.env.*
+.clasprc.json
+
+# Local data exports / scratch files
+*.log
+.tmp-*
+ffm-state-store.csv

@@ -1,0 +1,8 @@
+# Local tooling and artifacts that are not Apps Script files
+node_modules/**
+package.json
+bun.lock
+bun.lockb
+tools/**
+.preview/**
+docs/**

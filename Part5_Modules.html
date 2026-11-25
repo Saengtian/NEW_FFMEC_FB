@@ -1,0 +1,3139 @@
+<script type="text/babel" data-presets="react">
+// ============================================================================
+// VIEW 7: PROJECTS & COST SAVING MODULE (VA/VE, YIELD, HC & AUTOMATION)
+// ============================================================================
+// VIEW 7: PROJECTS & COST SAVING MODULE (NMB REV3 20261118: DASHBOARD & PROJECTS)
+// ============================================================================
+
+function CostSavingView({
+  items,
+  allItemsCount,
+  onOpenNew,
+  onEdit,
+  onDelete,
+  onUpdateStage,
+  onUpdateFeasibility,
+  onImportFile
+}) {
+  const [subTab, setSubTab] = useState('dashboard'); // 'dashboard' | 'projects'
+  const [feasFilter, setFeasFilter] = useState('ALL');
+  const [familyFilter, setFamilyFilter] = useState('ALL');
+  const [search, setSearch] = useState('');
+
+  const filteredItems = useMemo(() => {
+    return items.filter((item) => {
+      if (feasFilter !== 'ALL' && item.feasibility !== feasFilter) return false;
+      if (familyFilter !== 'ALL' && item.familyGroup !== familyFilter) return false;
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        return (
+          item.id.toLowerCase().includes(q) ||
+          item.title.toLowerCase().includes(q) ||
+          item.model.toLowerCase().includes(q) ||
+          (item.vendor || '').toLowerCase().includes(q) ||
+          (item.owner || '').toLowerCase().includes(q) ||
+          (item.notes || '').toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [items, feasFilter, familyFilter, search]);
+
+  const summary = useMemo(() => {
+    let totalHc = 0;
+    let committedQuotedThb = 0;
+    let allocatedBudgetThb = 0;
+    let annualSavingThb = 0;
+    let goCount = 0;
+    let pendingCount = 0;
+    let noGoCount = 0;
+    const byFamily = {};
+
+    filteredItems.forEach((item) => {
+      const m = computeCostSavingMetrics(item);
+      totalHc += m.hc;
+      committedQuotedThb += m.quotedCostThb;
+      allocatedBudgetThb += m.budgetThb;
+      annualSavingThb += m.annualSavingThb;
+
+      if (item.feasibility === 'Go') goCount += 1;
+      else if (item.feasibility === 'No-go') noGoCount += 1;
+      else pendingCount += 1;
+
+      const fam = item.familyGroup || 'Other';
+      if (!byFamily[fam]) {
+        byFamily[fam] = { family: fam, count: 0, hc: 0, quotedThb: 0, annualSavingThb: 0, go: 0 };
+      }
+      byFamily[fam].count += 1;
+      byFamily[fam].hc += m.hc;
+      byFamily[fam].quotedThb += m.quotedCostThb;
+      byFamily[fam].annualSavingThb += m.annualSavingThb;
+      if (item.feasibility === 'Go') byFamily[fam].go += 1;
+    });
+
+    const authorizedBudgetThb =
+      filteredItems.length === allItemsCount && allItemsCount === INITIAL_COST_PROJECTS.length
+        ? NMB_AUTHORIZED_BUDGET_THB
+        : Math.max(allocatedBudgetThb, committedQuotedThb);
+    const surplusThb = authorizedBudgetThb - committedQuotedThb;
+
+    return {
+      count: filteredItems.length,
+      familyCount: Object.keys(byFamily).length,
+      totalHc,
+      committedQuotedThb,
+      authorizedBudgetThb,
+      surplusThb,
+      annualSavingThb,
+      goCount,
+      pendingCount,
+      noGoCount,
+      familyBreakdown: Object.values(byFamily).sort((a, b) => b.hc - a.hc)
+    };
+  }, [filteredItems, allItemsCount]);
+
+  const feasibilityStyle = (status) => {
+    if (status === 'Go') return 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700';
+    if (status === 'No-go') return 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-300 dark:border-rose-700';
+    return 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-700';
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Executive Dashboard KPI Strip (Synced with Cost_initiative_and_automation_Dashboard) */}
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3.5">
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-3.5 space-y-1">
+          <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Total Initiatives</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums">{summary.count}</div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+            {summary.familyCount} Product Families
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-emerald-200 dark:border-emerald-800 p-3.5 space-y-1">
+          <div className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">HC Reduction</div>
+          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-300 tabular-nums">
+            {summary.totalHc} <span className="text-xs font-semibold">HC</span>
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+            Target: {NMB_HC_TARGET} HC · {formatThbCompact(summary.annualSavingThb)}/yr
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-3.5 space-y-1">
+          <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Committed &amp; Quoted</div>
+          <div className="text-xl font-bold text-slate-900 dark:text-slate-100 tabular-nums">
+            {formatThbCompact(summary.committedQuotedThb)}
+          </div>
+          <div className="text-[10px] text-slate-400 dark:text-slate-400 tabular-nums">
+            {formatThbExact(summary.committedQuotedThb)}
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-3.5 space-y-1">
+          <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Authorized Budget</div>
+          <div className="text-xl font-bold text-blue-700 dark:text-blue-300 tabular-nums">
+            {formatThbCompact(summary.authorizedBudgetThb)}
+          </div>
+          <div className="text-[10px] text-slate-400 dark:text-slate-400 tabular-nums">
+            {formatThbExact(summary.authorizedBudgetThb)}
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-3.5 space-y-1">
+          <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Budget Surplus</div>
+          <div
+            className={`text-xl font-bold tabular-nums ${
+              summary.surplusThb >= 0 ? 'text-emerald-700 dark:text-emerald-300' : 'text-rose-600 dark:text-rose-400'
+            }`}
+          >
+            {formatThbCompact(summary.surplusThb)}
+          </div>
+          <div className="text-[10px] text-slate-400 dark:text-slate-400 tabular-nums">
+            {formatThbExact(summary.surplusThb)}
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-3.5 space-y-1">
+          <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Feasibility Gate</div>
+          <div className="text-xs font-bold tabular-nums pt-1 flex flex-wrap gap-1.5">
+            <span className="px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+              {summary.goCount} Go
+            </span>
+            <span className="px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-800">
+              {summary.pendingCount} Pend
+            </span>
+            <span className="px-1.5 py-0.5 rounded bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+              {summary.noGoCount} No-go
+            </span>
+          </div>
+          <div className="text-[10px] text-slate-400 dark:text-slate-400">ROI Cap ≤ {NMB_MAX_ROI_MONTHS} mo</div>
+        </div>
+      </div>
+
+      {/* Main Module Card with 2 Sheet Tabs: Dashboard / Projects */}
+      <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+          <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-800 p-0.5 bg-slate-50 dark:bg-slate-800 text-xs">
+            {[
+              { id: 'dashboard', label: 'Dashboard' },
+              { id: 'projects', label: `Projects (${filteredItems.length})` },
+            ].map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setSubTab(t.id)}
+                className={`px-3 py-1.5 rounded-md font-semibold transition-colors ${
+                  subTab === t.id
+                    ? 'bg-slate-900 dark:bg-slate-700 text-white shadow-2xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:bg-white dark:hover:bg-slate-900 dark:dark:hover:bg-slate-700'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="px-2.5 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 hover:bg-blue-100 dark:hover:bg-blue-900 text-blue-700 dark:text-blue-300 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer">
+              <Upload className="w-3.5 h-3.5" />
+              <span>Import CSV / Excel</span>
+              <input
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) onImportFile(f);
+                  e.target.value = '';
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => exportCostProjectsCsv(filteredItems)}
+              className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-semibold inline-flex items-center gap-1.5"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export CSV</span>
+            </button>
+            <button
+              type="button"
+              onClick={onOpenNew}
+              className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>New Initiative</span>
+            </button>
+          </div>
+        </div>
+
+        {/* SUB-TAB 1: EXECUTIVE DASHBOARD */}
+        {subTab === 'dashboard' && (
+          <div className="p-5 space-y-5">
+            {/* Family Breakdown Cards */}
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                  Automation &amp; Cost Saving Breakdown by Product Family
+                </h3>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Source: Cost initiative and automation projects_Rev3_20261118 (for NMB)
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                {summary.familyBreakdown.map((f) => {
+                  const share = summary.totalHc > 0 ? (f.hc / summary.totalHc) * 100 : 0;
+                  return (
+                    <button
+                      key={f.family}
+                      type="button"
+                      onClick={() => {
+                        setFamilyFilter(f.family);
+                        setSubTab('projects');
+                      }}
+                      className="text-left p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/70 hover:border-blue-300 dark:hover:border-blue-700 hover:bg-blue-50/30 dark:hover:bg-blue-950/30 transition-colors space-y-2"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{f.family}</span>
+                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 tabular-nums">
+                          {f.count} projects
+                        </span>
+                      </div>
+                      <div className="flex items-baseline justify-between tabular-nums">
+                        <span className="text-xl font-extrabold text-emerald-700 dark:text-emerald-300">{f.hc} HC</span>
+                        <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          {formatThbCompact(f.quotedThb)} quoted
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-blue-600 rounded-full"
+                          style={{ width: `${Math.min(100, share)}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+                        <span>{f.go} Go approved</span>
+                        <span>{share.toFixed(0)}% of HC</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Budget Utilization & Top Committed Investments */}
+            <div className="grid grid-cols-1 gap-4">
+              <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                    Authorized Budget Utilization (THB)
+                  </span>
+                  <span className="text-xs font-bold text-blue-700 dark:text-blue-300 tabular-nums">
+                    {summary.authorizedBudgetThb > 0
+                      ? ((summary.committedQuotedThb / summary.authorizedBudgetThb) * 100).toFixed(1)
+                      : 0}
+                    % Used
+                  </span>
+                </div>
+                <div className="w-full h-3 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden border border-slate-200 dark:border-slate-800">
+                  <div
+                    className="h-full bg-blue-600 rounded-full"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        summary.authorizedBudgetThb > 0
+                          ? (summary.committedQuotedThb / summary.authorizedBudgetThb) * 100
+                          : 0
+                      )}%`
+                    }}
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-xs tabular-nums pt-1">
+                  <div>
+                    <div className="text-[10px] text-slate-400 dark:text-slate-400">Committed &amp; Quoted</div>
+                    <div className="font-bold text-slate-900 dark:text-slate-100">
+                      {formatThbExact(summary.committedQuotedThb)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400 dark:text-slate-400">Feasibility Surplus</div>
+                    <div className="font-bold text-emerald-700 dark:text-emerald-300">
+                      {formatThbExact(summary.surplusThb)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400 dark:text-slate-400">Authorized Cap</div>
+                    <div className="font-bold text-blue-700 dark:text-blue-300">
+                      {formatThbExact(summary.authorizedBudgetThb)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
+
+        {/* SUB-TAB 2: PROJECTS PORTFOLIO TABLE (CRUD) */}
+        {subTab === 'projects' && (
+          <div>
+            <div className="px-5 py-3 bg-slate-50/70 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 dark:text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search project, vendor, model..."
+                    className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 focus:outline-none focus:border-blue-500 w-52"
+                  />
+                </div>
+
+                <select
+                  value={familyFilter}
+                  onChange={(e) => setFamilyFilter(e.target.value)}
+                  className="px-2.5 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 font-semibold text-slate-700 dark:text-slate-300"
+                >
+                  <option value="ALL">All Families</option>
+                  {['MacMini', 'MB16"', 'MB14"', 'iMac'].map((f) => (
+                    <option key={f} value={f}>
+                      {f}
+                    </option>
+                  ))}
+                </select>
+
+                <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-0.5 text-[11px]">
+                  {['ALL', ...FEASIBILITY_STATUSES].map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setFeasFilter(st)}
+                      className={`px-2 py-1 rounded-md font-semibold transition-colors ${
+                        feasFilter === st
+                          ? 'bg-slate-900 dark:bg-slate-700 text-white'
+                          : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 dark:dark:hover:bg-slate-600'
+                      }`}
+                    >
+                      {st === 'ALL' ? 'All' : st}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                  <tr>
+                    <th className="py-2.5 px-4 min-w-[230px]">ID &amp; Project Opportunity</th>
+                    <th className="py-2.5 px-2.5 whitespace-nowrap">Family · Model</th>
+                    <th className="py-2.5 px-2.5 whitespace-nowrap">Vendor</th>
+                    <th className="py-2.5 px-2 text-right whitespace-nowrap">HC</th>
+                    <th className="py-2.5 px-2.5 text-right whitespace-nowrap">Budget (THB)</th>
+                    <th className="py-2.5 px-2.5 text-right whitespace-nowrap">Quoted / Actual</th>
+                    <th className="py-2.5 px-2.5 text-right whitespace-nowrap">Est. Save / Yr</th>
+                    <th className="py-2.5 px-2 text-right whitespace-nowrap">ROI (Mo)</th>
+                    <th className="py-2.5 px-2.5 whitespace-nowrap">Feasibility</th>
+                    <th className="py-2.5 px-2.5 whitespace-nowrap">Status / Stage</th>
+                    <th className="py-2.5 px-4 text-right whitespace-nowrap">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
+                  {filteredItems.map((item) => {
+                    const m = computeCostSavingMetrics(item);
+                    const overRoi = m.roiMonths > NMB_MAX_ROI_MONTHS;
+                    return (
+                      <tr key={item.id} className="hover:bg-slate-50/90 dark:hover:bg-slate-800/90 transition-colors">
+                        <td className="py-2.5 px-4">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono text-[10px] font-bold text-slate-400 dark:text-slate-400">
+                              {item.id}
+                            </span>
+                            <span className="font-bold text-slate-900 dark:text-slate-100">{item.title}</span>
+                          </div>
+                          {item.notes && (
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 line-clamp-1" title={item.notes}>
+                              {item.notes}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-2.5 whitespace-nowrap">
+                          <div className="font-bold text-slate-900 dark:text-slate-100">{item.familyGroup}</div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                            {item.model} · {item.fyTarget || 'FY2026'}
+                          </div>
+                        </td>
+                        <td className="py-2.5 px-2.5 whitespace-nowrap text-slate-700 dark:text-slate-300 font-medium">
+                          {item.vendor || '—'}
+                        </td>
+                        <td className="py-2.5 px-2 text-right font-bold text-emerald-700 dark:text-emerald-300 whitespace-nowrap">
+                          {m.hc}
+                        </td>
+                        <td className="py-2.5 px-2.5 text-right text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                          {m.budgetThb > 0 ? formatThbCompact(m.budgetThb) : '—'}
+                        </td>
+                        <td className="py-2.5 px-2.5 text-right font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                          {m.quotedCostThb > 0 ? formatThbExact(m.quotedCostThb) : '฿0'}
+                        </td>
+                        <td className="py-2.5 px-2.5 text-right font-bold text-emerald-700 dark:text-emerald-300 whitespace-nowrap">
+                          {formatThbCompact(m.annualSavingThb)}
+                        </td>
+                        <td
+                          className={`py-2.5 px-2 text-right font-bold whitespace-nowrap ${
+                            overRoi
+                              ? 'text-rose-600 dark:text-rose-400'
+                              : m.roiMonths > 0
+                              ? 'text-slate-800 dark:text-slate-200'
+                              : 'text-emerald-600 dark:text-emerald-400'
+                          }`}
+                        >
+                          {m.roiMonths > 0 ? `${m.roiMonths.toFixed(1)}m` : '0m'}
+                        </td>
+                        <td className="py-2.5 px-2.5 whitespace-nowrap">
+                          <select
+                            aria-label={`Feasibility for ${item.id}`}
+                            value={item.feasibility}
+                            onChange={(e) => onUpdateFeasibility(item.id, e.target.value)}
+                            className={`px-2 py-1 rounded-md border text-[11px] font-bold cursor-pointer ${feasibilityStyle(
+                              item.feasibility
+                            )}`}
+                          >
+                            {FEASIBILITY_STATUSES.map((fs) => (
+                              <option key={fs} value={fs}>
+                                {fs}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="py-2.5 px-2.5 whitespace-nowrap">
+                          <select
+                            aria-label={`Stage for ${item.id}`}
+                            value={item.stage}
+                            onChange={(e) => onUpdateStage(item.id, e.target.value)}
+                            className="px-2 py-1 rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-[11px] font-medium text-slate-700 dark:text-slate-300 cursor-pointer max-w-[165px]"
+                          >
+                            {COST_SAVING_STAGES.map((st) => (
+                              <option key={st} value={st}>
+                                {st}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="py-2.5 px-4 text-right whitespace-nowrap">
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => onEdit(item)}
+                              title="Edit Initiative"
+                              className="p-1.5 rounded-md text-slate-500 dark:text-slate-400 hover:text-blue-700 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onDelete(item)}
+                              title="Delete Initiative"
+                              className="p-1.5 rounded-md text-slate-500 dark:text-slate-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot className="bg-slate-100/90 dark:bg-slate-800/90 border-t-2 border-slate-300 dark:border-slate-700 font-bold text-slate-900 dark:text-slate-100 tabular-nums">
+                  <tr>
+                    <td colSpan={3} className="py-2.5 px-4">
+                      Total ({filteredItems.length} initiatives)
+                    </td>
+                    <td className="py-2.5 px-2 text-right text-emerald-700 dark:text-emerald-300">{summary.totalHc} HC</td>
+                    <td className="py-2.5 px-2.5 text-right text-blue-800 dark:text-blue-200">
+                      {formatThbCompact(summary.authorizedBudgetThb)}
+                    </td>
+                    <td className="py-2.5 px-2.5 text-right">
+                      {formatThbExact(summary.committedQuotedThb)}
+                    </td>
+                    <td className="py-2.5 px-2.5 text-right text-emerald-700 dark:text-emerald-300">
+                      {formatThbCompact(summary.annualSavingThb)}/yr
+                    </td>
+                    <td colSpan={4} className="py-2.5 px-4 text-right text-[11px] text-slate-500 dark:text-slate-400">
+                      Surplus: {formatThbExact(summary.surplusThb)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        )}
+
+      </section>
+    </div>
+  );
+}
+
+function CostSavingModal({
+  initialItem = null,
+  defaultModel,
+  defaultFamily,
+  defaultPhase,
+  onClose,
+  onSubmit
+}) {
+  const isEditing = Boolean(initialItem);
+  const [form, setForm] = useState(() =>
+    initialItem
+      ? { ...initialItem }
+      : {
+          title: '',
+          model: defaultModel || 'X4151',
+          familyGroup: defaultFamily || 'MB14"',
+          phase: defaultPhase || 'EVT',
+          side: 'RHS & LHS',
+          category: COST_SAVING_CATEGORIES[1],
+          vendor: 'ICON',
+          hcReduction: 2,
+          budgetThb: 1140000,
+          quotedCostThb: 850000,
+          annualMaterialSavingThb: 0,
+          feasibility: 'Pending',
+          stage: 'DFM & Quotation',
+          fyTarget: 'FY2027',
+          owner: 'Touchakorn',
+          notes: ''
+        }
+  );
+
+  const preview = computeCostSavingMetrics(form);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!form.title.trim()) return;
+    onSubmit(form);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-xl bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs"
+      >
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+              {isEditing ? `Edit Cost Initiative (${initialItem.id})` : 'New Cost Initiative / Automation Project'}
+            </h3>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+              NMB ROI Rule: ≤ {NMB_MAX_ROI_MONTHS} months · Baseline ฿56k/HC/mo (2 shifts)
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-400">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-3.5">
+          <div>
+            <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Project / Opportunity Title *</label>
+            <input
+              required
+              value={form.title}
+              onChange={(e) => setForm({ ...form, title: e.target.value })}
+              placeholder="e.g., Auto Scan FPC + Pillow Insertion"
+              className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Model *</label>
+              <input
+                required
+                value={form.model}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    model: e.target.value.toUpperCase(),
+                    familyGroup: inferFamilyFromModel(e.target.value)
+                  })
+                }
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg font-bold uppercase"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Product Family</label>
+              <select
+                value={form.familyGroup}
+                onChange={(e) => setForm({ ...form, familyGroup: e.target.value })}
+                className="w-full px-2 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                <option value="MacMini">MacMini</option>
+                <option value='MB14"'>MB14&quot;</option>
+                <option value='MB16"'>MB16&quot;</option>
+                <option value="iMac">iMac</option>
+                <option value="Display">Display</option>
+              </select>
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Vendor / AE</label>
+              <input
+                value={form.vendor}
+                onChange={(e) => setForm({ ...form, vendor: e.target.value })}
+                placeholder="ICON / Maxwell / NMB"
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Target FY</label>
+              <select
+                value={form.fyTarget}
+                onChange={(e) => setForm({ ...form, fyTarget: e.target.value })}
+                className="w-full px-2 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                <option value="FY2026">FY2026</option>
+                <option value="FY2027">FY2027</option>
+                <option value="FY2028">FY2028</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Category</label>
+              <select
+                value={form.category}
+                onChange={(e) => setForm({ ...form, category: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                {COST_SAVING_CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Feasibility</label>
+              <select
+                value={form.feasibility}
+                onChange={(e) => setForm({ ...form, feasibility: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 font-semibold"
+              >
+                {FEASIBILITY_STATUSES.map((fs) => (
+                  <option key={fs} value={fs}>
+                    {fs}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Status / Stage</label>
+              <select
+                value={form.stage}
+                onChange={(e) => setForm({ ...form, stage: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                {COST_SAVING_STAGES.map((st) => (
+                  <option key={st} value={st}>
+                    {st}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">HC Reduction</label>
+              <input
+                type="number"
+                step="0.5"
+                min="0"
+                value={form.hcReduction}
+                onChange={(e) => setForm({ ...form, hcReduction: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg text-right tabular-nums"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Target Budget (฿)</label>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={form.budgetThb}
+                onChange={(e) => setForm({ ...form, budgetThb: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg text-right tabular-nums"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Quoted / Actual (฿)</label>
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={form.quotedCostThb}
+                onChange={(e) => setForm({ ...form, quotedCostThb: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg text-right tabular-nums"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Owner / DRI</label>
+              <input
+                value={form.owner}
+                onChange={(e) => setForm({ ...form, owner: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Engineering / Approval Notes</label>
+            <input
+              value={form.notes}
+              onChange={(e) => setForm({ ...form, notes: e.target.value })}
+              placeholder="OK2Tool status, KZW approval note, or DEB remark..."
+              className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+            />
+          </div>
+
+          {/* Live THB Financial Impact Preview */}
+          <div className="grid grid-cols-4 gap-2 p-3 rounded-xl bg-slate-900 dark:bg-slate-700 text-white tabular-nums text-center">
+            <div>
+              <div className="text-[10px] text-slate-400 dark:text-slate-400">Est. Save / Mo</div>
+              <div className="text-sm font-bold text-white">
+                {formatThbCompact(preview.monthlySavingThb)}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-400 dark:text-slate-400">Est. Save / Yr</div>
+              <div className="text-sm font-bold text-emerald-400 dark:text-emerald-400">
+                {formatThbCompact(preview.annualSavingThb)}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-400 dark:text-slate-400">Budget Variance</div>
+              <div
+                className={`text-sm font-bold ${
+                  preview.budgetVarianceThb >= 0 ? 'text-blue-300 dark:text-blue-300' : 'text-rose-400 dark:text-rose-400'
+                }`}
+              >
+                {formatThbCompact(preview.budgetVarianceThb)}
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-400 dark:text-slate-400">Calc. ROI</div>
+              <div
+                className={`text-sm font-bold ${
+                  preview.roiMonths > NMB_MAX_ROI_MONTHS ? 'text-rose-400 dark:text-rose-400' : 'text-amber-300 dark:text-amber-300'
+                }`}
+              >
+                {preview.roiMonths > 0 ? `${preview.roiMonths.toFixed(1)} mo` : '0 mo'}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="px-4 py-2 rounded-lg font-semibold bg-slate-900 dark:bg-slate-700 text-white hover:bg-slate-800 dark:hover:bg-slate-600"
+          >
+            {isEditing ? 'Update Initiative' : 'Save Initiative'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function DeleteCostSavingModal({ item, onClose, onConfirm }) {
+  const m = computeCostSavingMetrics(item);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-rose-700 dark:text-rose-300">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Delete Cost Initiative</h3>
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-400">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-3">
+          <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
+            Remove this initiative from the NMB cost saving portfolio? HC reduction and budget totals will recalculate immediately.
+          </p>
+          <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-800 space-y-1 tabular-nums">
+            <div className="font-bold text-slate-900 dark:text-slate-100">
+              {item.id} · {item.title}
+            </div>
+            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+              {item.familyGroup} ({item.model}) · {m.hc} HC · {formatThbExact(m.quotedCostThb)}
+            </div>
+          </div>
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="px-4 py-2 rounded-lg font-semibold bg-rose-600 text-white hover:bg-rose-700"
+          >
+            Delete Initiative
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// VIEW 8: CUSTOMER FEEDBACK, FA & 8D FACA TRACKER (Y2026)
+// ============================================================================
+
+function CustomerFeedbackView({
+  items,
+  onOpenNew,
+  onEdit,
+  onDelete,
+  onToggle8D,
+  onUpdateStatus,
+  onImportFile
+}) {
+  const [locationFilter, setLocationFilter] = useState('ALL');
+  const [issueCatFilter, setIssueCatFilter] = useState('ALL');
+  const [typeFilter, setTypeFilter] = useState('ALL');
+  const [statusFilter, setStatusFilter] = useState('ALL');
+  const [search, setSearch] = useState('');
+
+  const filteredItems = useMemo(() => {
+    return items.filter((c) => {
+      if (locationFilter !== 'ALL' && c.location !== locationFilter) return false;
+      if (issueCatFilter !== 'ALL' && c.issueCategory !== issueCatFilter) return false;
+      if (typeFilter !== 'ALL' && c.category !== typeFilter) return false;
+      if (statusFilter === 'Open' && c.nmbStatus !== 'Open' && c.customerStatus !== 'Open') {
+        return false;
+      }
+      if (statusFilter === 'Closed' && (c.nmbStatus !== 'Closed' || c.customerStatus !== 'Closed')) {
+        return false;
+      }
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        return (
+          c.id.toLowerCase().includes(q) ||
+          (c.facaNo || '').toLowerCase().includes(q) ||
+          c.model.toLowerCase().includes(q) ||
+          c.location.toLowerCase().includes(q) ||
+          (c.issueItem || '').toLowerCase().includes(q) ||
+          (c.remark || '').toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [items, locationFilter, issueCatFilter, typeFilter, statusFilter, search]);
+
+  const stats = useMemo(() => {
+    let totalNg = 0;
+    let openNmb = 0;
+    let openCust = 0;
+    let claims = 0;
+    let faCount = 0;
+    let feedbackCount = 0;
+    let npiCount = 0;
+    let mpCount = 0;
+    const byCategory = {};
+    const byLocation = {};
+
+    filteredItems.forEach((c) => {
+      totalNg += Number(c.ngQty) || 0;
+      if (c.nmbStatus === 'Open') openNmb += 1;
+      if (c.customerStatus === 'Open') openCust += 1;
+      if (c.category === 'Claim') claims += 1;
+      else if (c.category === 'FA') faCount += 1;
+      else feedbackCount += 1;
+      if (c.build === 'MP') mpCount += 1;
+      else npiCount += 1;
+
+      byCategory[c.issueCategory] = (byCategory[c.issueCategory] || 0) + 1;
+      byLocation[c.location] = (byLocation[c.location] || 0) + 1;
+    });
+
+    const closedBoth = filteredItems.filter(
+      (c) => c.nmbStatus === 'Closed' && c.customerStatus === 'Closed'
+    ).length;
+    const closureRate = filteredItems.length > 0 ? (closedBoth / filteredItems.length) * 100 : 100;
+
+    return {
+      total: filteredItems.length,
+      totalNg,
+      openNmb,
+      openCust,
+      claims,
+      faCount,
+      feedbackCount,
+      npiCount,
+      mpCount,
+      closureRate,
+      byCategory: Object.entries(byCategory).sort((a, b) => b[1] - a[1]),
+      byLocation: Object.entries(byLocation).sort((a, b) => b[1] - a[1])
+    };
+  }, [filteredItems]);
+
+  return (
+    <div className="space-y-6">
+      {/* Executive KPI Strip */}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3.5">
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Y2026 Feedback Cases</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums">{stats.total}</div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+            NPI: {stats.npiCount} · MP: {stats.mpCount}
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Total NG Qty</div>
+          <div className="text-2xl font-bold text-rose-600 dark:text-rose-400 tabular-nums">
+            {stats.totalNg.toLocaleString()}{' '}
+            <span className="text-xs font-normal text-slate-400 dark:text-slate-400">pcs</span>
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">Across {stats.byLocation.length} FATP sites</div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-amber-200 dark:border-amber-800 p-4 space-y-1">
+          <div className="text-xs font-semibold text-amber-800 dark:text-amber-200">Open Action Cases</div>
+          <div className="text-2xl font-bold text-amber-700 dark:text-amber-300 tabular-nums">
+            {Math.max(stats.openNmb, stats.openCust)}
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+            NMB Open: {stats.openNmb} · Cust Open: {stats.openCust}
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Type Split (FA / FB / Claim)</div>
+          <div className="text-sm font-bold text-slate-900 dark:text-slate-100 tabular-nums pt-1">
+            {stats.faCount} FA · {stats.feedbackCount} FB ·{' '}
+            <span className={stats.claims >= 5 ? 'text-rose-600 dark:text-rose-400' : 'text-blue-700 dark:text-blue-300'}>
+              {stats.claims} Claim
+            </span>
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">Annual Claim Ceiling: &lt; 5</div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-emerald-200 dark:border-emerald-800 p-4 space-y-1 col-span-2 lg:col-span-1">
+          <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">8D Closure Rate</div>
+          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-300 tabular-nums">
+            {stats.closureRate.toFixed(0)}%
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">Both NMB &amp; Customer Closed</div>
+        </div>
+      </div>
+
+      {/* Interactive Issue Category & Location Pareto Strip */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+              By Issue Category
+            </span>
+            {issueCatFilter !== 'ALL' && (
+              <button
+                type="button"
+                onClick={() => setIssueCatFilter('ALL')}
+                className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {stats.byCategory.map(([cat, count]) => {
+              const active = issueCatFilter === cat;
+              return (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setIssueCatFilter(active ? 'ALL' : cat)}
+                  className={`px-3 py-1.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-2 transition-colors ${
+                    active
+                      ? 'bg-slate-900 dark:bg-slate-700 text-white border-slate-900'
+                      : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <span>{cat}</span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold tabular-nums ${
+                      active ? 'bg-slate-700 text-white' : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+              By FATP / Customer Location
+            </span>
+            {locationFilter !== 'ALL' && (
+              <button
+                type="button"
+                onClick={() => setLocationFilter('ALL')}
+                className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {stats.byLocation.map(([loc, count]) => {
+              const active = locationFilter === loc;
+              return (
+                <button
+                  key={loc}
+                  type="button"
+                  onClick={() => setLocationFilter(active ? 'ALL' : loc)}
+                  className={`px-3 py-1.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-2 transition-colors ${
+                    active
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <span>{loc}</span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold tabular-nums ${
+                      active ? 'bg-blue-500 text-white' : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Main Customer Feedback & 8D Tracking Table */}
+      <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 dark:text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search FACA#, model, issue..."
+                className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-none focus:border-blue-500 w-52"
+              />
+            </div>
+
+            <select
+              value={typeFilter}
+              onChange={(e) => setTypeFilter(e.target.value)}
+              className="px-2.5 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 font-semibold"
+            >
+              <option value="ALL">All Types (FA / FB / Claim)</option>
+              {FEEDBACK_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+
+            <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 p-0.5 text-[11px]">
+              {['ALL', 'Open', 'Closed'].map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => setStatusFilter(st)}
+                  className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                    statusFilter === st
+                      ? 'bg-slate-900 dark:bg-slate-700 text-white'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-white dark:hover:bg-slate-900 dark:dark:hover:bg-slate-700'
+                  }`}
+                >
+                  {st === 'ALL' ? 'All' : st}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="px-2.5 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 hover:bg-blue-100 dark:hover:bg-blue-900 text-blue-700 dark:text-blue-300 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer">
+              <Upload className="w-3.5 h-3.5" />
+              <span>Import CSV / Excel</span>
+              <input
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) onImportFile(f);
+                  e.target.value = '';
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => exportCustomerFeedbackCsv(filteredItems)}
+              className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-semibold inline-flex items-center gap-1.5"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export CSV</span>
+            </button>
+            <button
+              type="button"
+              onClick={onOpenNew}
+              className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Log Feedback</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          {filteredItems.length === 0 ? (
+            <div className="p-8 text-center text-xs text-slate-500 dark:text-slate-400">
+              No customer feedback records match the active scope or filters.
+            </div>
+          ) : (
+            <table className="w-full text-left border-collapse text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                <tr>
+                  <th className="py-2.5 px-3.5 whitespace-nowrap">Date · Site</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Model · Build</th>
+                  <th className="py-2.5 px-3 min-w-[210px]">Issue Category &amp; Item</th>
+                  <th className="py-2.5 px-2 text-right whitespace-nowrap">NG Qty</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Type / FACA#</th>
+                  <th className="py-2.5 px-3 whitespace-nowrap">8D Progress (Click to Toggle)</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">NMB Status</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Customer</th>
+                  <th className="py-2.5 px-3.5 text-right whitespace-nowrap">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
+                {filteredItems.map((c) => (
+                  <tr key={c.id} className="hover:bg-slate-50/90 dark:hover:bg-slate-800/90 transition-colors">
+                    <td className="py-2.5 px-3.5 whitespace-nowrap">
+                      <div className="font-bold text-slate-900 dark:text-slate-100">{c.location}</div>
+                      <div className="text-[10px] text-slate-400 dark:text-slate-400">{c.feedbackDate}</div>
+                    </td>
+                    <td className="py-2.5 px-2.5 whitespace-nowrap">
+                      <div className="font-bold text-slate-900 dark:text-slate-100">{c.model}</div>
+                      <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                        {c.build} · {c.buildConfig}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <div className="flex items-center gap-1.5">
+                        <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[10px] font-bold">
+                          {c.issueCategory}
+                        </span>
+                        <span className="font-semibold text-slate-900 dark:text-slate-100">{c.issueItem}</span>
+                      </div>
+                      {c.remark && (
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 line-clamp-1" title={c.remark}>
+                          {c.remark}
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-2.5 px-2 text-right font-bold text-rose-600 dark:text-rose-400 whitespace-nowrap">
+                      {c.ngQty}
+                    </td>
+                    <td className="py-2.5 px-2.5 whitespace-nowrap">
+                      <span
+                        className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                          c.category === 'Claim'
+                            ? 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800'
+                            : c.category === 'FA'
+                            ? 'bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800'
+                        }`}
+                      >
+                        {c.category}
+                      </span>
+                      {c.facaNo && (
+                        <div className="text-[10px] font-mono text-slate-400 dark:text-slate-400 mt-0.5">{c.facaNo}</div>
+                      )}
+                    </td>
+                    <td className="py-2.5 px-3 whitespace-nowrap">
+                      <div className="inline-flex items-center gap-1">
+                        {EIGHT_D_STEPS.map((st) => {
+                          const closed = c.eightD?.[st.key] === 'Closed';
+                          return (
+                            <button
+                              key={st.key}
+                              type="button"
+                              onClick={() => onToggle8D(c.id, st.key)}
+                              title={`Toggle ${st.label} (${closed ? 'Closed' : 'Open'})`}
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors ${
+                                closed
+                                  ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700 hover:bg-emerald-100 dark:hover:bg-emerald-900'
+                                  : 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900'
+                              }`}
+                            >
+                              {st.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-2.5 whitespace-nowrap">
+                      <select
+                        aria-label={`NMB Status for ${c.id}`}
+                        value={c.nmbStatus}
+                        onChange={(e) => onUpdateStatus(c.id, 'nmbStatus', e.target.value)}
+                        className={`px-2 py-1 rounded-md border text-[11px] font-bold cursor-pointer ${
+                          c.nmbStatus === 'Closed'
+                            ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                            : 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800'
+                        }`}
+                      >
+                        <option value="Open">Open</option>
+                        <option value="Closed">Closed</option>
+                      </select>
+                    </td>
+                    <td className="py-2.5 px-2.5 whitespace-nowrap">
+                      <select
+                        aria-label={`Customer Status for ${c.id}`}
+                        value={c.customerStatus}
+                        onChange={(e) => onUpdateStatus(c.id, 'customerStatus', e.target.value)}
+                        className={`px-2 py-1 rounded-md border text-[11px] font-bold cursor-pointer ${
+                          c.customerStatus === 'Closed'
+                            ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                            : 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800'
+                        }`}
+                      >
+                        <option value="Open">Open</option>
+                        <option value="Closed">Closed</option>
+                      </select>
+                    </td>
+                    <td className="py-2.5 px-3.5 text-right whitespace-nowrap">
+                      <div className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onEdit(c)}
+                          title="Edit Case"
+                          className="p-1.5 rounded-md text-slate-500 dark:text-slate-400 hover:text-blue-700 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onDelete(c)}
+                          title="Delete Case"
+                          className="p-1.5 rounded-md text-slate-500 dark:text-slate-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CustomerFeedbackModal({ initialItem = null, defaultModel, onClose, onSubmit }) {
+  const isEditing = Boolean(initialItem);
+  const [form, setForm] = useState(() =>
+    initialItem
+      ? { ...initialItem, eightD: { ...(initialItem.eightD || {}) } }
+      : {
+          location: 'QSMC',
+          feedbackDate: todayIso(),
+          facaNo: '',
+          severity: 'Major',
+          model: defaultModel || 'X3082',
+          familyGroup: inferFamilyFromModel(defaultModel || 'X3082'),
+          dateCode: '2647',
+          build: 'NPI',
+          phase: 'EVT',
+          buildConfig: 'EVT',
+          side: 'RHS & LHS',
+          issueCategory: 'Function',
+          issueItem: '',
+          ngQty: 1,
+          rtvDate: '',
+          category: 'FA',
+          eightD: { d1d3: 'Open', d4: 'Open', d5: 'Open', d6: 'Open', d7: 'Open', d8: 'Open' },
+          nmbStatus: 'Open',
+          customerStatus: 'Open',
+          remark: ''
+        }
+  );
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!form.issueItem.trim()) return;
+    onSubmit(form);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-xl bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs"
+      >
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+            {isEditing ? `Edit Customer Feedback (${initialItem.id})` : 'Log Customer Feedback / FACA Case'}
+          </h3>
+          <button type="button" onClick={onClose} className="text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-400">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-3.5">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Location *</label>
+              <select
+                value={form.location}
+                onChange={(e) => setForm({ ...form, location: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                {CUSTOMER_FEEDBACK_LOCATIONS.map((loc) => (
+                  <option key={loc} value={loc}>
+                    {loc}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Feedback Date</label>
+              <input
+                type="date"
+                value={form.feedbackDate}
+                onChange={(e) => setForm({ ...form, feedbackDate: e.target.value })}
+                className="w-full px-2 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">FACA #</label>
+              <input
+                value={form.facaNo}
+                onChange={(e) => setForm({ ...form, facaNo: e.target.value })}
+                placeholder="FACA-2611-XX"
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg font-mono"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Severity</label>
+              <select
+                value={form.severity}
+                onChange={(e) => setForm({ ...form, severity: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                {FEEDBACK_SEVERITIES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Model *</label>
+              <input
+                required
+                value={form.model}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    model: e.target.value.toUpperCase(),
+                    familyGroup: inferFamilyFromModel(e.target.value)
+                  })
+                }
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg font-bold uppercase"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Build</label>
+              <select
+                value={form.build}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    build: e.target.value,
+                    phase: e.target.value === 'MP' ? 'MP' : form.phase
+                  })
+                }
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                <option value="NPI">NPI</option>
+                <option value="MP">MP</option>
+              </select>
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Build Config</label>
+              <input
+                value={form.buildConfig}
+                onChange={(e) => setForm({ ...form, buildConfig: e.target.value })}
+                placeholder="EVT / PPVT / MP"
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">NG Qty (pcs)</label>
+              <input
+                type="number"
+                min="1"
+                value={form.ngQty}
+                onChange={(e) => setForm({ ...form, ngQty: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg text-right tabular-nums"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Issue Category</label>
+              <select
+                value={form.issueCategory}
+                onChange={(e) => setForm({ ...form, issueCategory: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                {FEEDBACK_ISSUE_CATEGORIES.map((cat) => (
+                  <option key={cat} value={cat}>
+                    {cat}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Category</label>
+              <select
+                value={form.category}
+                onChange={(e) => setForm({ ...form, category: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                {FEEDBACK_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">RTV Received Date</label>
+              <input
+                type="date"
+                value={form.rtvDate}
+                onChange={(e) => setForm({ ...form, rtvDate: e.target.value })}
+                className="w-full px-2 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Issue Item *</label>
+            <input
+              required
+              value={form.issueItem}
+              onChange={(e) => setForm({ ...form, issueItem: e.target.value })}
+              placeholder="e.g., No spin, Buzzing noise, Pull tab lifting..."
+              className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+            />
+          </div>
+
+          {/* 8D Milestone Toggles */}
+          <div>
+            <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1.5">8D Closure Milestones</label>
+            <div className="grid grid-cols-6 gap-1.5">
+              {EIGHT_D_STEPS.map((st) => {
+                const closed = form.eightD?.[st.key] === 'Closed';
+                return (
+                  <button
+                    key={st.key}
+                    type="button"
+                    onClick={() =>
+                      setForm((prev) => ({
+                        ...prev,
+                        eightD: { ...prev.eightD, [st.key]: closed ? 'Open' : 'Closed' }
+                      }))
+                    }
+                    className={`py-1.5 rounded-lg border font-bold text-[11px] transition-colors ${
+                      closed
+                        ? 'bg-emerald-600 text-white border-emerald-600'
+                        : 'bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    {st.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Engineering Remark / CA</label>
+            <textarea
+              rows={2}
+              value={form.remark}
+              onChange={(e) => setForm({ ...form, remark: e.target.value })}
+              placeholder="Root cause, containment sorting qty, or corrective action..."
+              className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+            />
+          </div>
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="px-4 py-2 rounded-lg font-semibold bg-slate-900 dark:bg-slate-700 text-white hover:bg-slate-800 dark:hover:bg-slate-600"
+          >
+            {isEditing ? 'Update Case' : 'Log Feedback'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function DeleteCustomerFeedbackModal({ item, onClose, onConfirm }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <div className="w-full max-w-sm bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-rose-700 dark:text-rose-300">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Delete Customer Feedback</h3>
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-400">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-3">
+          <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
+            Remove this customer feedback record from the Y2026 tracker?
+          </p>
+          <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-800 space-y-1">
+            <div className="font-bold text-slate-900 dark:text-slate-100">
+              {item.model} · {item.location} ({item.issueCategory})
+            </div>
+            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+              {item.issueItem} · NG {item.ngQty} pcs
+            </div>
+          </div>
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="px-4 py-2 rounded-lg font-semibold bg-rose-600 text-white hover:bg-rose-700"
+          >
+            Delete Case
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// IMPORT PREVIEW (merge / replace) — shared by Cost Saving & Customer Feedback
+// ============================================================================
+
+function ImportMergePreviewModal({ kind, fileName, summary, samples, removedSamples, onClose, onConfirm }) {
+  const [mode, setMode] = useState('merge');
+  const isReplace = mode === 'replace';
+  const entity = kind === 'cost' ? 'cost initiative' : 'feedback case';
+  const entityPlural = kind === 'cost' ? 'cost initiatives' : 'feedback cases';
+  const incoming = summary.added + summary.updated;
+  const removedNow = isReplace ? summary.removed : 0;
+  const nothingToDo = incoming === 0 && removedNow === 0;
+  const modeButton = (value) =>
+    `text-left p-2.5 rounded-lg border transition-colors ${
+      mode === value
+        ? value === 'replace'
+          ? 'border-rose-400 dark:border-rose-700 bg-rose-50 dark:bg-rose-950'
+          : 'border-blue-400 dark:border-blue-700 bg-blue-50 dark:bg-blue-950'
+        : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800'
+    }`;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <div className="w-full max-w-lg max-h-[90vh] flex flex-col bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Upload className="w-4 h-4 shrink-0 text-blue-600 dark:text-blue-400" />
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+              Import preview · {kind === 'cost' ? 'Cost Saving' : 'Customer Feedback'}
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3 overflow-y-auto">
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 break-all">
+            <span className="font-semibold text-slate-700 dark:text-slate-300">{fileName}</span>
+            {' · '}
+            {incoming + summary.unchanged} row(s) matched
+            {summary.duplicates > 0 ? ` · ${summary.duplicates} duplicate row(s) skipped` : ''}
+          </p>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => setMode('merge')} className={modeButton('merge')}>
+              <span className="block font-bold text-slate-900 dark:text-slate-100">Merge (recommended)</span>
+              <span className="block mt-0.5 text-[10px] leading-snug text-slate-500 dark:text-slate-400">
+                Adds new {entityPlural} and updates matching ones. Nothing is deleted.
+              </span>
+            </button>
+            <button type="button" onClick={() => setMode('replace')} className={modeButton('replace')}>
+              <span className="block font-bold text-slate-900 dark:text-slate-100">Replace all</span>
+              <span className="block mt-0.5 text-[10px] leading-snug text-slate-500 dark:text-slate-400">
+                Uses only this file and deletes any {entity} it does not contain.
+              </span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-4 gap-2 text-center">
+            {[
+              { label: 'Added', value: summary.added, tone: 'text-emerald-700 dark:text-emerald-300' },
+              { label: 'Updated', value: summary.updated, tone: 'text-blue-700 dark:text-blue-300' },
+              {
+                label: 'Removed',
+                value: removedNow,
+                tone: removedNow > 0 ? 'text-rose-700 dark:text-rose-300' : 'text-slate-400 dark:text-slate-400'
+              },
+              { label: 'Unchanged', value: summary.unchanged, tone: 'text-slate-700 dark:text-slate-300' }
+            ].map((stat) => (
+              <div
+                key={stat.label}
+                className="p-2 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-800"
+              >
+                <div className={`text-base font-bold tabular-nums ${stat.tone}`}>{stat.value}</div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-400">{stat.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {samples.length > 0 && (
+            <div className="border border-slate-200 dark:border-slate-800 rounded-lg divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
+              {samples.map((sample, idx) => (
+                <div key={`${sample.tag}-${idx}`} className="px-3 py-2 flex items-start gap-2">
+                  <span
+                    className={`shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                      sample.tag === 'Add'
+                        ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
+                        : 'bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300'
+                    }`}
+                  >
+                    {sample.tag}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-800 dark:text-slate-200 truncate">{sample.primary}</div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">{sample.secondary}</div>
+                  </div>
+                </div>
+              ))}
+              {incoming > samples.length && (
+                <div className="px-3 py-1.5 text-[10px] text-slate-500 dark:text-slate-400">
+                  +{incoming - samples.length} more row(s)
+                </div>
+              )}
+            </div>
+          )}
+
+          {isReplace && summary.removed > 0 && (
+            <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200">
+              <div className="font-bold flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                {summary.removed} {entityPlural} will be deleted
+              </div>
+              <div className="mt-1 text-[10px] leading-relaxed break-words">
+                {removedSamples.join(' · ')}
+                {summary.removed > removedSamples.length
+                  ? ` · +${summary.removed - removedSamples.length} more`
+                  : ''}
+              </div>
+            </div>
+          )}
+
+          {isReplace && summary.removed === 0 && (
+            <p className="text-[10px] text-slate-500 dark:text-slate-400">
+              Nothing would be deleted: every existing {entity} is also in this file.
+            </p>
+          )}
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+          <span className="text-[10px] text-slate-500 dark:text-slate-400">
+            {nothingToDo
+              ? 'No changes to apply.'
+              : isReplace
+              ? `${removedNow} delete(s) · ${incoming} file row(s)`
+              : `${summary.added} add(s) · ${summary.updated} update(s)`}
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => onConfirm(mode)}
+              disabled={nothingToDo}
+              className={`px-4 py-2 rounded-lg font-semibold text-white ${
+                isReplace
+                  ? 'bg-rose-600 hover:bg-rose-700'
+                  : 'bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600'
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
+            >
+              {isReplace ? 'Replace all' : 'Merge'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// SAVE CONFLICT MODAL — local edits are never discarded without a choice
+// ============================================================================
+
+function SyncConflictModal({ revision, remoteMeta, local, remote, loading, error, onKeepLocal, onUseRemote }) {
+  const [showDiff, setShowDiff] = useState(false);
+  const slices = useMemo(() => (remote ? diffWorkspacePayloads(local, remote) : []), [local, remote]);
+  const totals = slices.reduce(
+    (acc, item) => ({
+      onlyMine: acc.onlyMine + item.onlyMine.length,
+      onlyTheirs: acc.onlyTheirs + item.onlyTheirs.length,
+      differing: acc.differing + item.differing.length
+    }),
+    { onlyMine: 0, onlyTheirs: 0, differing: 0 }
+  );
+  const changeCount = totals.onlyMine + totals.onlyTheirs + totals.differing;
+  const chip = (list, limit = 5) => {
+    if (list.length === 0) return null;
+    return (
+      <div className="mt-0.5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400 break-words">
+        {list.slice(0, limit).join(' · ')}
+        {list.length > limit ? ` · +${list.length - limit} more` : ''}
+      </div>
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <div className="w-full max-w-xl max-h-[90vh] flex flex-col bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Save conflict</h3>
+          </div>
+          <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-[10px] font-semibold text-slate-600 dark:text-slate-300 tabular-nums">
+            Their save · Rev #{revision}
+          </span>
+        </div>
+
+        <div className="px-5 py-4 space-y-3 overflow-y-auto">
+          <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
+            Another user saved to the sheet while you had unsaved edits.{' '}
+            <span className="font-semibold text-slate-800 dark:text-slate-200">
+              Your edits are still in this browser and have not been overwritten.
+            </span>{' '}
+            Choose which version to keep.
+          </p>
+
+          {remoteMeta && (remoteMeta.lastSavedBy || remoteMeta.lastSavedAt) && (
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              Their version: {remoteMeta.lastSavedBy || 'another user'}
+              {remoteMeta.lastSavedAt ? ` · ${String(remoteMeta.lastSavedAt).replace('T', ' ').slice(0, 16)}` : ''}
+            </p>
+          )}
+
+          {loading && (
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">Loading their version for comparison…</p>
+          )}
+
+          {!loading && error && (
+            <p className="text-[11px] text-rose-700 dark:text-rose-300">
+              Could not read their version ({error}). You can still keep and save yours.
+            </p>
+          )}
+
+          {!loading && remote && (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-800 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setShowDiff((prev) => !prev)}
+                className="w-full px-3 py-2 flex items-center justify-between gap-2 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-left"
+              >
+                <span className="font-semibold text-slate-700 dark:text-slate-200">
+                  {changeCount === 0 ? 'No differences detected' : `${changeCount} differing record(s)`}
+                </span>
+                <span className="text-[10px] text-blue-700 dark:text-blue-300 font-semibold">
+                  {showDiff ? 'Hide differences' : 'Review differences'}
+                </span>
+              </button>
+
+              {!showDiff && changeCount > 0 && (
+                <div className="px-3 py-2 text-[10px] text-slate-500 dark:text-slate-400 flex flex-wrap gap-x-3 gap-y-1">
+                  <span>Only in yours: <b className="text-slate-700 dark:text-slate-200">{totals.onlyMine}</b></span>
+                  <span>Only in theirs: <b className="text-slate-700 dark:text-slate-200">{totals.onlyTheirs}</b></span>
+                  <span>Changed on both sides: <b className="text-slate-700 dark:text-slate-200">{totals.differing}</b></span>
+                </div>
+              )}
+
+              {showDiff && (
+                <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {slices.length === 0 && (
+                    <div className="px-3 py-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      Both versions contain the same records.
+                    </div>
+                  )}
+                  {slices.map((item) => (
+                    <div key={item.slice} className="px-3 py-2 space-y-1">
+                      <div className="font-semibold text-slate-800 dark:text-slate-200">{item.label}</div>
+                      {item.onlyTheirs.length > 0 && (
+                        <div>
+                          <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300">Only in theirs</span>
+                          {chip(item.onlyTheirs)}
+                        </div>
+                      )}
+                      {item.onlyMine.length > 0 && (
+                        <div>
+                          <span className="text-[10px] font-bold text-blue-700 dark:text-blue-300">Only in yours</span>
+                          {chip(item.onlyMine)}
+                        </div>
+                      )}
+                      {item.differing.length > 0 && (
+                        <div>
+                          <span className="text-[10px] font-bold text-amber-700 dark:text-amber-300">Changed on both sides</span>
+                          {chip(item.differing)}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onUseRemote}
+            disabled={!remote || loading}
+            className="px-3.5 py-2 rounded-lg font-semibold text-rose-700 dark:text-rose-300 bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-800 hover:bg-rose-50 dark:hover:bg-rose-950 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Use their version
+          </button>
+          <button
+            type="button"
+            onClick={onKeepLocal}
+            className="px-4 py-2 rounded-lg font-semibold bg-slate-900 dark:bg-slate-700 text-white hover:bg-slate-800 dark:hover:bg-slate-600"
+          >
+            Keep my version
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// KPI DEEP-DIVE MODAL (trend · variant histogram · Pareto of loss)
+// ============================================================================
+
+// FPY / FY / Efficiency share one presentation; each entry only overrides what differs.
+const QUALITY_KPI_VIEW = {
+  family: 'quality',
+  unit: '%',
+  digits: 1,
+  variantHeading: 'By variant (worst first)',
+  variantUnit: '%',
+  paretoUnit: 'pcs',
+  groupNoun: 'modes',
+  lineClass: 'stroke-blue-600 dark:stroke-blue-400',
+  fillClass: 'fill-blue-500/10',
+  targetLine: true,
+  thinNote: 'Hollow dashed points are thin samples — under 500 pcs or a single run. Read them as directional, not as a yield trend.'
+};
+
+const KPI_DEEP_DIVE_META = {
+  fpy: {
+    ...QUALITY_KPI_VIEW,
+    title: 'First Pass Yield (FPY)',
+    target: KPI_TARGETS.fpy,
+    targetText: `${KPI_TARGETS.fpy}%`,
+    paretoHeading: 'Pareto of loss — defect fallout by failure mode'
+  },
+  fy: {
+    ...QUALITY_KPI_VIEW,
+    title: 'Final Yield (FY)',
+    target: KPI_TARGETS.fy,
+    targetText: `${KPI_TARGETS.fy}%`,
+    paretoHeading: 'Pareto of loss — net reject (fallout − salvage) by failure mode'
+  },
+  eff: {
+    ...QUALITY_KPI_VIEW,
+    title: 'Line Efficiency',
+    target: KPI_TARGETS.efficiency,
+    targetText: `${KPI_TARGETS.efficiency}%`,
+    paretoHeading: 'Pareto of loss — downtime minutes by category',
+    paretoUnit: 'min'
+  },
+  claims: {
+    title: 'Customer Claims FY2026',
+    family: 'claims',
+    target: KPI_TARGETS.customerClaims,
+    targetText: `${KPI_TARGETS.customerClaims}`,
+    unit: '',
+    digits: 0,
+    variantHeading: 'By model',
+    variantUnit: 'claims',
+    paretoHeading: 'Pareto of loss — claimed quantity by issue',
+    paretoUnit: 'ng pcs',
+    groupNoun: 'issues',
+    lineClass: 'stroke-amber-600 dark:stroke-amber-400',
+    fillClass: 'fill-amber-500/10',
+    thinNote: 'Hollow dashed points are single-claim buckets — one issue is not a trend.',
+    emptyTrend: 'No claims in this range.'
+  },
+  saving: {
+    title: 'Annual Cost Saving FY2026',
+    family: 'savings',
+    target: KPI_TARGETS.annualSavingThb,
+    targetText: formatThbCompact(KPI_TARGETS.annualSavingThb),
+    unit: '',
+    digits: 0,
+    variantHeading: 'By product family',
+    variantUnit: 'THB',
+    paretoHeading: 'Contribution by category (not loss)',
+    paretoUnit: 'THB',
+    groupNoun: 'categories',
+    hasTrend: false,
+    trendNotice:
+      'Cost-saving records carry no dated history — the KPI is an annual run-rate projection. Use the family and category breakdowns below.'
+  },
+  mih: {
+    title: 'Shipment to MIH Achieved',
+    family: 'mih',
+    target: KPI_TARGETS.mihAchievement,
+    targetText: `${KPI_TARGETS.mihAchievement}%`,
+    unit: '%',
+    digits: 0,
+    trendUnit: ' lines',
+    trendHeading: 'Trend — cumulative MIH approvals',
+    variantHeading: 'By program',
+    variantUnit: '%',
+    paretoHeading: 'Gates blocking MIH (first unapproved gate per line)',
+    paretoUnit: 'lines',
+    groupNoun: 'gates',
+    lineClass: 'stroke-emerald-600 dark:stroke-emerald-400',
+    fillClass: 'fill-emerald-500/10',
+    thinNote: 'Hollow dashed points add a single line — treat them as directional.',
+    emptyTrend: 'No G8 FATP MIH approvals recorded yet — the trend starts at the first signed MIH dossier.'
+  }
+};
+
+const KPI_RANGE_OPTIONS = [
+  { id: '7D', label: '7D', days: 7 },
+  { id: '30D', label: '30D', days: 30 },
+  { id: '90D', label: '90D', days: 90 },
+  { id: 'ALL', label: 'ALL', days: null }
+];
+
+const KPI_METRIC_FIELD = { fpy: 'fpy', fy: 'fy', eff: 'efficiency' };
+
+function kpiInRange(iso, cutoffIso) {
+  return !cutoffIso || (Boolean(iso) && iso >= cutoffIso);
+}
+
+function kpiEmptyAcc() {
+  return { input: 0, fallout: 0, salvage: 0, plannedHr: 0, downtimeMin: 0, runs: 0 };
+}
+
+function kpiAccumulate(acc, rec) {
+  const m = computeProductionMetrics(rec);
+  acc.input += m.input;
+  acc.fallout += m.fallout;
+  acc.salvage += m.salvage;
+  acc.plannedHr += m.plannedTimeHr;
+  acc.downtimeMin += m.downtimeMin;
+  acc.runs += 1;
+  return acc;
+}
+
+// Weighted KPI for a set of runs — computed by the same function that drives the
+// tiles, so the deep dive can never drift from the scorecard.
+function kpiMetricValue(acc, kpiKey) {
+  if (!(acc.input > 0)) return 0;
+  const m = computeProductionMetrics({
+    input: acc.input,
+    fallout: acc.fallout,
+    salvage: acc.salvage,
+    plannedTimeHr: acc.plannedHr,
+    downtimeHr: acc.downtimeMin / 60
+  });
+  return m[KPI_METRIC_FIELD[kpiKey]] || 0;
+}
+
+function kpiTrendPoints(map) {
+  return [...map.entries()]
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+    .map(([date, acc]) => ({
+      label: formatShortDate(date),
+      value: kpiMetricValue(acc, acc.kpiKey),
+      meta: `${acc.input.toLocaleString()} pcs · ${acc.runs} run${acc.runs === 1 ? '' : 's'}`,
+      thin: acc.input < 500 || acc.runs <= 1
+    }));
+}
+
+function kpiCsvCell(value) {
+  const text = value === null || value === undefined ? '' : String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+// One flat sheet (section · label · value · unit · share · cumulative · sample) so the
+// download opens cleanly in Excel and the three tables can be filtered or pivoted.
+function kpiDeepDiveCsv(meta, view) {
+  const rows = [['Section', 'Label', 'Value', 'Unit', 'Share %', 'Cumulative %', 'Sample', 'Thin sample']];
+  const trendUnit = (meta.trendUnit || meta.unit || '').trim();
+  const trendDigits = meta.trendDigits !== undefined ? meta.trendDigits : meta.digits;
+  const round = (value, digits) => Number(Number(value).toFixed(digits));
+
+  view.trend.forEach((point) => {
+    rows.push([
+      'Trend',
+      point.label,
+      round(point.value, trendDigits),
+      trendUnit,
+      '',
+      '',
+      point.meta || '',
+      point.thin ? 'yes' : 'no'
+    ]);
+  });
+  // Variant rows carry no share column: the value is already a rate (quality, MIH),
+  // a count (claims) or an amount (saving), so a percentage of the column would mislead.
+  view.variant.forEach((row) => {
+    rows.push(['Variant', row.label, round(row.value, meta.digits), meta.variantUnit || '', '', '', row.meta || '', '']);
+  });
+
+  // Efficiency adds a capacity + per-line balance block ahead of the Pareto rows.
+  const eff = view.effAnalysis;
+  if (eff) {
+    rows.push(['Capacity', 'Actual UPH', round(eff.uph, 0), 'units/hr', '', '', `net good ${eff.netGood}`, '']);
+    rows.push(['Capacity', 'Run-rate UPH', round(eff.runUph, 0), 'units/hr', '', '', `input ${eff.input}`, '']);
+    rows.push(['Capacity', 'Cycle time', round(eff.ctSec, 1), 's/unit', '', '', `run rate ${round(eff.ctRunSec, 1)} s`, '']);
+    rows.push(['Capacity', 'Downtime CT cost', round(eff.ctLossSec, 1), 's/unit', '', '', '', '']);
+    rows.push(['Capacity', 'Line balance rate', round(eff.balanceRate, 0), '%', '', '', `bottleneck ${eff.bottleneckLabel}`, '']);
+    eff.lines.forEach((line) => {
+      rows.push([
+        'Balance',
+        line.label,
+        round(line.ctSec, 1),
+        's/unit',
+        eff.maxCt > 0 ? ((line.ctSec / eff.maxCt) * 100).toFixed(1) : '',
+        '',
+        `UPH ${round(line.uph, 0)} · ${line.runs} run${line.runs === 1 ? '' : 's'}`,
+        ''
+      ]);
+    });
+  }
+
+  const total = view.pareto.reduce((sum, row) => sum + row.value, 0);
+  let cumulative = 0;
+  view.pareto.forEach((row) => {
+    const share = total > 0 ? (row.value / total) * 100 : 0;
+    cumulative += share;
+    rows.push([
+      'Pareto',
+      row.label,
+      round(row.value, 2),
+      meta.paretoUnit,
+      share.toFixed(1),
+      Math.min(100, cumulative).toFixed(1),
+      '',
+      ''
+    ]);
+  });
+
+  return rows.map((cells) => cells.map(kpiCsvCell).join(',')).join('\r\n');
+}
+
+// One builder per KPI family. Everything the modal renders — headline, scope line,
+// trend, variant histogram, Pareto — comes back from here, so the layout below has
+// no per-KPI conditionals and each family's logic sits in one place.
+const KPI_FAMILY_BUILDERS = {
+  quality({ records, rangedRecords, kpiKey, meta, rangeLabel, variantKey }) {
+    const variantKeyOf = (rec) => `${rec.model} · ${rec.config} ${rec.side}`;
+    const scope = variantKey ? rangedRecords.filter((rec) => variantKeyOf(rec) === variantKey) : rangedRecords;
+    const groupBy = (keyOf, source = rangedRecords) => {
+      const map = new Map();
+      source.forEach((rec) => {
+        const key = keyOf(rec);
+        const acc = map.get(key) || kpiEmptyAcc();
+        acc.kpiKey = kpiKey;
+        map.set(key, kpiAccumulate(acc, rec));
+      });
+      return map;
+    };
+    const sample = (acc) => `${acc.input.toLocaleString()} pcs · ${acc.runs} run${acc.runs === 1 ? '' : 's'}`;
+
+    const trend = kpiTrendPoints(groupBy((rec) => rec.date, scope));
+
+    const variant = [...groupBy(variantKeyOf).entries()]
+      .map(([key, acc]) => {
+        const value = kpiMetricValue(acc, kpiKey);
+        return {
+          key,
+          label: key,
+          value,
+          pct: value,
+          valueText: `${value.toFixed(meta.digits)}${meta.unit}`,
+          meta: sample(acc),
+          barClass: value < meta.target ? 'bg-rose-500' : 'bg-emerald-500'
+        };
+      })
+      .sort((a, b) => a.value - b.value);
+
+    const byMode = new Map();
+    scope.forEach((rec) => {
+      if (kpiKey === 'eff') {
+        (rec.downtimeEvents || []).forEach((evt) => {
+          const key = evt.category || 'Unclassified';
+          byMode.set(key, (byMode.get(key) || 0) + Math.max(0, Number(evt.durationMin) || 0));
+        });
+        return;
+      }
+      (rec.defectItems || []).forEach((defect) => {
+        const fallout = Math.max(0, Number(defect.falloutQty) || 0);
+        const salvage = Math.min(fallout, Math.max(0, Number(defect.salvageQty) || 0));
+        const key = defect.mode || 'Unclassified';
+        byMode.set(key, (byMode.get(key) || 0) + (kpiKey === 'fpy' ? fallout : fallout - salvage));
+      });
+    });
+    const pareto = [...byMode.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, value]) => ({ key: label, label, value }));
+
+    // UPH / cycle time / line balance only make sense for efficiency.
+    let effAnalysis = null;
+    if (kpiKey === 'eff') {
+      const lines = [...groupBy(variantKeyOf, scope).entries()]
+        .map(([key, acc]) => {
+          const m = computeProductionMetrics({
+            input: acc.input,
+            fallout: acc.fallout,
+            salvage: acc.salvage,
+            plannedTimeHr: acc.plannedHr,
+            downtimeHr: acc.downtimeMin / 60
+          });
+          const netGood = Math.max(0, acc.input - m.netReject);
+          const ctSec = netGood > 0 ? (acc.plannedHr * 3600) / netGood : 0;
+          const ctRunSec = netGood > 0 ? (m.runTimeHr * 3600) / netGood : 0;
+          return {
+            key,
+            label: key,
+            runs: acc.runs,
+            input: acc.input,
+            netGood,
+            plannedHr: acc.plannedHr,
+            runHr: m.runTimeHr,
+            uph: acc.plannedHr > 0 ? netGood / acc.plannedHr : 0,
+            eff: m.efficiency,
+            ctSec,
+            ctRunSec,
+            ctLossSec: Math.max(0, ctSec - ctRunSec)
+          };
+        })
+        .filter((line) => line.ctSec > 0)
+        .sort((a, b) => b.ctSec - a.ctSec);
+
+      if (lines.length > 0) {
+        const netGood = lines.reduce((sum, l) => sum + l.netGood, 0);
+        const input = lines.reduce((sum, l) => sum + l.input, 0);
+        const plannedHr = lines.reduce((sum, l) => sum + l.plannedHr, 0);
+        const runHr = lines.reduce((sum, l) => sum + l.runHr, 0);
+        const maxCt = lines[0].ctSec;
+        const minCt = lines[lines.length - 1].ctSec;
+        const ctSum = lines.reduce((sum, l) => sum + l.ctSec, 0);
+        const ctSec = netGood > 0 ? (plannedHr * 3600) / netGood : 0;
+        const ctRunSec = netGood > 0 ? (runHr * 3600) / netGood : 0;
+        effAnalysis = {
+          lines: lines.map((l) => ({ ...l, vsFastestPct: minCt > 0 ? (l.ctSec / minCt - 1) * 100 : 0 })),
+          input,
+          netGood,
+          plannedHr,
+          runHr,
+          uph: plannedHr > 0 ? netGood / plannedHr : 0,
+          runUph: runHr > 0 ? input / runHr : 0,
+          ctSec,
+          ctRunSec,
+          ctLossSec: Math.max(0, ctSec - ctRunSec),
+          maxCt,
+          minCt,
+          bottleneckLabel: lines[0].label,
+          bottleneckKey: lines[0].key,
+          balanceRate: lines.length > 1 && maxCt > 0 ? (ctSum / (lines.length * maxCt)) * 100 : 100,
+          // Levelling the same work would raise the pace from the bottleneck CT to the
+          // mean CT, i.e. capacity × (n · max CT / Σ CT).
+          balanceGainPct: lines.length > 1 && ctSum > 0 ? ((lines.length * maxCt) / ctSum - 1) * 100 : 0
+        };
+      }
+    }
+
+    const headlineSource = variantKey ? (records || []).filter((rec) => variantKeyOf(rec) === variantKey) : records || [];
+    const allRuns = headlineSource.reduce((acc, rec) => kpiAccumulate(acc, rec), kpiEmptyAcc());
+    const value = kpiMetricValue(allRuns, kpiKey);
+    return {
+      headline: { value, text: `${value.toFixed(meta.digits)}${meta.unit}` },
+      scopeLabel: `Active Global Scope · ${scope.length} run${scope.length === 1 ? '' : 's'} · ${rangeLabel}`,
+      trend,
+      variant,
+      pareto,
+      effAnalysis
+    };
+  },
+
+  claims({ claims, cutoffIso, rangeDays, variantKey }) {
+    const scopeClaims = variantKey ? claims.filter((f) => f.model === variantKey) : claims;
+    const inScope = scopeClaims.filter((f) => kpiInRange(f.feedbackDate, cutoffIso));
+    const monthly = !rangeDays || rangeDays > 30;
+    const byBucket = new Map();
+    inScope.forEach((f) => {
+      const bucket = monthly ? String(f.feedbackDate).slice(0, 7) : f.feedbackDate;
+      byBucket.set(bucket, (byBucket.get(bucket) || 0) + 1);
+    });
+    const trend = [...byBucket.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([bucket, count]) => ({
+        label: monthly ? bucket : formatShortDate(bucket),
+        value: count,
+        meta: `${count} claim${count === 1 ? '' : 's'}`,
+        thin: count <= 1
+      }));
+
+    const byModel = new Map();
+    claims.forEach((f) => byModel.set(f.model, (byModel.get(f.model) || 0) + 1));
+    const maxModel = Math.max(1, ...byModel.values());
+    const variant = [...byModel.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([model, count]) => ({
+        key: model,
+        label: model,
+        value: count,
+        pct: (count / maxModel) * 100,
+        valueText: `${count} claim${count === 1 ? '' : 's'}`,
+        meta: `${((count / Math.max(1, claims.length)) * 100).toFixed(0)}% of claims`,
+        barClass: 'bg-amber-500'
+      }));
+
+    const byIssue = new Map();
+    scopeClaims.forEach((f) => {
+      const key = f.issueItem || f.issueCategory || 'Unclassified';
+      byIssue.set(key, (byIssue.get(key) || 0) + Math.max(1, Number(f.ngQty) || 1));
+    });
+    const pareto = [...byIssue.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, value]) => ({ key: label, label, value }));
+
+    const count = scopeClaims.filter((f) => String(f.feedbackDate || '').slice(0, 4) === '2026').length;
+    return {
+      headline: { value: count, text: String(count) },
+      scopeLabel: 'Global scope · customer feedback records',
+      trend,
+      variant,
+      pareto
+    };
+  },
+
+  savings({ savingItems, variantKey }) {
+    const familyOf = (item) => item.familyGroup || '—';
+    const scopeItems = variantKey ? savingItems.filter((s) => familyOf(s.item) === variantKey) : savingItems;
+    const total = scopeItems.reduce((sum, s) => sum + s.metrics.annualSavingThb, 0);
+    const byFamily = new Map();
+    const byCategory = new Map();
+    scopeItems.forEach(({ item, metrics }) => {
+      const category = item.category || 'Unclassified';
+      byCategory.set(category, (byCategory.get(category) || 0) + metrics.annualSavingThb);
+    });
+    savingItems.forEach(({ item, metrics }) => {
+      const family = familyOf(item);
+      byFamily.set(family, (byFamily.get(family) || 0) + metrics.annualSavingThb);
+    });
+    const maxFamily = Math.max(1, ...byFamily.values());
+
+    const variant = [...byFamily.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([family, amount]) => ({
+        key: family,
+        label: family,
+        value: amount,
+        pct: (amount / maxFamily) * 100,
+        valueText: formatThbCompact(amount),
+        meta: `${((amount / KPI_TARGETS.annualSavingThb) * 100).toFixed(0)}% of target`,
+        barClass: 'bg-emerald-500'
+      }));
+
+    const pareto = [...byCategory.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, value]) => ({ key: label, label, value }));
+
+    return {
+      headline: { value: total, text: formatThbCompact(total) },
+      scopeLabel: 'Global scope · cost-saving initiatives · annual run-rate',
+      trend: [],
+      variant,
+      pareto
+    };
+  },
+
+  mih({ scopedLines, gateRecords, cutoffIso, variantKey }) {
+    const scopeLines = variantKey ? scopedLines.filter((l) => l.project.id === variantKey) : scopedLines;
+    const stampDate = (entry) => {
+      const stamp = String(entry.time || '');
+      if (/^Today/i.test(stamp)) return todayIso();
+      const m = stamp.match(/^(\d{4}-\d{2}-\d{2})/);
+      return m ? m[1] : null;
+    };
+    const approvals = scopeLines
+      .filter((l) => l.approved)
+      .map((l) => (gateRecords[l.project.id]?.[l.line.key]?.mih?.auditLog || []).map(stampDate).filter(Boolean).sort()[0] || null)
+      .filter((iso) => kpiInRange(iso, cutoffIso))
+      .sort();
+
+    const byDate = new Map();
+    approvals.forEach((iso) => byDate.set(iso, (byDate.get(iso) || 0) + 1));
+    let running = 0;
+    const trend = [...byDate.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([iso, count]) => {
+        running += count;
+        return {
+          label: formatShortDate(iso),
+          value: running,
+          meta: `+${count} line${count === 1 ? '' : 's'}`,
+          thin: count <= 1
+        };
+      });
+
+    const byProgram = new Map();
+    scopedLines.forEach(({ project, approved }) => {
+      const entry = byProgram.get(project.id) || { label: `${project.model} ${project.phase}`, approved: 0, total: 0 };
+      entry.total += 1;
+      if (approved) entry.approved += 1;
+      byProgram.set(project.id, entry);
+    });
+    const variant = [...byProgram.entries()].map(([id, entry]) => {
+      const pct = entry.total > 0 ? (entry.approved / entry.total) * 100 : 0;
+      return {
+        key: id,
+        label: entry.label,
+        value: pct,
+        pct,
+        valueText: `${entry.approved}/${entry.total}`,
+        meta: `${entry.approved}/${entry.total} · ${pct >= 100 ? 'achieved' : 'open'}`,
+        barClass: pct >= 100 ? 'bg-emerald-500' : 'bg-amber-500'
+      };
+    });
+
+    const blocking = new Map();
+    scopeLines.forEach(({ project, line, approved }) => {
+      if (approved) return;
+      const gates = gateRecords[project.id]?.[line.key] || {};
+      const firstOpen = NPI_GATES.find((g) => (gates[g.id]?.status || 'Pending') !== 'Approved');
+      const key = firstOpen ? `${firstOpen.code} ${firstOpen.short}` : 'Not started';
+      blocking.set(key, (blocking.get(key) || 0) + 1);
+    });
+    const pareto = [...blocking.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, value]) => ({ key: label, label, value }));
+
+    // Same honest measure as the dashboard tile: on-time achievement against lines
+    // already due, with all-line coverage kept as the separate forecast figure.
+    const mihToday = todayIso();
+    const summary = summarizeMihAchievement(
+      scopeLines.map(({ project, line, approved: isApproved }) => ({
+        fatpMih: line.fatpMih || project.mihDate || '',
+        approved: isApproved,
+        approvedAt: mihApprovalIso(gateRecords, project.id, line.key, mihToday)
+      })),
+      { today: mihToday }
+    );
+    const forecastText = `forecast ${summary.forecastAchieved}/${summary.tracked} lines`;
+    return {
+      headline: {
+        value: summary.pct,
+        text: summary.due > 0 ? `${summary.pct.toFixed(0)}%` : '—'
+      },
+      scopeLabel:
+        summary.due > 0
+          ? `FY${summary.fiscalYear} · ${summary.onTime}/${summary.due} due lines on time · ${forecastText}`
+          : `FY${summary.fiscalYear} · no lines due yet${
+              summary.nextDue ? ` · next ${summary.nextDue}` : ''
+            } · ${forecastText}`,
+      trend,
+      variant,
+      pareto
+    };
+  }
+};
+
+function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, thinNote }) {
+  const [activeIdx, setActiveIdx] = useState(null);
+  if (!points || points.length === 0) return null;
+  const hasThin = points.some((p) => p.thin);
+  const W = 640;
+  const H = 190;
+  const padL = 38;
+  const padR = 14;
+  const padT = 14;
+  const padB = 26;
+
+  const values = points.map((p) => p.value);
+  const candidates = target === null || target === undefined ? values : values.concat(target);
+  let minV = Math.min(...candidates);
+  let maxV = Math.max(...candidates);
+  if (maxV - minV < 1) {
+    minV -= 1;
+    maxV += 1;
+  }
+  const span = maxV - minV;
+  const xOf = (i) =>
+    points.length === 1
+      ? padL + (W - padL - padR) / 2
+      : padL + (i / (points.length - 1)) * (W - padL - padR);
+  const yOf = (v) => padT + (1 - (v - minV) / span) * (H - padT - padB);
+
+  const line = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${xOf(i).toFixed(1)},${yOf(p.value).toFixed(1)}`).join(' ');
+  const area = `${line} L${xOf(points.length - 1).toFixed(1)},${H - padB} L${xOf(0).toFixed(1)},${H - padB} Z`;
+  const yTicks = [minV, minV + span / 2, maxV];
+  const xTickIdx = points.length <= 4 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
+
+  return (
+    <div>
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-full h-48"
+      role="group"
+      aria-label={`KPI trend chart, ${points.length} point${points.length === 1 ? '' : 's'} from ${points[0].label} to ${points[points.length - 1].label}. Use Tab to step through each point.`}
+    >
+      {yTicks.map((v) => (
+        <g key={`y${v}`}>
+          <line x1={padL} x2={W - padR} y1={yOf(v)} y2={yOf(v)} className="stroke-slate-200 dark:stroke-slate-700" strokeWidth="1" />
+          <text x={padL - 6} y={yOf(v) + 3} textAnchor="end" aria-hidden="true" className="fill-slate-400 dark:fill-slate-500" style={{ fontSize: '9px' }}>
+            {v.toFixed(digits)}{unit}
+          </text>
+        </g>
+      ))}
+
+      <path d={area} className={fillClass || 'fill-blue-500/10'} />
+      <path d={line} fill="none" className={colorClass || 'stroke-blue-600 dark:stroke-blue-400'} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+
+      {target !== null && target !== undefined && (
+        <g>
+          <line
+            x1={padL}
+            x2={W - padR}
+            y1={yOf(target)}
+            y2={yOf(target)}
+            className="stroke-rose-400 dark:stroke-rose-500"
+            strokeWidth="1"
+            strokeDasharray="5 4"
+          />
+          <text x={W - padR} y={yOf(target) - 4} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px' }}>
+            target {target.toFixed(digits)}{unit}
+          </text>
+        </g>
+      )}
+
+      {points.map((p, i) => {
+        const isActive = activeIdx === i;
+        const label = `${p.label}: ${p.value.toFixed(digits)}${unit}${p.meta ? ` · ${p.meta}` : ''}${p.thin ? ' (thin sample)' : ''}`;
+        return (
+          <g
+            key={`p${i}`}
+            tabIndex={0}
+            role="img"
+            aria-label={label}
+            onFocus={() => setActiveIdx(i)}
+            onBlur={() => setActiveIdx(null)}
+            onMouseEnter={() => setActiveIdx(i)}
+            onMouseLeave={() => setActiveIdx(null)}
+            className="outline-none cursor-pointer"
+          >
+            {/* Generous invisible hit area so the point is easy to focus and hover. */}
+            <circle cx={xOf(i)} cy={yOf(p.value)} r="11" className="fill-transparent" />
+            {isActive && (
+              <circle cx={xOf(i)} cy={yOf(p.value)} r="8" className="fill-none stroke-blue-500 dark:stroke-blue-300" strokeWidth="1.5" />
+            )}
+            {p.thin ? (
+              <>
+                <circle
+                  cx={xOf(i)}
+                  cy={yOf(p.value)}
+                  r="4"
+                  className="fill-white dark:fill-slate-900 stroke-amber-500 dark:stroke-amber-400"
+                  strokeWidth="1.5"
+                  strokeDasharray="2 2"
+                />
+                <circle cx={xOf(i)} cy={yOf(p.value)} r="1.4" className="fill-amber-500 dark:fill-amber-400" />
+              </>
+            ) : (
+              <circle cx={xOf(i)} cy={yOf(p.value)} r="3" className="fill-white dark:fill-slate-900 stroke-blue-600 dark:stroke-blue-400" strokeWidth="2" />
+            )}
+            <title>{label}</title>
+          </g>
+        );
+      })}
+
+      {xTickIdx.map((i) => (
+        <text key={`x${i}`} x={xOf(i)} y={H - 8} textAnchor={i === 0 ? 'start' : i === points.length - 1 ? 'end' : 'middle'} aria-hidden="true" className="fill-slate-400 dark:fill-slate-500" style={{ fontSize: '9px' }}>
+          {points[i].label}
+        </text>
+      ))}
+    </svg>
+    {hasThin && thinNote && (
+      <p className="text-[10px] text-amber-700 dark:text-amber-300 mt-1 flex items-start gap-1.5">
+        <span aria-hidden="true" className="inline-block w-2 h-2 mt-1 rounded-full border border-dashed border-amber-500 shrink-0" />
+        <span>{thinNote}</span>
+      </p>
+    )}
+    </div>
+  );
+}
+
+function KpiBarRows({ rows, emptyText, activeKey, onSelect }) {
+  if (!rows || rows.length === 0) {
+    return <div className="p-4 text-xs text-slate-400 dark:text-slate-400">{emptyText || 'No data in this range.'}</div>;
+  }
+  const interactive = typeof onSelect === 'function';
+  return (
+    <div className="space-y-1.5">
+      {rows.map((row) => {
+        const active = activeKey === row.key;
+        const Row = interactive ? 'button' : 'div';
+        return (
+          <Row
+            key={row.key}
+            type={interactive ? 'button' : undefined}
+            onClick={interactive ? () => onSelect(row.key) : undefined}
+            aria-pressed={interactive ? active : undefined}
+            title={interactive ? (active ? 'Clear variant scope' : `Scope the deep dive to ${row.label}`) : undefined}
+            className={`w-full flex items-center gap-2 text-[11px] text-left rounded-md ${
+              active
+                ? 'bg-blue-50 dark:bg-blue-950/60 ring-1 ring-blue-300 dark:ring-blue-800 px-1.5 py-1 -mx-1.5'
+                : interactive
+                ? 'px-1.5 py-1 -mx-1.5 hover:bg-slate-50 dark:hover:bg-slate-800/60'
+                : ''
+            }`}
+          >
+            <span className={`w-44 shrink-0 truncate ${active ? 'font-semibold text-blue-800 dark:text-blue-200' : 'text-slate-600 dark:text-slate-400'}`} title={row.label}>
+              {row.label}
+            </span>
+            <div className="flex-1 h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+              <div className={`h-full ${row.barClass}`} style={{ width: `${Math.max(1, Math.min(100, row.pct))}%` }} />
+            </div>
+            <span className="w-20 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{row.valueText}</span>
+            {row.meta && (
+              <span className="w-32 text-right text-[10px] text-slate-400 dark:text-slate-400 truncate" title={row.meta}>
+                {row.meta}
+              </span>
+            )}
+          </Row>
+        );
+      })}
+    </div>
+  );
+}
+
+function KpiParetoRows({ rows, unit, emptyText, groupNoun }) {
+  if (!rows || rows.length === 0) {
+    return <div className="p-4 text-xs text-slate-400 dark:text-slate-400">{emptyText || 'No loss records in this range.'}</div>;
+  }
+  const total = rows.reduce((sum, r) => sum + r.value, 0);
+
+  // Cap the table to the vital few: contributors up to ~80% cumulative, plus two
+  // rows for context — the long tail is folded into a single "Others" row.
+  const shown = [];
+  let running = 0;
+  let cut = rows.length;
+  for (let i = 0; i < rows.length; i += 1) {
+    shown.push(rows[i]);
+    running += rows[i].value;
+    if (total > 0 && running / total >= 0.8) {
+      const contextRows = rows.slice(i + 1, i + 3);
+      shown.push(...contextRows);
+      cut = i + 1 + contextRows.length;
+      break;
+    }
+  }
+
+  const tail = rows.slice(cut);
+  const displayRows =
+    tail.length > 0
+      ? shown.concat([
+          {
+            key: '__others__',
+            label: `Others (${tail.length} ${groupNoun || 'items'})`,
+            value: tail.reduce((sum, r) => sum + r.value, 0),
+            isOthers: true
+          }
+        ])
+      : shown;
+
+  let cumulative = 0;
+
+  return (
+    <div className="space-y-1.5">
+      {displayRows.map((row) => {
+        const share = total > 0 ? (row.value / total) * 100 : 0;
+        const before = cumulative;
+        cumulative += share;
+        const vital = !row.isOthers && before < 80;
+        return (
+          <div key={row.key} className="flex items-center gap-2 text-[11px]">
+            <span
+              className={`w-44 shrink-0 truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
+              title={row.label}
+            >
+              {row.label}
+            </span>
+            <div className="flex-1 h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+              <div
+                className={`h-full ${row.isOthers ? 'bg-slate-400 dark:bg-slate-600' : vital ? 'bg-rose-500' : 'bg-rose-300 dark:bg-rose-800'}`}
+                style={{ width: `${Math.max(1, Math.min(100, share))}%` }}
+              />
+            </div>
+            <span className={`w-20 text-right font-semibold tabular-nums ${row.isOthers ? 'text-slate-500 dark:text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
+              {Math.round(row.value).toLocaleString()} {unit}
+            </span>
+            <span className="w-12 text-right tabular-nums text-slate-500 dark:text-slate-400">{share.toFixed(0)}%</span>
+            <span className={`w-16 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}>
+              {cumulative.toFixed(0)}% cum
+            </span>
+          </div>
+        );
+      })}
+      <div className="text-[10px] text-slate-400 dark:text-slate-400 pt-1">
+        {tail.length > 0
+          ? `Showing the top ${shown.length} of ${rows.length} contributors — solid bars cover the vital few (first 80% of loss); the remaining ${tail.length} are grouped as Others.`
+          : 'Solid bars are the vital few — the modes/categories making up the first 80% of total loss.'}
+      </div>
+    </div>
+  );
+}
+
+function KpiDeepDiveModal({
+  kpiKey,
+  projects,
+  records,
+  gateRecords,
+  globalSide,
+  globalScope,
+  costProjects,
+  customerFeedback,
+  onClose
+}) {
+  const [rangeId, setRangeId] = useState('90D');
+  const [variantFilter, setVariantFilter] = useState('ALL');
+  const meta = KPI_DEEP_DIVE_META[kpiKey] || KPI_DEEP_DIVE_META.fpy;
+  const range = KPI_RANGE_OPTIONS.find((r) => r.id === rangeId) || KPI_RANGE_OPTIONS[1];
+  const cutoffIso = range.days ? addDaysIso(todayIso(), -(range.days - 1)) : null;
+
+  useEffect(() => {
+    const onKey = (event) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const scopedLines = useMemo(
+    () =>
+      projects.flatMap((project) =>
+        getLineVariantsForProject(project)
+          .filter((v) => globalSide === 'ALL' || v.side === globalSide)
+          .map((v) => ({
+            project,
+            line: v,
+            approved: gateRecords[project.id]?.[v.key]?.mih?.status === 'Approved'
+          }))
+      ),
+    [projects, gateRecords, globalSide]
+  );
+
+  const claims = useMemo(
+    () => (customerFeedback || []).filter((f) => f.category === 'Claim'),
+    [customerFeedback]
+  );
+
+  const savingItems = useMemo(
+    () => (costProjects || []).map((item) => ({ item, metrics: computeCostSavingMetrics(item) })),
+    [costProjects]
+  );
+
+  // Variant scope: build once unfiltered (that also yields the option list), then
+  // rebuild for the chosen variant so the headline, trend and Pareto all narrow.
+  const { view, variants, activeVariant } = useMemo(() => {
+    const rangedRecords = (records || [])
+      .filter((r) => r.date && kpiInRange(r.date, cutoffIso))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    const build = (variantKey) =>
+      KPI_FAMILY_BUILDERS[meta.family]({
+        records: records || [],
+        rangedRecords,
+        claims,
+        savingItems,
+        scopedLines,
+        gateRecords,
+        kpiKey,
+        meta,
+        cutoffIso,
+        rangeDays: range.days,
+        rangeLabel: range.label,
+        variantKey
+      });
+    const all = build(null);
+    const variants = all.variant.slice();
+    // Keep a chosen variant as the scope even when the current range has no rows for
+    // it — switching 90D → 7D should widen the data, not silently drop the filter.
+    if (variantFilter !== 'ALL' && !variants.some((v) => v.key === variantFilter)) {
+      variants.push({ key: variantFilter, label: variantFilter, value: 0, pct: 0, valueText: '—' });
+    }
+    return {
+      view: variantFilter === 'ALL' ? all : build(variantFilter),
+      variants,
+      activeVariant: variantFilter
+    };
+  }, [meta, records, claims, savingItems, scopedLines, gateRecords, cutoffIso, range.days, kpiKey, variantFilter]);
+
+  const variantLabel = variants.find((v) => v.key === activeVariant)?.label;
+  const scopeLabel = activeVariant === 'ALL' ? view.scopeLabel : `${view.scopeLabel} · ${variantLabel}`;
+
+  const scopePhrase = activeVariant === 'ALL' ? '' : ' for this variant';
+  const emptyRange = range.days
+    ? `No dated points${scopePhrase} in the last ${range.days} days — widen the range or wait for the next run.`
+    : `No dated points${scopePhrase} in this period — widen the range or wait for the next run.`;
+
+  const exportName = `${meta.title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')}-deep-dive-${range.id}-${todayIso()}`;
+
+  const handleExportCsv = () => {
+    const blob = new Blob([kpiDeepDiveCsv(meta, view)], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${exportName}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  // Print in the light palette even when the app is in dark mode, then restore it.
+  const handlePrint = () => {
+    const root = document.documentElement;
+    const wasDark = root.classList.contains('dark');
+    const restore = () => {
+      if (wasDark) root.classList.add('dark');
+      window.removeEventListener('afterprint', restore);
+    };
+    if (wasDark) root.classList.remove('dark');
+    window.addEventListener('afterprint', restore);
+    setTimeout(restore, 2000);
+    window.print();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center p-4 bg-slate-950/60 backdrop-blur-[1px] overflow-y-auto"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${meta.title} deep dive`}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="kpi-print-area w-full max-w-4xl my-8 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">{meta.title} · Deep Dive</h3>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">{scopeLabel}</p>
+            <p className="hidden print:block text-[10px] text-slate-500 mt-0.5">
+              FFM NPI Ops · {range.label} window · exported {todayIso()}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="text-right mr-1">
+              <div className="text-xl font-bold tabular-nums text-slate-900 dark:text-slate-100">{view.headline.text}</div>
+              <div className="text-[10px] text-slate-500 dark:text-slate-400">Target {meta.targetText}</div>
+            </div>
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              title="Download these tables as CSV"
+              className="no-print inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              CSV
+            </button>
+            <button
+              type="button"
+              onClick={handlePrint}
+              title="Print-friendly view"
+              className="no-print inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              Print
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close deep dive"
+              className="p-1.5 rounded-lg text-slate-400 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="p-5 space-y-5">
+          {globalScope && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+              <span className="font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mr-1">
+                Global scope
+              </span>
+              {[
+                { label: globalScope.family === 'ALL' ? 'All families' : globalScope.family, applies: true },
+                { label: globalScope.model === 'ALL' ? 'All models' : globalScope.model, applies: true },
+                { label: globalScope.phase === 'ALL' ? 'All phases' : globalScope.phase, applies: true },
+                { label: globalScope.side === 'ALL' ? 'Both sides' : globalScope.side, applies: true },
+                {
+                  label: !globalScope.process || globalScope.process === 'ALL' ? 'All processes' : globalScope.process,
+                  // Claims and cost-saving records carry no process field, so the
+                  // filter cannot narrow those two dives — say so instead of implying it did.
+                  applies: meta.family === 'quality'
+                }
+              ].map((chip) => (
+                <span
+                  key={chip.label}
+                  title={
+                    chip.applies
+                      ? undefined
+                      : 'Claims and cost-saving records carry no process field — this filter only narrows production-based KPIs.'
+                  }
+                  className={`px-1.5 py-0.5 rounded border ${
+                    chip.applies
+                      ? 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                      : 'border-dashed border-slate-300 dark:border-slate-600 text-slate-400 dark:text-slate-500'
+                  }`}
+                >
+                  {chip.label}
+                </span>
+              ))}
+              <span className="text-slate-400 dark:text-slate-500">
+                — this dive only covers records inside the global scope
+              </span>
+              <button
+                type="button"
+                onClick={onClose}
+                className="no-print font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                Change scope
+              </button>
+            </div>
+          )}
+
+          {(variants.length > 1 || activeVariant !== 'ALL') && (
+            <div className="no-print flex flex-wrap items-center gap-2">
+              <label htmlFor="kpi-variant-scope" className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Variant scope
+              </label>
+              <select
+                id="kpi-variant-scope"
+                value={activeVariant}
+                onChange={(e) => setVariantFilter(e.target.value)}
+                className="px-2.5 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 max-w-[54%]"
+              >
+                <option value="ALL">All variants ({variants.length})</option>
+                {variants.map((v) => (
+                  <option key={v.key} value={v.key}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+              {activeVariant !== 'ALL' && (
+                <button
+                  type="button"
+                  onClick={() => setVariantFilter('ALL')}
+                  className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
+
+          <section>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                {meta.trendHeading || 'Trend'}
+              </h4>
+              {meta.hasTrend !== false && (
+                <div className="no-print inline-flex rounded-lg border border-slate-200 dark:border-slate-800 p-0.5 bg-slate-50 dark:bg-slate-800">
+                  {KPI_RANGE_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => setRangeId(option.id)}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                        rangeId === option.id
+                          ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
+                          : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {meta.hasTrend === false ? (
+              <div className="p-4 rounded-lg border border-dashed border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+                {meta.trendNotice}
+              </div>
+            ) : view.trend.length >= 2 ? (
+              <KpiTrendChart
+                points={view.trend}
+                target={meta.targetLine ? meta.target : null}
+                unit={meta.trendUnit || meta.unit}
+                digits={meta.trendDigits !== undefined ? meta.trendDigits : meta.digits}
+                colorClass={meta.lineClass}
+                fillClass={meta.fillClass}
+                thinNote={meta.thinNote}
+              />
+            ) : (
+              <div className="p-4 rounded-lg border border-dashed border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+                {view.trend.length === 1
+                  ? `Only one dated point${scopePhrase} in this range — widen the range to see a trend.`
+                  : meta.emptyTrend || emptyRange}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
+              {meta.variantHeading}
+              <span className="ml-2 text-[10px] font-normal normal-case tracking-normal text-slate-400 dark:text-slate-500">
+                click a row to scope the deep dive
+              </span>
+            </h4>
+            <KpiBarRows
+              rows={view.variant}
+              emptyText="No records in this range."
+              activeKey={activeVariant}
+              onSelect={(key) => setVariantFilter((prev) => (prev === key ? 'ALL' : key))}
+            />
+          </section>
+
+          {view.effAnalysis && (
+            <section>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
+                UPH, Cycle Time &amp; Line Balance
+              </h4>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+                {[
+                  ['Actual UPH', view.effAnalysis.uph.toFixed(0), 'net good ÷ planned hr'],
+                  ['Run-rate UPH', view.effAnalysis.runUph.toFixed(0), 'input ÷ run hr'],
+                  ['Cycle time', `${view.effAnalysis.ctSec.toFixed(1)} s`, `run rate ${view.effAnalysis.ctRunSec.toFixed(1)} s`],
+                  ['Downtime CT cost', `${view.effAnalysis.ctLossSec.toFixed(1)} s`, 'lost per good unit'],
+                  ['Line balance', `${view.effAnalysis.balanceRate.toFixed(0)}%`, `bottleneck ${view.effAnalysis.bottleneckLabel}`]
+                ].map(([label, value, sub]) => (
+                  <div
+                    key={label}
+                    className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-2.5"
+                  >
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{label}</div>
+                    <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100 mt-0.5">{value}</div>
+                    <div className="text-[10px] text-slate-400 dark:text-slate-500 truncate" title={sub}>
+                      {sub}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-3 space-y-1.5">
+                {view.effAnalysis.lines.map((line) => {
+                  const bottleneck = line.key === view.effAnalysis.bottleneckKey;
+                  return (
+                    <div key={line.key} className="flex items-center gap-2 text-[11px]">
+                      <span
+                        className={`w-40 shrink-0 truncate ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-400'}`}
+                        title={line.label}
+                      >
+                        {line.label}
+                      </span>
+                      <div className="flex-1 h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                        <div
+                          className={`h-full ${bottleneck ? 'bg-rose-500' : 'bg-blue-500 dark:bg-blue-600'}`}
+                          style={{ width: `${Math.max(1, (line.ctSec / view.effAnalysis.maxCt) * 100)}%` }}
+                        />
+                      </div>
+                      <span className="w-16 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{line.ctSec.toFixed(1)} s</span>
+                      <span className="w-16 text-right tabular-nums text-slate-500 dark:text-slate-400">{line.uph.toFixed(0)} UPH</span>
+                      <span
+                        className={`w-14 text-right tabular-nums ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-500'}`}
+                      >
+                        {line.vsFastestPct <= 0.05 ? 'best' : `+${line.vsFastestPct.toFixed(0)}%`}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-2">
+                {`Cycle time = planned hours × 3,600 ÷ net good units, across ${view.effAnalysis.lines.length} line${
+                  view.effAnalysis.lines.length === 1 ? '' : 's'
+                }. The bottleneck (${view.effAnalysis.bottleneckLabel}) sets the pace at ${view.effAnalysis.maxCt.toFixed(
+                  1
+                )} s/unit against ${view.effAnalysis.minCt.toFixed(1)} s/unit on the fastest line; perfect levelling of the same work would lift output by about +${view.effAnalysis.balanceGainPct.toFixed(
+                  0
+                )}% at the same planned hours.`}
+              </p>
+            </section>
+          )}
+
+          <section>
+            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
+              {meta.paretoHeading}
+            </h4>
+            <KpiParetoRows rows={view.pareto} unit={meta.paretoUnit} groupNoun={meta.groupNoun} />
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+</script>

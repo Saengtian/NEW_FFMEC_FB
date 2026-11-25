@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Printing a KPI deep dive: hide the app shell and lift the modal panel to the page. */
+@media print {
+  @page {
+    margin: 12mm;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  .kpi-print-area,
+  .kpi-print-area * {
+    visibility: visible;
+  }
+
+  .kpi-print-area {
+    position: absolute !important;
+    top: 0;
+    left: 0;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    overflow: visible !important;
+    background: #fff !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .kpi-print-area .no-print {
+    display: none !important;
+  }
+
+  .kpi-print-area section {
+    break-inside: avoid;
+  }
+}
