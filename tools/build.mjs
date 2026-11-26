@@ -15,7 +15,7 @@ import { join } from "node:path";
 import * as esbuild from "esbuild";
 
 const ROOT = join(import.meta.dir, "..");
-const PARTS = ["Icons", "Part1_Data", "Part2_App", "Part3_ViewsA", "Part4_ViewsB", "Part5_Modules"];
+const PARTS = ["Icons", "Part1_Data", "Part2_App", "Part3_ViewsA", "Part4_ViewsB", "Part5_Modules", "Part6_Reports"];
 const BUNDLE = join(ROOT, "Bundle.html");
 const STYLES = join(ROOT, "Styles.html");
 const CSS_TMP = join(ROOT, "tools/.styles.tmp.css");
@@ -67,7 +67,13 @@ async function buildScript() {
   });
 
   // A literal </script> inside the JS would close the inline tag early.
-  const js = result.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
+  // Apps Script's HTML pipeline ALSO strips from a raw `http://` to the end of
+  // that line; on SheetJS's long minified lines that silently deleted ~49 KB
+  // and left an unterminated string (startup SyntaxError). `\/` is a no-op
+  // escape inside JS strings/regexes/templates, so runtime values stay intact.
+  const js = result.outputFiles[0].text
+    .replace(/<\/script/gi, "<\\/script")
+    .replaceAll("http://", "http:\\/\\/");
   writeFileSync(
     BUNDLE,
     `<!-- Built by tools/build.mjs from Icons.html + Part*.html. Do not edit. -->\n<script>\n${js}\n</script>\n`

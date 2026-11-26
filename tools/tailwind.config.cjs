@@ -11,6 +11,7 @@ const sources = [
   'Part3_ViewsA.html',
   'Part4_ViewsB.html',
   'Part5_Modules.html',
+  'Part6_Reports.html',
 ];
 
 module.exports = {
