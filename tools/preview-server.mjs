@@ -33,6 +33,8 @@ const PORT = Number(process.argv[2] || 5183);
 const GAS_SHIM = String.raw`
 (function () {
   var KEY = 'ffm-npi-ops-preview-state';
+  var HISTORY_KEY = 'ffm-npi-ops-preview-history';
+  var HISTORY_LIMIT = 5;
   var IMPORT_KEY = 'ffm-npi-ops-preview-import-applied';
   var EMAIL = 'local-preview@minebea.co.th';
 
@@ -83,6 +85,18 @@ const GAS_SHIM = String.raw`
         Number(expectedRevision) !== revision) {
       return { ok: false, conflict: true, revision: revision };
     }
+    // Keep the copy being replaced, exactly like the Sheet's history tab.
+    if (prev && prev.data) {
+      var history = readHistory().filter(function (entry) { return entry.revision !== prev.revision; });
+      history.unshift({
+        revision: prev.revision,
+        lastSavedAt: prev.lastSavedAt || null,
+        lastSavedBy: prev.lastSavedBy || null,
+        data: prev.data
+      });
+      window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, HISTORY_LIMIT)));
+    }
+
     var next = {
       revision: revision + 1,
       lastSavedAt: new Date().toISOString(),
@@ -102,11 +116,52 @@ const GAS_SHIM = String.raw`
     return { spreadsheetId: 'LOCAL_PREVIEW', sheetUrl: '', webAppUrl: '', userEmail: EMAIL };
   }
 
+  function readHistory() {
+    try {
+      var raw = window.localStorage.getItem(HISTORY_KEY);
+      var parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function listStateRevisions() {
+    var state = readState();
+    return {
+      ok: true,
+      limit: HISTORY_LIMIT,
+      current: state
+        ? { revision: state.revision, lastSavedAt: state.lastSavedAt || null, lastSavedBy: state.lastSavedBy || null }
+        : null,
+      revisions: readHistory()
+        .map(function (entry) {
+          return { revision: entry.revision, lastSavedAt: entry.lastSavedAt || null, lastSavedBy: entry.lastSavedBy || null };
+        })
+        .sort(function (a, b) { return b.revision - a.revision; })
+    };
+  }
+
+  function loadStateRevision(revision) {
+    var target = Number(revision);
+    var entry = readHistory().filter(function (item) { return item.revision === target; })[0];
+    if (!entry) return { ok: false, error: 'Revision ' + target + ' is no longer in the history.' };
+    return {
+      ok: true,
+      revision: entry.revision,
+      lastSavedAt: entry.lastSavedAt || null,
+      lastSavedBy: entry.lastSavedBy || null,
+      data: entry.data
+    };
+  }
+
   var methods = {
     loadWorkspaceState: loadWorkspaceState,
     saveWorkspaceState: saveWorkspaceState,
     initializeDatabase: initializeDatabase,
-    getServerInfo: getServerInfo
+    getServerInfo: getServerInfo,
+    listStateRevisions: listStateRevisions,
+    loadStateRevision: loadStateRevision
   };
 
   var successHandler = null;

@@ -22,10 +22,12 @@ const CSS_TMP = join(ROOT, "tools/.styles.tmp.css");
 const TAILWIND_CONFIG = join(ROOT, "tools/tailwind.config.cjs");
 const TAILWIND_INPUT = join(ROOT, "tools/tailwind.css");
 
-/** React/ReactDOM come from node_modules, so nothing is fetched at runtime. */
+/** React/ReactDOM/SheetJS come from node_modules, so nothing is fetched at runtime. */
 const PRELUDE = `import React from 'react';
 import ReactDOM from 'react-dom';
+import XLSX from 'xlsx';
 const { useState, useMemo, useEffect, useRef, useCallback } = React;
+window.XLSX = XLSX;
 `;
 
 /** Mounting used to be a second <script type="text/babel"> at the end of Index. */
