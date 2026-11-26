@@ -16,6 +16,10 @@
  *    timestamp of the last rebuild are kept in script properties and shown
  *    in the menu, so a stale mirror is visible rather than silent.
  *  - AuditLog is appended on every save.
+ *  - SignOffLog is the append-only gate decision ledger: one immutable row per
+ *    changed gate decision (program, line, gate, approver, decision, timestamp,
+ *    signed-in email), written inside the same save lock, so "who approved what"
+ *    is answered from its own tab instead of from the mutable gateRecords JSON.
  *  - Concurrency safe via LockService.getScriptLock().
  *  - Runs as the accessing user (executeAs USER_ACCESSING), so the AuditLog can
  *    attribute every save and sign-off to the signed-in Google account. Saves
@@ -30,11 +34,32 @@ const CONFIG = {
   STATE_SHEET: '_FFM_STATE_STORE',
   STATE_HISTORY_SHEET: '_FFM_STATE_HISTORY',
   AUDIT_SHEET: 'AuditLog',
+  SIGN_OFF_SHEET: 'SignOffLog',
   CHUNK_SIZE: 40000,
   // How many replaced copies of the state store to keep, oldest dropped first.
   HISTORY_LIMIT: 5,
   MIRROR_REVISION_PROP: 'FFM_MIRROR_REVISION',
   MIRROR_REFRESHED_PROP: 'FFM_MIRROR_REFRESHED_AT'
+};
+
+const SIGN_OFF_LEDGER_HEADERS = [
+  'Timestamp', 'Revision', 'ProgramID', 'Program', 'Line', 'Gate',
+  'Approver', 'Role', 'Decision', 'Remark', 'SignedInEmail'
+];
+
+// Gate names for the ledger only. The web app keeps its own NPI_GATES constant,
+// which the server cannot read, so the same nine ids are repeated here to write a
+// readable gate instead of a bare id.
+const GATE_LEDGER_LABELS = {
+  prep: 'G1 Preparing',
+  bbr: 'G2 BBR',
+  brr: 'G3 BRR',
+  mbo: 'G4 MBO & OK2B',
+  main: 'G5 Main Build',
+  oqc: 'G6 Final Insp.',
+  ship: 'G7 Shipment',
+  mih: 'G8 FATP MIH',
+  pbr: 'G9 PBR'
 };
 
 const PERSISTED_SLICES = [
@@ -199,6 +224,12 @@ function ensureAllTabs_() {
     // Migrate an older 5-column AuditLog in place; existing rows keep their values.
     auditSheet.getRange(1, 6).setValue('Executor').setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
   }
+  const ledgerSheet = getOrCreateSheet_(ss, CONFIG.SIGN_OFF_SHEET);
+  if (ledgerSheet.getLastRow() === 0) {
+    ledgerSheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setValues([SIGN_OFF_LEDGER_HEADERS]);
+    ledgerSheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
+    ledgerSheet.setFrozenRows(1);
+  }
   const historySheet = getOrCreateSheet_(ss, CONFIG.STATE_HISTORY_SHEET);
   if (historySheet.getLastRow() === 0) {
     historySheet.getRange(1, 1, 1, 7).setValues([['SliceKey', 'Revision', 'ChunkIndex', 'ChunkCount', 'SavedAt', 'PayloadChunk', 'SavedBy']]);
@@ -225,6 +256,8 @@ function protectManagedTabs_(ss, force) {
     'FFM NPI Ops — authoritative state store. Do not edit by hand; the web app rewrites this tab on every save.', force);
   protectManagedTab_(ss, CONFIG.AUDIT_SHEET,
     'FFM NPI Ops — append-only audit trail. Do not edit by hand.', force);
+  protectManagedTab_(ss, CONFIG.SIGN_OFF_SHEET,
+    'FFM NPI Ops — append-only gate sign-off ledger. Do not edit by hand.', force);
 }
 
 function protectManagedTab_(ss, tabName, description, force) {
@@ -457,6 +490,19 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       }
     }
 
+    // The gate decisions already on file, so the ledger records only what this
+    // save actually changed — a save that carries dossiers forward writes nothing.
+    let previousGateRecords = null;
+    if (previousRows.length > 0) {
+      const gateChunks = [];
+      previousRows.forEach(function(row) {
+        if (String(row[0] || '') !== 'gateRecords') return;
+        gateChunks.push({ idx: Number(row[1]) || 0, count: Number(row[2]) || 0, text: String(row[4] || '') });
+      });
+      const parsedGates = parseChunkGroup_(gateChunks);
+      if (parsedGates.ok) previousGateRecords = parsedGates.value;
+    }
+
     // Reject a stale client instead of silently overwriting another user's save.
     if (expectedRevision !== undefined && expectedRevision !== null &&
         Number(expectedRevision) !== prevRevision) {
@@ -522,6 +568,16 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       executorEmail
     ]);
 
+    // Append-only gate decision ledger, written under the same lock as the store
+    // it describes. Nothing in this path edits or deletes an existing row.
+    if (previousGateRecords && payload.gateRecords && typeof payload.gateRecords === 'object') {
+      appendSignOffLedger_(ss, signOffLedgerRows(previousGateRecords, payload.gateRecords, payload.projects, {
+        timestamp: nowIso,
+        revision: nextRevision,
+        userEmail: userEmail
+      }));
+    }
+
     return {
       ok: true,
       revision: nextRevision,
@@ -532,6 +588,82 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Rows for the gate decisions this save changed. Only a change of decision is a
+ * new event: an unchanged dossier produces nothing, so replaying or retrying a
+ * save cannot duplicate history. A gate that did not exist before is skipped too
+ * — creating a program seeds sample decisions, which is not somebody approving.
+ * With no previous store (the very first seed) there is nothing to compare and
+ * nothing is written. Approval and rejection are recorded with the signed-in
+ * email of the person who saved, and with the approver named on the dossier.
+ */
+function signOffLedgerRows(previousGateRecords, nextGateRecords, projects, meta) {
+  if (!previousGateRecords || !nextGateRecords) return [];
+  const DECISIONS = { Approved: true, Conditional: true, Rejected: true };
+  const models = {};
+  (projects || []).forEach(function(project) {
+    if (project && project.id) models[project.id] = String(project.model || '');
+  });
+
+  const rows = [];
+  Object.keys(nextGateRecords).forEach(function(projectId) {
+    const nextLines = nextGateRecords[projectId] || {};
+    const previousLines = previousGateRecords[projectId] || {};
+    Object.keys(nextLines).forEach(function(lineKey) {
+      const nextGates = nextLines[lineKey] || {};
+      const previousGates = previousLines[lineKey] || {};
+      Object.keys(nextGates).forEach(function(gateId) {
+        const dossier = nextGates[gateId];
+        const before = previousGates[gateId];
+        if (!dossier || typeof dossier !== 'object' || !before || typeof before !== 'object') return;
+
+        // Approvers are matched by name: the name is what the signature carries.
+        const previousDecisions = {};
+        (Array.isArray(before.approvers) ? before.approvers : []).forEach(function(approver) {
+          previousDecisions[String((approver && approver.name) || '')] = String((approver && approver.decision) || '');
+        });
+
+        (Array.isArray(dossier.approvers) ? dossier.approvers : []).forEach(function(approver) {
+          if (!approver) return;
+          const decision = String(approver.decision || '');
+          if (!DECISIONS[decision]) return;
+          const name = String(approver.name || '');
+          if (previousDecisions[name] === decision) return;
+          rows.push([
+            meta.timestamp,
+            meta.revision,
+            projectId,
+            models[projectId] || '',
+            lineKey,
+            GATE_LEDGER_LABELS[gateId] || gateId,
+            name,
+            String(approver.role || ''),
+            decision,
+            String(approver.remark || ''),
+            meta.userEmail
+          ]);
+        });
+      });
+    });
+  });
+  return rows;
+}
+
+/** Appends ledger rows; never rewrites the tab, never touches earlier rows. */
+function appendSignOffLedger_(ss, rows) {
+  if (!rows || rows.length === 0) return 0;
+  const sheet = getOrCreateSheet_(ss, CONFIG.SIGN_OFF_SHEET);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setValues([SIGN_OFF_LEDGER_HEADERS]);
+    sheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
+    sheet.setFrozenRows(1);
+  }
+  sheet
+    .getRange(sheet.getLastRow() + 1, 1, rows.length, SIGN_OFF_LEDGER_HEADERS.length)
+    .setValues(rows.map(safeSheetRow_));
+  return rows.length;
 }
 
 /**
