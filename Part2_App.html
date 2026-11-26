@@ -2301,7 +2301,13 @@ function App() {
       const primaryCriteria = projLines[primaryKey]?.[gateId]?.criteria || [];
       const critIdx = primaryCriteria.findIndex((c) => c.id === criterionId);
       if (critIdx < 0) return prev;
-      const nextChecked = !primaryCriteria[critIdx].checked;
+      // A partly ticked scope fills on click: only a criterion already ticked on
+      // every selected line clears. Following one line instead would silently
+      // uncheck the lines that had it ticked.
+      const allTicked = targetKeys.every(
+        (k) => projLines[k]?.[gateId]?.criteria?.[critIdx]?.checked
+      );
+      const nextChecked = !allTicked;
 
       const updatedProjLines = { ...projLines };
       targetKeys.forEach((k) => {

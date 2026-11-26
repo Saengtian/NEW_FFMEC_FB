@@ -129,7 +129,6 @@ function OverviewView({
   const kpiTiles = useMemo(() => {
     // Every tile uses the MIH tile's fiscal window (1 Apr – 31 Mar), so FY2026 means
     // the same twelve months here rather than a calendar year or an all-time total.
-    const fyWindow = fiscalYearWindow(KPI_FISCAL_YEAR);
     const claimsFy2026 = (customerFeedback || []).filter(
       (f) => f.category === 'Claim' && isInKpiFiscalYear(f.feedbackDate)
     ).length;
@@ -219,7 +218,7 @@ function OverviewView({
         digits: 0,
         mode: 'min',
         targetFormat: (v) => `\u2264 ${v}`,
-        footnote: `All programs \u00b7 FY${KPI_FISCAL_YEAR} ${fyWindow.start} to ${fyWindow.end}`
+        footnote: kpiFiscalScopeLabel()
       }),
       build('saving', 'Annual Cost Saving FY2026', annualSavingThb, KPI_TARGETS.annualSavingThb, {
         format: formatThbCompact,
@@ -1343,12 +1342,13 @@ function BuildTimelineGanttView({
 
     suppressClickRef.current = true;
     if (rescheduleRef.current) {
-      rescheduleRef.current({
-        project: drag.project,
-        rowKeys: drag.rowKeys,
-        label: drag.label,
-        schedule: { ...base, [stage.startKey]: startIso, [stage.endKey]: endIso }
-      });
+      rescheduleRef.current(
+        stageDragReschedulePayload({
+          project: drag.project,
+          rowKeys: drag.rowKeys,
+          schedule: { ...base, [stage.startKey]: startIso, [stage.endKey]: endIso }
+        })
+      );
     }
   }, []);
 
@@ -1403,11 +1403,8 @@ function BuildTimelineGanttView({
       rowId: row.id,
       stageId: stage.id,
       mode,
-      label: `${row.sideBadge} · ${row.label}`,
       rowKeys: row.rowKeys,
       schedule,
-      startIso: schedule[stage.startKey],
-      endIso: schedule[stage.endKey],
       startX: event.clientX,
       deltaDays: 0,
       dayWidthPx
@@ -2623,6 +2620,7 @@ function GateSignOffView({
   const projectLineGates = gateRecords[selectedProject.id] || {};
   const activeDossier = projectLineGates[primaryKey]?.[selectedGateId];
   const activeGateMeta = NPI_GATES.find((g) => g.id === selectedGateId) || NPI_GATES[0];
+  const activeGateIdx = NPI_GATES.findIndex((g) => g.id === activeGateMeta.id);
 
   // KPI strip: the portfolio count spans the scope, the rest is the selected program.
   const portfolioLineCount = projects.reduce(
@@ -2635,6 +2633,7 @@ function GateSignOffView({
   let programBlockedGates = 0;
   let programTotalGates = 0;
   let programPendingSignOffs = 0;
+  let programPendingGateCount = 0;
   allLineVariants.forEach((v) => {
     const lineGates = projectLineGates[v.key] || {};
     NPI_GATES.forEach((g) => {
@@ -2644,9 +2643,11 @@ function GateSignOffView({
       if (dossier.status === 'Approved') programApprovedGates += 1;
       if (dossier.status === 'Blocked') programBlockedGates += 1;
       if (dossier.status === 'In Review' || dossier.status === 'Blocked' || dossier.status === 'Conditional') {
-        programPendingSignOffs += (dossier.approvers || []).filter(
+        const open = (dossier.approvers || []).filter(
           (a) => a.decision === 'Pending' || a.decision === 'Rejected'
         ).length;
+        programPendingSignOffs += open;
+        if (open > 0) programPendingGateCount += 1;
       }
     });
   });
@@ -2683,6 +2684,60 @@ function GateSignOffView({
     (t) => t.projectId === selectedProject.id && t.gateId === selectedGateId
   );
 
+  // Readiness is measured per selected Config × Side line, because Approve & Lock
+  // only signs the lines that actually cleared their criteria and signers.
+  const lineReadiness = validKeys.map((key) => {
+    const dossier = projectLineGates[key]?.[selectedGateId];
+    const reasons = [];
+    if (!dossier) {
+      reasons.push('no gate dossier');
+    } else if (dossier.status === 'Approved') {
+      reasons.push('already approved');
+    } else {
+      const open = (dossier.criteria || []).filter((c) => !c.checked).length;
+      if (open > 0) reasons.push(`${open} criteria open`);
+      const rejected = (dossier.approvers || []).some((a) => a.decision === 'Rejected');
+      if (rejected) reasons.push('signature rejected');
+      const missing = (dossier.approvers || []).filter(
+        (a) => a.decision !== 'Approved' && a.decision !== 'Conditional'
+      ).length;
+      if (missing > 0) reasons.push(`${missing} signature${missing === 1 ? '' : 's'} missing`);
+    }
+    return { key, status: dossier?.status || 'Pending', reasons, ready: reasons.length === 0 };
+  });
+  const readyKeys = lineReadiness.filter((r) => r.ready).map((r) => r.key);
+  const mixedStatus = new Set(lineReadiness.map((r) => r.status)).size > 1;
+  const scopeLocked = validKeys.every(
+    (k) => projectLineGates[k]?.[selectedGateId]?.status === 'Approved'
+  );
+  const criteriaDone = validKeys.reduce((n, k) => {
+    const dossier = projectLineGates[k]?.[selectedGateId];
+    return n + (dossier ? dossier.criteria.filter((c) => c.checked).length : 0);
+  }, 0);
+  const criteriaTotal = validKeys.reduce((n, k) => {
+    const dossier = projectLineGates[k]?.[selectedGateId];
+    return n + (dossier ? dossier.criteria.length : 0);
+  }, 0);
+  const signaturesDone = validKeys.reduce((n, k) => {
+    const dossier = projectLineGates[k]?.[selectedGateId];
+    return (
+      n +
+      (dossier
+        ? dossier.approvers.filter((a) => a.decision === 'Approved' || a.decision === 'Conditional')
+            .length
+        : 0)
+    );
+  }, 0);
+  const signaturesTotal = validKeys.reduce((n, k) => {
+    const dossier = projectLineGates[k]?.[selectedGateId];
+    return n + (dossier ? dossier.approvers.length : 0);
+  }, 0);
+  const blockerSummary = lineReadiness
+    .filter((r) => !r.ready)
+    .slice(0, 2)
+    .map((r) => `${r.key}: ${r.reasons.join(', ')}`)
+    .join(' · ');
+
   const toggleLineSelection = (key) => {
     if (validKeys.includes(key)) {
       if (validKeys.length === 1) return;
@@ -2705,87 +2760,90 @@ function GateSignOffView({
     <div className="space-y-5">
       {/* Portfolio + program KPI strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
-          <div className="flex flex-wrap items-start justify-between gap-x-2 gap-y-1">
-            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Scoped NPI Programs</div>
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 flex flex-col justify-between gap-2 min-h-[112px]">
+          <div className="flex items-start justify-between gap-2">
+            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">NPI Scope</div>
             <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 whitespace-nowrap">
               Portfolio
             </span>
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums">
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums leading-none">
             {projects.length}{' '}
             <span className="text-xs font-normal text-slate-400 dark:text-slate-400">
-              ({portfolioLineCount} lines)
+              programs · {portfolioLineCount} lines
             </span>
           </div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400">
-            All programs in the active Global Scope · PEN-81-0002 Rev B stage-gates
+            PEN-81-0002 Rev B stage-gates across the active Global Scope
           </div>
         </div>
 
-        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
-          <div className="flex flex-wrap items-start justify-between gap-x-2 gap-y-1">
-            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Gate Pass Progress</div>
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 flex flex-col justify-between gap-2 min-h-[112px]">
+          <div className="flex items-start justify-between gap-2">
+            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Gate Pass</div>
             <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800 whitespace-nowrap">
               {programLabel}
             </span>
           </div>
-          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-300 tabular-nums">
+          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-300 tabular-nums leading-none">
             {programApprovedGates}
             <span className="text-sm font-normal text-slate-400 dark:text-slate-400">/{programTotalGates}</span>
           </div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400">
             {programBlockedGates > 0 ? (
               <span className="text-rose-600 dark:text-rose-400 font-semibold">
-                {programLabel} · {programBlockedGates} line gates on hold
+                {programBlockedGates} line gate{programBlockedGates === 1 ? '' : 's'} on hold
               </span>
             ) : (
-              `${programLabel} · no blocked gates`
+              'No blocked line gates'
             )}
           </div>
         </div>
 
-        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
-          <div className="flex flex-wrap items-start justify-between gap-x-2 gap-y-1">
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 flex flex-col justify-between gap-2 min-h-[112px]">
+          <div className="flex items-start justify-between gap-2">
             <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Pending Sign-Offs</div>
             <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800 whitespace-nowrap">
               {programLabel}
             </span>
           </div>
-          <div className="text-2xl font-bold text-amber-700 dark:text-amber-300 tabular-nums">
+          <div className="text-2xl font-bold text-amber-700 dark:text-amber-300 tabular-nums leading-none">
             {programPendingSignOffs}
           </div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400">
-            {programLabel} · awaiting authorized signers
+            {programPendingGateCount} line gate{programPendingGateCount === 1 ? '' : 's'} awaiting authorized signers
           </div>
         </div>
 
-        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
-          <div className="flex flex-wrap items-start justify-between gap-x-2 gap-y-1">
-            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Open Manufacturing Tasks</div>
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 flex flex-col justify-between gap-2 min-h-[112px]">
+          <div className="flex items-start justify-between gap-2">
+            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Open Gate Tasks</div>
             <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800 whitespace-nowrap">
               {programLabel}
             </span>
           </div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums">
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums leading-none">
             {programOpenTasks}
           </div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400">
             {programBlockedTasks > 0 ? (
               <span className="text-rose-600 dark:text-rose-400 font-semibold">
-                {programLabel} · {programBlockedTasks} blocked containment item{programBlockedTasks === 1 ? '' : 's'}
+                {programBlockedTasks} blocked containment item{programBlockedTasks === 1 ? '' : 's'}
               </span>
             ) : (
-              `${programLabel} · all active tasks progressing`
+              'All active tasks progressing'
             )}
           </div>
         </div>
       </div>
 
-      {/* Program Selector + 9-Gate Horizontal Stepper */}
-      <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-4">
+      {/* Step 1 · Program + gate rail, with the dependency lock made visible */}
+      <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 mr-1">
+              Program
+            </span>
             {projects.map((p) => (
               <button
                 key={p.id}
@@ -2802,23 +2860,40 @@ function GateSignOffView({
             ))}
           </div>
 
-          <div className="text-xs text-slate-500 dark:text-slate-400">
-            Active Gate:{' '}
-            <strong className="text-slate-900 dark:text-slate-100">
-              {activeGateMeta.code} {activeGateMeta.label}
-            </strong>
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 font-semibold">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              {activeGateMeta.code} · {activeGateMeta.label}
+            </span>
+            {activeDossier.targetDate && (
+              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold tabular-nums">
+                <Calendar className="w-3.5 h-3.5" />
+                Target {activeDossier.targetDate}
+              </span>
+            )}
           </div>
         </div>
 
         <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-1.5">
-          {NPI_GATES.map((g) => {
+          {NPI_GATES.map((g, idx) => {
             const roll = computeProgramGateDependency(selectedProject, g.id, projectLineGates);
             const active = g.id === selectedGateId;
+            const prevGate = idx > 0 ? NPI_GATES[idx - 1] : null;
+            const locked =
+              Boolean(prevGate) &&
+              validKeys.some(
+                (k) => (projectLineGates[k]?.[prevGate.id]?.status || 'Pending') !== 'Approved'
+              );
             return (
               <button
                 key={g.id}
                 type="button"
                 onClick={() => onSelectGate(g.id)}
+                title={
+                  locked
+                    ? `Opens after ${prevGate.code} (${prevGate.short}) is approved on every selected line`
+                    : `${g.code} ${g.label}`
+                }
                 className={`p-2 rounded-lg border text-left transition-colors ${
                   active
                     ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
@@ -2836,157 +2911,190 @@ function GateSignOffView({
                   </span>
                 </div>
                 <div className="text-[11px] font-semibold truncate mt-0.5">{g.short}</div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Portfolio dependency matrix — click any cell to load that gate dossier below */}
-      <GateWorkstreamMatrix
-        projects={projects}
-        gateRecords={gateRecords}
-        globalSide={globalSide}
-        onOpenGate={onOpenGate}
-      />
-
-      {/* Multi-Config x Side Selector */}
-      <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
-              Multi-Config &amp; Side Sign-Off Scope ({validKeys.length} of {allLineVariants.length}{' '}
-              Selected)
-            </h3>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              Toggle one or multiple Config × Side lines to apply criteria checks, functional sign-offs, and gate approvals together.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-            <button
-              type="button"
-              onClick={() =>
-                onUpdateSelectedLines(
-                  allLineVariants.map((v) => v.key),
-                  allLineVariants[0]?.key
-                )
-              }
-              className="px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-semibold text-slate-700 dark:text-slate-300"
-            >
-              Select All
-            </button>
-            {['RHS', 'LHS'].map((sd) => {
-              const sideKeys = allLineVariants.filter((v) => v.side === sd).map((v) => v.key);
-              if (sideKeys.length === 0) return null;
-              return (
-                <button
-                  key={sd}
-                  type="button"
-                  onClick={() => onUpdateSelectedLines(sideKeys, sideKeys[0])}
-                  className="px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-semibold text-slate-700 dark:text-slate-300"
-                >
-                  All {sd}
-                </button>
-              );
-            })}
-            {uniqueConfigs.map((cfg) => {
-              const cfgKeys = allLineVariants.filter((v) => v.config === cfg).map((v) => v.key);
-              return (
-                <button
-                  key={cfg}
-                  type="button"
-                  onClick={() => onUpdateSelectedLines(cfgKeys, cfgKeys[0])}
-                  className="px-2 py-1 rounded-md bg-blue-50 dark:bg-blue-950 hover:bg-blue-100 dark:hover:bg-blue-900 font-semibold text-blue-700 dark:text-blue-300"
-                >
-                  {cfg}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          {allLineVariants.map((v) => {
-            const active = validKeys.includes(v.key);
-            const lineSt = projectLineGates[v.key]?.[selectedGateId]?.status || 'Pending';
-            return (
-              <button
-                key={v.key}
-                type="button"
-                onClick={() => toggleLineSelection(v.key)}
-                className={`px-3 py-1.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-2 transition-colors ${
-                  active
-                    ? 'bg-slate-900 dark:bg-slate-700 text-white border-slate-900'
-                    : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800'
-                }`}
-              >
-                <span>
-                  {active ? '✓ ' : ''}
-                  {v.config} · {v.side}
-                </span>
-                <span
-                  className={`text-[10px] px-1.5 py-0.5 rounded ${
-                    lineSt === 'Approved'
-                      ? 'bg-emerald-500/20 text-emerald-300 dark:text-emerald-300'
-                      : lineSt === 'Blocked'
-                      ? 'bg-rose-500/20 text-rose-300 dark:text-rose-300'
-                      : active
-                      ? 'bg-slate-700 text-slate-200 dark:text-slate-200'
-                      : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
+                <div
+                  className={`text-[9px] mt-0.5 truncate ${
+                    active ? 'text-white/80' : locked ? 'text-slate-400 dark:text-slate-500' : 'opacity-70'
                   }`}
                 >
-                  {lineSt}
-                </span>
+                  {roll.status === 'Approved' ? 'Cleared' : locked ? 'Locked' : roll.status}
+                </div>
               </button>
             );
           })}
         </div>
       </div>
 
-      {/* Main Dossier Split: Exit Criteria + Cross-Functional Sign-Off Matrix */}
+      {/* Step 2 · Scope, criteria and sign-off for the selected gate */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
-        {/* Left: Exit Criteria & Linked Tasks */}
+        {/* Left: scope + criteria + linked tasks */}
         <div className="xl:col-span-5 space-y-5">
+          <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                Config × Side Scope ({validKeys.length} of {allLineVariants.length} selected)
+              </h3>
+              <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() =>
+                    onUpdateSelectedLines(allLineVariants.map((v) => v.key), allLineVariants[0]?.key)
+                  }
+                  className="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-semibold text-slate-700 dark:text-slate-300"
+                >
+                  All
+                </button>
+                {['RHS', 'LHS'].map((sd) => {
+                  const sideKeys = allLineVariants.filter((v) => v.side === sd).map((v) => v.key);
+                  if (sideKeys.length === 0) return null;
+                  return (
+                    <button
+                      key={sd}
+                      type="button"
+                      onClick={() => onUpdateSelectedLines(sideKeys, sideKeys[0])}
+                      className="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 font-semibold text-slate-700 dark:text-slate-300"
+                    >
+                      {sd}
+                    </button>
+                  );
+                })}
+                {uniqueConfigs.map((cfg) => {
+                  const cfgKeys = allLineVariants.filter((v) => v.config === cfg).map((v) => v.key);
+                  return (
+                    <button
+                      key={cfg}
+                      type="button"
+                      onClick={() => onUpdateSelectedLines(cfgKeys, cfgKeys[0])}
+                      className="px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-950 hover:bg-blue-100 dark:hover:bg-blue-900 font-semibold text-blue-700 dark:text-blue-300"
+                    >
+                      {cfg}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {allLineVariants.map((v) => {
+                const active = validKeys.includes(v.key);
+                const lineSt = projectLineGates[v.key]?.[selectedGateId]?.status || 'Pending';
+                return (
+                  <button
+                    key={v.key}
+                    type="button"
+                    onClick={() => toggleLineSelection(v.key)}
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                      active
+                        ? 'bg-slate-900 dark:bg-slate-700 text-white border-slate-900'
+                        : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    <span>
+                      {active ? '✓ ' : ''}
+                      {v.config} · {v.side}
+                    </span>
+                    <span
+                      className={`text-[9px] px-1 py-0.5 rounded ${
+                        lineSt === 'Approved'
+                          ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-300'
+                          : lineSt === 'Blocked'
+                          ? 'bg-rose-500/20 text-rose-600 dark:text-rose-300'
+                          : active
+                          ? 'bg-slate-700 text-slate-200'
+                          : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
+                      }`}
+                    >
+                      {lineSt}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              Criteria ticks, sign-offs and evidence apply to every selected line. Sign-offs are recorded per line.
+            </p>
+          </div>
+
           <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-            <div className="px-4 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <ClipboardCheck className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
-                  Gate Exit Criteria ({validKeys.length} {validKeys.length === 1 ? 'Line' : 'Lines'})
+                  Gate Exit Criteria
                 </h3>
               </div>
-              <StatusBadge status={activeDossier.status} />
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 tabular-nums">
+                  {criteriaDone}/{criteriaTotal}
+                </span>
+                {mixedStatus ? (
+                  <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200">
+                    Mixed status
+                  </span>
+                ) : (
+                  <StatusBadge status={activeDossier.status} />
+                )}
+              </div>
             </div>
 
             <div className="divide-y divide-slate-100 dark:divide-slate-800">
-              {activeDossier.criteria.map((c) => (
-                <label
-                  key={c.id}
-                  className="flex items-start gap-3 p-3.5 hover:bg-slate-50 dark:hover:bg-slate-800 dark:dark:hover:bg-slate-600 cursor-pointer text-xs"
-                >
-                  <input
-                    type="checkbox"
-                    checked={c.checked}
-                    disabled={activeDossier.status === 'Approved'}
-                    onChange={() =>
-                      onToggleCriterion(selectedProject.id, validKeys, selectedGateId, c.id)
-                    }
-                    className="mt-0.5 rounded border-slate-300 dark:border-slate-700 text-blue-600 dark:text-blue-400 focus:ring-blue-500"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div
-                      className={`font-medium ${
-                        c.checked ? 'text-slate-400 dark:text-slate-400 line-through' : 'text-slate-800 dark:text-slate-200'
-                      }`}
-                    >
-                      {c.label}
+              {activeDossier.criteria.map((c, cIdx) => {
+                const checkedCount = validKeys.reduce((n, k) => {
+                  const gate = projectLineGates[k]?.[selectedGateId];
+                  return n + (gate?.criteria?.[cIdx]?.checked ? 1 : 0);
+                }, 0);
+                const allChecked = checkedCount === validKeys.length && validKeys.length > 0;
+                const partial = checkedCount > 0 && !allChecked;
+                return (
+                  <label
+                    key={c.id}
+                    className={`flex items-start gap-3 p-3.5 text-xs ${
+                      scopeLocked
+                        ? 'opacity-70'
+                        : 'hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={allChecked}
+                      ref={(el) => {
+                        if (el) el.indeterminate = partial;
+                      }}
+                      disabled={scopeLocked}
+                      onChange={() =>
+                        onToggleCriterion(selectedProject.id, validKeys, selectedGateId, c.id)
+                      }
+                      className="mt-0.5 rounded border-slate-300 dark:border-slate-700 text-blue-600 dark:text-blue-400 focus:ring-blue-500"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className={`font-medium ${
+                          allChecked
+                            ? 'text-slate-400 dark:text-slate-400 line-through'
+                            : 'text-slate-800 dark:text-slate-200'
+                        }`}
+                      >
+                        {c.label}
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="text-[10px] font-semibold uppercase text-slate-400 dark:text-slate-500">
+                          {c.category}
+                        </span>
+                        {validKeys.length > 1 && (
+                          <span
+                            className={`text-[10px] font-semibold tabular-nums ${
+                              partial
+                                ? 'text-amber-600 dark:text-amber-400'
+                                : 'text-slate-400 dark:text-slate-500'
+                            }`}
+                          >
+                            {checkedCount}/{validKeys.length} lines
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <span className="text-[10px] font-semibold uppercase text-slate-400 dark:text-slate-400">
-                      {c.category}
-                    </span>
-                  </div>
-                </label>
-              ))}
+                  </label>
+                );
+              })}
             </div>
           </div>
 
@@ -3003,7 +3111,7 @@ function GateSignOffView({
                     key={t.id}
                     type="button"
                     onClick={() => onSelectTask(t.id)}
-                    className="w-full text-left p-3.5 hover:bg-slate-50 dark:hover:bg-slate-800 dark:dark:hover:bg-slate-600 flex items-center justify-between gap-2 text-xs"
+                    className="w-full text-left p-3.5 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-between gap-2 text-xs"
                   >
                     <span className="font-medium text-slate-800 dark:text-slate-200 truncate">{t.title}</span>
                     <StatusBadge status={t.status} />
@@ -3014,14 +3122,13 @@ function GateSignOffView({
           </div>
         </div>
 
-        {/* Right: Cross-Functional Sign-Off Matrix & Audit Trail */}
+        {/* Right: sign-off matrix, readiness, evidence, audit */}
         <div className="xl:col-span-7 space-y-5">
           <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-            <div className="px-4 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+            <div className="px-4 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-2">
               <div>
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
-                  Cross-Functional Sign-Off Matrix ({validKeys.length}{' '}
-                  {validKeys.length === 1 ? 'Config/Side' : 'Configs/Sides'} Selected)
+                  Cross-Functional Sign-Off
                 </h3>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400">
                   Engineering Manager (Horikawa / Saengtian) &amp; QA Manager (Ronilo / Panida) · authorized signers only
@@ -3029,12 +3136,43 @@ function GateSignOffView({
               </div>
               <button
                 type="button"
-                onClick={() => onFinalizeGate(selectedProject.id, validKeys, selectedGateId)}
-                className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+                onClick={() => onFinalizeGate(selectedProject.id, readyKeys, selectedGateId)}
+                disabled={readyKeys.length === 0}
+                title={
+                  readyKeys.length === 0
+                    ? `Not ready — ${blockerSummary || 'select at least one line'}`
+                    : `Approve & lock ${readyKeys.length} of ${validKeys.length} selected line(s)`
+                }
+                className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-500 dark:disabled:text-slate-500 disabled:cursor-not-allowed text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
               >
                 <ShieldCheck className="w-4 h-4" />
-                <span>Approve &amp; Lock ({validKeys.length})</span>
+                <span>
+                  Approve &amp; Lock
+                  {validKeys.length > 1 ? ` (${readyKeys.length}/${validKeys.length})` : ''}
+                </span>
               </button>
+            </div>
+
+            <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+              <span className="inline-flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
+                <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                Criteria <strong className="tabular-nums">{criteriaDone}/{criteriaTotal}</strong>
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                Signatures <strong className="tabular-nums">{signaturesDone}/{signaturesTotal}</strong>
+              </span>
+              {programBlockedGates > 0 && (
+                <span className="inline-flex items-center gap-1.5 text-rose-600 dark:text-rose-400 font-semibold">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  {programBlockedGates} held line gate{programBlockedGates === 1 ? '' : 's'} in program
+                </span>
+              )}
+              <span className="text-slate-500 dark:text-slate-400">
+                {readyKeys.length > 0
+                  ? `${readyKeys.length} line${readyKeys.length === 1 ? '' : 's'} clear to lock`
+                  : blockerSummary || 'Select a line to sign off'}
+              </span>
             </div>
 
             <div className="overflow-x-auto">
@@ -3058,13 +3196,16 @@ function GateSignOffView({
                       <td className="py-3 px-3 whitespace-nowrap">
                         <StatusBadge status={app.decision} />
                       </td>
-                      <td className="py-3 px-3 text-slate-500 dark:text-slate-400 max-w-[220px] truncate" title={app.remark}>
+                      <td
+                        className="py-3 px-3 text-slate-500 dark:text-slate-400 max-w-[220px] truncate"
+                        title={app.remark}
+                      >
                         {app.remark || '—'}
                       </td>
                       <td className="py-3 px-4 text-right whitespace-nowrap">
                         <button
                           type="button"
-                          disabled={activeDossier.status === 'Approved'}
+                          disabled={scopeLocked}
                           onClick={() => onOpenSignOffModal(idx, validKeys)}
                           className="px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-900 hover:text-white text-[11px] font-semibold text-slate-700 dark:text-slate-300 disabled:opacity-40 transition-colors"
                         >
@@ -3076,29 +3217,32 @@ function GateSignOffView({
                 </tbody>
               </table>
             </div>
-          </div>
 
-          {/* Audit Trail */}
-          <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
-              Gate Sign-Off Audit Trail ({primaryKey})
-            </div>
-            <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-56 overflow-y-auto">
-              {activeDossier.auditLog.length === 0 ? (
-                <div className="p-4 text-xs text-slate-400 dark:text-slate-400">No sign-off actions recorded yet.</div>
-              ) : (
-                activeDossier.auditLog.map((entry, idx) => (
-                  <div key={idx} className="p-3.5 text-xs space-y-0.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <strong className="text-slate-800 dark:text-slate-200">{entry.actor}</strong>
-                      <span className="text-[11px] text-slate-400 dark:text-slate-400 tabular-nums">{entry.time}</span>
-                    </div>
-                    <div className="font-semibold text-blue-700 dark:text-blue-300">{entry.action}</div>
-                    <div className="text-slate-600 dark:text-slate-400">{entry.note}</div>
+            {validKeys.length > 1 && (
+              <div className="border-t border-slate-200 dark:border-slate-800 px-4 py-2.5 space-y-1">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                  Readiness by line
+                </div>
+                {lineReadiness.map((r) => (
+                  <div key={r.key} className="flex items-center gap-2 text-[11px] min-w-0">
+                    {r.ready ? (
+                      <CheckCircle2 className="w-3 h-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    ) : (
+                      <Clock className="w-3 h-3 shrink-0 text-slate-400 dark:text-slate-500" />
+                    )}
+                    <span className="font-semibold text-slate-700 dark:text-slate-300 shrink-0 w-20">
+                      {r.key}
+                    </span>
+                    <span className="text-slate-500 dark:text-slate-400 truncate">
+                      {r.ready ? `Ready · ${r.status}` : r.reasons.join(' · ')}
+                    </span>
                   </div>
-                ))
-              )}
-            </div>
+                ))}
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 pt-0.5">
+                  Approve &amp; Lock signs the ready lines only; the rest stay at {activeGateMeta.code}.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Gate Evidence · Google Drive links retained with the signed dossier */}
@@ -3214,7 +3358,53 @@ function GateSignOffView({
               )}
             </div>
           </div>
+
+          {/* Audit Trail */}
+          <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                Gate Sign-Off Audit Trail
+              </div>
+              <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500">
+                {primaryKey} · newest first
+              </span>
+            </div>
+            <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-56 overflow-y-auto">
+              {activeDossier.auditLog.length === 0 ? (
+                <div className="p-4 text-xs text-slate-400 dark:text-slate-400">No sign-off actions recorded yet.</div>
+              ) : (
+                activeDossier.auditLog.map((entry, idx) => (
+                  <div key={idx} className="p-3.5 text-xs space-y-0.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <strong className="text-slate-800 dark:text-slate-200">{entry.actor}</strong>
+                      <span className="text-[11px] text-slate-400 dark:text-slate-400 tabular-nums">{entry.time}</span>
+                    </div>
+                    <div className="font-semibold text-blue-700 dark:text-blue-300">{entry.action}</div>
+                    <div className="text-slate-600 dark:text-slate-400">{entry.note}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
+      </div>
+
+      {/* Step 3 · Portfolio view, after the gate in hand */}
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+            Portfolio Dependency Matrix
+          </h3>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+            All programs · click any gate cell to load that dossier above
+          </p>
+        </div>
+        <GateWorkstreamMatrix
+          projects={projects}
+          gateRecords={gateRecords}
+          globalSide={globalSide}
+          onOpenGate={onOpenGate}
+        />
       </div>
     </div>
   );
@@ -3962,24 +4152,25 @@ function CpkMasterSpecsView({
                     <th className="py-2.5 px-4 whitespace-nowrap border-r border-slate-200 dark:border-slate-800">
                       Model · Phase · Side · Config
                     </th>
-                    {visibleSpecsForMatrix.map((spec) => (
-                      <th
-                        key={spec.id}
-                        className="py-2 px-2 text-center whitespace-nowrap min-w-[94px]"
-                        title={`${spec.name} (${spec.docRef}) · limits effective ${
-                          describeSpecLimits(spec).effectiveFrom
-                        } · ${describeSpecLimits(spec).count} revision(s)`}
-                      >
-                        <div className="font-bold text-slate-800 dark:text-slate-200">{spec.code}</div>
-                        <div className="text-[9px] font-medium text-slate-400 dark:text-slate-400 normal-case truncate max-w-[96px] mx-auto">
-                          {spec.specType === 'upper'
-                            ? `≤ ${spec.usl} ${spec.unit}`
-                            : spec.specType === 'lower'
-                            ? `≥ ${spec.lsl} ${spec.unit}`
-                            : `${spec.lsl}–${spec.usl} ${spec.unit}`}
-                        </div>
-                      </th>
-                    ))}
+                    {visibleSpecsForMatrix.map((spec) => {
+                      const limits = describeSpecLimits(spec);
+                      return (
+                        <th
+                          key={spec.id}
+                          className="py-2 px-2 text-center whitespace-nowrap min-w-[94px]"
+                          title={`${spec.name} (${spec.docRef}) · limits effective ${limits.effectiveFrom} · ${limits.count} revision(s)`}
+                        >
+                          <div className="font-bold text-slate-800 dark:text-slate-200">{spec.code}</div>
+                          <div className="text-[9px] font-medium text-slate-400 dark:text-slate-400 normal-case truncate max-w-[96px] mx-auto">
+                            {spec.specType === 'upper'
+                              ? `≤ ${spec.usl} ${spec.unit}`
+                              : spec.specType === 'lower'
+                              ? `≥ ${spec.lsl} ${spec.unit}`
+                              : `${spec.lsl}–${spec.usl} ${spec.unit}`}
+                          </div>
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
@@ -4077,7 +4268,9 @@ function CpkMasterSpecsView({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
-                {filteredSpecs.map((spec) => (
+                {filteredSpecs.map((spec) => {
+                  const limits = describeSpecLimits(spec);
+                  return (
                   <tr key={spec.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/80">
                     <td className="py-2.5 px-4 font-mono font-bold text-blue-700 dark:text-blue-300 whitespace-nowrap">
                       {spec.code}
@@ -4110,9 +4303,9 @@ function CpkMasterSpecsView({
                     </td>
                     <td className="py-2.5 px-2.5 whitespace-nowrap text-slate-600 dark:text-slate-400">
                       <span
-                        title={`${describeSpecLimits(spec).count} limit revision(s) on file — Cpk records use the one in force on their measurement date`}
+                        title={`${limits.count} limit revision(s) on file — Cpk records use the one in force on their measurement date`}
                       >
-                        {describeSpecLimits(spec).label}
+                        {limits.label}
                       </span>
                     </td>
                     <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400 whitespace-nowrap">
@@ -4142,7 +4335,8 @@ function CpkMasterSpecsView({
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
