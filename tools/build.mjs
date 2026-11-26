@@ -66,8 +66,11 @@ async function buildScript() {
     logLevel: "silent",
   });
 
-  // A literal </script> inside the JS would close the inline tag early.
-  const js = result.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
+  // A literal </script> would close the inline tag early; `<?` is an Apps
+  // Script template scriptlet and must stay escaped in the emitted HTML.
+  const js = result.outputFiles[0].text
+    .replace(/<\/script/gi, "<\\/script")
+    .replace(/<\?/g, "\\u003c?");
   writeFileSync(
     BUNDLE,
     `<!-- Built by tools/build.mjs from Icons.html + Part*.html. Do not edit. -->\n<script>\n${js}\n</script>\n`

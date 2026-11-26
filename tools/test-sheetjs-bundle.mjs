@@ -36,6 +36,12 @@ check("Bundle.html contains sheet_to_json", () => {
   assert.ok(read("Bundle.html").includes("sheet_to_json"));
 });
 
+// HtmlService treats `<? ... ?>` as template scriptlets. SheetJS XML strings
+// must be escaped by the build or the inline script is corrupted at startup.
+check("Bundle.html has no template scriptlets", () => {
+  assert.ok(!read("Bundle.html").includes("<?"));
+});
+
 for (const r of results) {
   console.log(`  ${r.ok ? "pass" : "FAIL"}  ${r.label}${r.ok ? "" : `  (${r.message})`}`);
 }
