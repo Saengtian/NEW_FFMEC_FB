@@ -2496,18 +2496,10 @@ function parseCsvText(text) {
 }
 
 async function loadSheetJsLib() {
+  // Bundled by tools/build.mjs from the pinned xlsx dependency (window.XLSX).
+  if (typeof XLSX !== 'undefined') return XLSX;
   if (typeof window !== 'undefined' && window.XLSX) return window.XLSX;
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js';
-    script.async = true;
-    script.onload = () => {
-      if (window.XLSX) resolve(window.XLSX);
-      else reject(new Error('Excel parser failed to initialize.'));
-    };
-    script.onerror = () => reject(new Error('Unable to load Excel (.xlsx) parser. Please upload a .csv file.'));
-    document.head.appendChild(script);
-  });
+  throw new Error('Excel parser is missing from this build. Please upload a .csv file.');
 }
 
 async function parseUploadedTabularFile(file) {
@@ -2626,28 +2618,133 @@ function resolveSpecAt(spec, isoDate) {
   revisions.forEach((rev) => {
     if (!date || String(rev.effectiveFrom) <= date) inForce = rev;
   });
-  const used = inForce || revisions[0];
   return {
-    revision: used,
+    revision: inForce || revisions[0],
     revisions,
     // Measured before any recorded revision: the earliest limits are the honest
     // best guess, and the UI says so rather than pretending it is exact.
-    predatesFirstRevision: !inForce,
-    isLatest: used === revisions[revisions.length - 1]
+    predatesFirstRevision: !inForce
   };
 }
 
-/** A spec merged with the limits in force on the record's measurement date. */
+// ---------------------------------------------------------------------------
+// Cpk limit freeze: every Cpk record keeps the limits it was judged against, so
+// correcting or revising a Master Spec later cannot change a result that has
+// already been reported.
+// ---------------------------------------------------------------------------
+
+/** True when a record already carries the limits it was measured against. */
+function hasFrozenSpecLimits(record) {
+  return Boolean(record && record.specRevisionId && record.specType);
+}
+
+/** A copy of the record with the limits in force on its measurement date baked in. */
+function withFrozenSpecLimits(record, spec) {
+  if (!record) return record;
+  const resolved = resolveSpecAt(spec, record.date);
+  if (!resolved) return record;
+  const revision = resolved.revision;
+  return Object.assign({}, record, specLimitSnapshot(revision), {
+    specRevisionId: revision.id,
+    specEffectiveFrom: revision.effectiveFrom,
+    specRevisionNumber: resolved.revisions.indexOf(revision) + 1,
+    // Kept on the record too: resolving it later would guess differently once
+    // the spec gains a revision that predates this measurement.
+    specPredatesFirstRevision: resolved.predatesFirstRevision
+  });
+}
+
+/**
+ * Backfills rows saved before limits were frozen on them. Each row is frozen
+ * against the revision in force on its own measurement date — exactly the
+ * revision the app was already displaying for it — so no visible number moves.
+ */
+function migrateCpkRecords(records, specs) {
+  if (!Array.isArray(records)) return records;
+  const byId = new Map((Array.isArray(specs) ? specs : []).map((spec) => [spec.id, spec]));
+  return records.map((record) => {
+    if (hasFrozenSpecLimits(record)) return record;
+    const spec = byId.get(record && record.specId);
+    return spec ? withFrozenSpecLimits(record, spec) : record;
+  });
+}
+
+/**
+ * A spec merged with the limits the record was measured against.
+ *
+ * A frozen record wins over the spec's history: it keeps the limits and revision
+ * captured at measurement time, even after that revision is corrected or a newer
+ * one takes effect. Only legacy rows without a snapshot fall back to resolving
+ * the revision from their date.
+ */
 function effectiveSpecForRecord(spec, record) {
   if (!spec) return null;
+  const revisions = getSpecRevisions(spec);
+  if (hasFrozenSpecLimits(record)) {
+    const frozen = {};
+    SPEC_LIMIT_FIELDS.forEach(function (field) {
+      if (record[field] !== undefined) frozen[field] = record[field];
+    });
+    return Object.assign({}, spec, frozen, {
+      effectiveFrom: record.specEffectiveFrom || '',
+      revisionNumber: Number(record.specRevisionNumber) || 1,
+      revisionCount: revisions.length,
+      predatesFirstRevision: Boolean(record.specPredatesFirstRevision)
+    });
+  }
   const resolved = resolveSpecAt(spec, record && record.date);
   if (!resolved) return spec;
   return Object.assign({}, spec, specLimitSnapshot(resolved.revision), {
     effectiveFrom: resolved.revision.effectiveFrom,
     revisionNumber: resolved.revisions.indexOf(resolved.revision) + 1,
     revisionCount: resolved.revisions.length,
-    predatesFirstRevision: resolved.predatesFirstRevision,
-    isLatestRevision: resolved.isLatest
+    predatesFirstRevision: resolved.predatesFirstRevision
+  });
+}
+
+/** Cpk records whose frozen snapshot came from one specific spec revision. */
+function recordsFrozenToRevision(records, specId, revisionId) {
+  if (!Array.isArray(records) || !specId || !revisionId) return [];
+  return records.filter(
+    (record) => record && record.specId === specId && record.specRevisionId === revisionId
+  );
+}
+
+/**
+ * Re-freezes the records measured under one revision onto its current limits.
+ * Records from other revisions, and every other field, are left untouched.
+ */
+function refreezeCpkRecordsToRevision(records, spec, revisionId) {
+  if (!Array.isArray(records) || !spec) return records;
+  const revision = getSpecRevisions(spec).find((rev) => rev.id === revisionId);
+  if (!revision) return records;
+  const snapshot = specLimitSnapshot(revision);
+  return records.map((record) => {
+    if (!record || record.specId !== spec.id || record.specRevisionId !== revisionId) return record;
+    return Object.assign({}, record, snapshot);
+  });
+}
+
+/**
+ * Replaces one revision's limits in place — the explicit "fix a mistake on this
+ * effective date" path, used only after the user confirms it. Every other
+ * revision keeps its own limits, and the revision keeps its id and date.
+ */
+function correctSpecRevision(spec, limits, revisionId, stamp, actor) {
+  if (!spec) return null;
+  const history = getSpecRevisions(spec).map((rev) => ({ ...rev }));
+  const index = history.findIndex((rev) => rev.id === revisionId);
+  if (index === -1) return null;
+  history[index] = Object.assign({}, history[index], limits, {
+    id: history[index].id,
+    effectiveFrom: history[index].effectiveFrom,
+    updatedAt: stamp,
+    updatedBy: actor
+  });
+  const latest = history[history.length - 1];
+  return Object.assign({}, spec, specLimitSnapshot(latest), {
+    effectiveFrom: latest.effectiveFrom,
+    revisions: history
   });
 }
 
@@ -2658,6 +2755,35 @@ function specLimitsDiffer(a, b) {
   return SPEC_LIMIT_FIELDS.some(
     (field) => String(left[field] === null ? '' : left[field]) !== String(right[field] === null ? '' : right[field])
   );
+}
+
+/**
+ * Apply an edit to a spec's limit history without rewriting the past.
+ *
+ * A different limit on a date already on file is rejected: correcting an older
+ * entry would restate the window that Cpk records from that date were judged
+ * against. Metadata-only edits add nothing, and a genuinely new effective date
+ * appends one revision. The caller owns the identity fields and the resulting
+ * spec; this helper only decides what happens to the revision history.
+ */
+function applySpecLimitEdit(spec, limits, effectiveFrom, stamp, actor) {
+  if (!spec) return null;
+  const history = getSpecRevisions(spec).map((rev) => ({ ...rev }));
+  const sameDay = history.find((rev) => rev.effectiveFrom === effectiveFrom);
+  const latest = history[history.length - 1];
+  if (sameDay && specLimitsDiffer(sameDay, limits)) return { rejected: true, history };
+  if (!sameDay && specLimitsDiffer(latest, limits)) {
+    history.push({
+      id: `${spec.id}-R${history.length + 1}`,
+      effectiveFrom,
+      ...limits,
+      updatedAt: stamp,
+      updatedBy: actor
+    });
+    history.sort((a, b) => String(a.effectiveFrom).localeCompare(String(b.effectiveFrom)));
+    return { rejected: false, outcome: 'revision', history };
+  }
+  return { rejected: false, outcome: 'metadata', history };
 }
 
 /** "2026-11-25 · R3", or the recorded baseline, for tables and tooltips. */
@@ -2773,20 +2899,25 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
       const measuredAt = toIsoDate(dateCol ? r[dateCol] : '');
       if (dateCol && !measuredAt) undatedRows += 1;
 
-      records.push({
-        id: `CPK-IMP-${model}-${side}-${spec.code}-${idx}`,
-        model,
-        familyGroup: inferFamilyFromModel(model),
-        phase,
-        side,
-        config,
-        specId: spec.id,
-        mean,
-        stdDev: sd,
-        sampleSize,
-        date: measuredAt || todayIso(),
-        sourceFile: fileName
-      });
+      records.push(
+        withFrozenSpecLimits(
+          {
+            id: `CPK-IMP-${model}-${side}-${spec.code}-${idx}`,
+            model,
+            familyGroup: inferFamilyFromModel(model),
+            phase,
+            side,
+            config,
+            specId: spec.id,
+            mean,
+            stdDev: sd,
+            sampleSize,
+            date: measuredAt || todayIso(),
+            sourceFile: fileName
+          },
+          spec
+        )
+      );
     });
 
     if (undatedRows > 0) {
@@ -2918,21 +3049,26 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
       const variance = vals.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / (n - 1);
       const sd = Math.max(0.0001, Math.sqrt(variance));
 
-      records.push({
-        id: `CPK-RAW-${grp.model}-${grp.side}-${grp.config}-${spec.code}`,
-        model: grp.model,
-        familyGroup: inferFamilyFromModel(grp.model),
-        phase: grp.phase,
-        side: grp.side,
-        config: grp.config,
-        specId: spec.id,
-        mean: Number(mean.toFixed(5)),
-        stdDev: Number(sd.toFixed(5)),
-        sampleSize: n,
-        rawValues: vals,
-        date: groupDate(grp.rows),
-        sourceFile: fileName
-      });
+      records.push(
+        withFrozenSpecLimits(
+          {
+            id: `CPK-RAW-${grp.model}-${grp.side}-${grp.config}-${spec.code}`,
+            model: grp.model,
+            familyGroup: inferFamilyFromModel(grp.model),
+            phase: grp.phase,
+            side: grp.side,
+            config: grp.config,
+            specId: spec.id,
+            mean: Number(mean.toFixed(5)),
+            stdDev: Number(sd.toFixed(5)),
+            sampleSize: n,
+            rawValues: vals,
+            date: groupDate(grp.rows),
+            sourceFile: fileName
+          },
+          spec
+        )
+      );
     });
   });
 
@@ -3163,8 +3299,9 @@ function buildSampleCpkCsv(mode = 'wide') {
 function exportMasterSpecsCsv(masterSpecs) {
   const header =
     'Code,ParameterName,Model,Station,SpecType,LSL,Nominal,USL,Unit,TargetCpk,Metrology,ControlPlanDoc,SamplingPlan,LimitsEffectiveFrom,LimitRevisionCount';
-  const rows = masterSpecs.map((s) =>
-    [
+  const rows = masterSpecs.map((s) => {
+    const limits = describeSpecLimits(s);
+    return [
       csvText(s.code),
       csvText(s.name),
       csvText(s.model || ''),
@@ -3178,10 +3315,10 @@ function exportMasterSpecsCsv(masterSpecs) {
       csvText(s.metrology),
       csvText(s.docRef),
       csvText(s.samplingPlan),
-      csvText(describeSpecLimits(s).effectiveFrom),
-      describeSpecLimits(s).count
-    ].join(',')
-  );
+      csvText(limits.effectiveFrom),
+      limits.count
+    ].join(',');
+  });
   triggerCsvDownload('FFM_Master_Specifications.csv', [header, ...rows].join('\n'));
 }
 
@@ -3382,6 +3519,18 @@ function isInKpiFiscalYear(iso, fiscalYear = KPI_FISCAL_YEAR) {
 // records keep the historical default of the current KPI fiscal year.
 function isKpiFiscalYearTag(fyTarget, fiscalYear = KPI_FISCAL_YEAR) {
   return String(fyTarget || `FY${fiscalYear}`).trim().toUpperCase() === `FY${fiscalYear}`;
+}
+
+/** One fiscal window for the scorecard tile and every drill-down that explains it. */
+function kpiFiscalScopeLabel(suffix) {
+  const { start, end } = fiscalYearWindow(KPI_FISCAL_YEAR);
+  const window = `FY${KPI_FISCAL_YEAR} ${start} to ${end}`;
+  return suffix ? `All programs · ${window} · ${suffix}` : `All programs · ${window}`;
+}
+
+/** The only fields a committed stage drag sends to the schedule updater. */
+function stageDragReschedulePayload(drag) {
+  return { project: drag.project, rowKeys: drag.rowKeys, schedule: drag.schedule };
 }
 
 /**

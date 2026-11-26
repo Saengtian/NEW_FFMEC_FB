@@ -147,7 +147,9 @@ function App() {
   const [gateRecords, setGateRecords] = useState(() => createInitialGateRecords());
   const [productionRecords, setProductionRecords] = useState(INITIAL_PRODUCTION_RECORDS);
   const [masterSpecs, setMasterSpecs] = useState(INITIAL_MASTER_SPECS);
-  const [cpkRecords, setCpkRecords] = useState(INITIAL_CPK_RECORDS);
+  const [cpkRecords, setCpkRecords] = useState(() =>
+    migrateCpkRecords(INITIAL_CPK_RECORDS, INITIAL_MASTER_SPECS)
+  );
   const [costProjects, setCostProjects] = useState(INITIAL_COST_PROJECTS);
   const [customerFeedback, setCustomerFeedback] = useState(INITIAL_CUSTOMER_FEEDBACK);
   const [selectedProjectId, setSelectedProjectId] = useState('PRJ-X4151');
@@ -187,6 +189,8 @@ function App() {
   const [costImportDraft, setCostImportDraft] = useState(null);
   const [feedbackImportDraft, setFeedbackImportDraft] = useState(null);
   const [syncConflict, setSyncConflict] = useState(null);
+  const [stateHistory, setStateHistory] = useState(null);
+  const [specCorrection, setSpecCorrection] = useState(null);
   const [workspaceExportCopy, setWorkspaceExportCopy] = useState(null);
   const [signOffModal, setSignOffModal] = useState(null);
   const [kpiDrilldown, setKpiDrilldown] = useState(null);
@@ -250,7 +254,8 @@ function App() {
   });
 
   const hydrateFromPayload = (data) => {
-    if (!data || typeof data !== 'object') return;
+    if (!data || typeof data !== 'object') return 0;
+    let frozenLimits = 0;
     isHydratingRef.current = true;
     try {
       if (Array.isArray(data.projects)) setProjects(data.projects);
@@ -258,7 +263,17 @@ function App() {
       if (data.gateRecords && typeof data.gateRecords === 'object') setGateRecords(data.gateRecords);
       if (Array.isArray(data.productionRecords)) setProductionRecords(data.productionRecords);
       if (Array.isArray(data.masterSpecs)) setMasterSpecs(data.masterSpecs);
-      if (Array.isArray(data.cpkRecords)) setCpkRecords(data.cpkRecords);
+      if (Array.isArray(data.cpkRecords)) {
+        const specsForCpk = Array.isArray(data.masterSpecs) ? data.masterSpecs : masterSpecs;
+        const frozen = migrateCpkRecords(data.cpkRecords, specsForCpk);
+        // Rows saved before limits were frozen stay judged by their own date; the
+        // count lets the loader persist this backfill without waiting for an edit.
+        frozenLimits = frozen.reduce(
+          (count, rec, idx) => count + (rec !== data.cpkRecords[idx] ? 1 : 0),
+          0
+        );
+        setCpkRecords(frozen);
+      }
       if (Array.isArray(data.costProjects)) setCostProjects(data.costProjects);
       if (Array.isArray(data.customerFeedback)) setCustomerFeedback(data.customerFeedback);
       if (data.scheduleOverrides && typeof data.scheduleOverrides === 'object') setScheduleOverrides(data.scheduleOverrides);
@@ -271,6 +286,7 @@ function App() {
     setTimeout(() => {
       isHydratingRef.current = false;
     }, 150);
+    return frozenLimits;
   };
 
   // ---------------------------------------------------------------------------
@@ -394,6 +410,104 @@ function App() {
     showToast(`Loaded the other user's version (Rev #${conflict.revision}).`, 'info');
   };
 
+  // ---------------------------------------------------------------------------
+  // State history: every save archives the copy it replaced. Restoring one loads
+  // it and saves it as the next revision, so the state being replaced stays in
+  // the history too.
+  // ---------------------------------------------------------------------------
+  const closeStateHistory = () => setStateHistory(null);
+
+  const openStateHistory = () => {
+    if (!isGasEnv) {
+      showToast('State history is available once the app is deployed to Google Sheets.', 'info');
+      return;
+    }
+    setStateHistory({
+      loading: true,
+      error: null,
+      limit: 5,
+      current: null,
+      revisions: [],
+      selected: null,
+      data: null,
+      meta: null,
+      loadingRevision: false,
+      restoring: false
+    });
+    window.google.script.run
+      .withSuccessHandler((res) => {
+        setStateHistory((prev) =>
+          prev
+            ? {
+                ...prev,
+                loading: false,
+                limit: Number(res?.limit) || 5,
+                current: res?.current || null,
+                revisions: Array.isArray(res?.revisions) ? res.revisions : [],
+                error: res && res.ok === false ? res.error || 'The saved history could not be read.' : null
+              }
+            : prev
+        );
+      })
+      .withFailureHandler((err) => {
+        const msg = err && err.message ? err.message : String(err || 'The saved history could not be read');
+        setStateHistory((prev) => (prev ? { ...prev, loading: false, error: msg } : prev));
+      })
+      .listStateRevisions();
+  };
+
+  const selectStateHistoryRevision = (revision) => {
+    setStateHistory((prev) =>
+      prev ? { ...prev, selected: revision, data: null, meta: null, loadingRevision: true, error: null } : prev
+    );
+    window.google.script.run
+      .withSuccessHandler((res) => {
+        setStateHistory((prev) => {
+          if (!prev || prev.selected !== revision) return prev;
+          if (!res || res.ok === false) {
+            return { ...prev, loadingRevision: false, error: (res && res.error) || 'That revision could not be read.' };
+          }
+          return {
+            ...prev,
+            loadingRevision: false,
+            data: res.data || null,
+            meta: { lastSavedAt: res.lastSavedAt || null, lastSavedBy: res.lastSavedBy || null }
+          };
+        });
+      })
+      .withFailureHandler((err) => {
+        const msg = err && err.message ? err.message : String(err || 'That revision could not be read');
+        setStateHistory((prev) =>
+          prev && prev.selected === revision ? { ...prev, loadingRevision: false, error: msg } : prev
+        );
+      })
+      .loadStateRevision(revision);
+  };
+
+  const restoreStateHistoryRevision = (revision) => {
+    const panel = stateHistory;
+    if (!panel || !panel.data) return;
+    if (syncConflictRef.current) {
+      showToast('Resolve the save conflict before restoring a revision.', 'info');
+      return;
+    }
+    setStateHistory((prev) => (prev ? { ...prev, restoring: true, error: null } : prev));
+    // Keep any slice the old copy does not carry, then freeze Cpk limits exactly
+    // as a normal load would, so the save and the screen agree.
+    const restored = { ...buildWorkspacePayload(), ...panel.data };
+    if (Array.isArray(restored.cpkRecords)) {
+      restored.cpkRecords = migrateCpkRecords(restored.cpkRecords, restored.masterSpecs || masterSpecs);
+    }
+    hydrateFromPayload(restored);
+    pushToGoogleSheet(`Restored Rev #${revision} from state history`, {
+      toast: true,
+      refreshMirrors: true,
+      expectedRevision: revisionRef.current,
+      payload: restored
+    });
+    setStateHistory(null);
+  };
+
   const loadFromGoogleSheet = (showNotice = false) => {
     if (!isGasEnv) return;
     setCloudSync((prev) => ({ ...prev, status: 'loading', errorMsg: null }));
@@ -411,8 +525,9 @@ function App() {
           return;
         }
         if (res && res.initialized && res.data) {
+          let frozenLimits = 0;
           try {
-            hydrateFromPayload(res.data);
+            frozenLimits = hydrateFromPayload(res.data) || 0;
           } catch (err) {
             console.error('hydrateFromPayload threw:', err);
             showToast('Failed to apply loaded data: ' + (err && err.message ? err.message : String(err)), 'error');
@@ -429,6 +544,11 @@ function App() {
             sheetUrl: res.sheetUrl || prev.sheetUrl,
             errorMsg: null
           }));
+          if (frozenLimits > 0) {
+            saveSchedulerRef.current.schedule([
+              `Froze measurement-time Cpk limits on ${frozenLimits} record(s)`
+            ]);
+          }
           if (showNotice) showToast(`Reloaded workspace from Google Sheet (Rev #${res.revision || 1})`, 'success');
         } else {
           // First run on an empty Sheet: seed baseline data automatically
@@ -1348,28 +1468,35 @@ function App() {
     const existing = masterSpecs.find((s) => s.id === existingId);
     if (!existing) return;
 
-    // Limit history is append-only: a same-day edit corrects that day's entry,
-    // a metadata-only edit adds nothing, any other limit change starts a
-    // revision. Cpk records resolve against this history by their own date.
-    let history = getSpecRevisions(existing).map((rev) => ({ ...rev }));
-    const sameDay = history.find((rev) => rev.effectiveFrom === effectiveFrom);
-    const latest = history[history.length - 1];
-    let outcome = 'metadata';
-    if (sameDay && specLimitsDiffer(sameDay, limits)) {
-      // Re-picking an existing date edits that day's entry instead of stacking
-      // a second revision on the same effective date.
-      history = history.map((rev) =>
-        rev.effectiveFrom === effectiveFrom ? { ...rev, ...limits, updatedAt: stamp, updatedBy: actor } : rev
-      );
-      outcome = 'corrected';
-    } else if (!sameDay && specLimitsDiffer(latest, limits)) {
-      history = [
-        ...history,
-        { id: `${existing.id}-R${history.length + 1}`, effectiveFrom, ...limits, updatedAt: stamp, updatedBy: actor }
-      ].sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
-      outcome = 'revision';
+    // Limit history is append-only: changing limits on an existing effective
+    // date would restate the window used to judge records from that date.
+    const applied = applySpecLimitEdit(existing, limits, effectiveFrom, stamp, actor);
+    if (!applied || applied.rejected) {
+      // Limits for that date are already on file and Cpk records measured under
+      // the revision keep their frozen limits, so correcting it is an explicit
+      // choice that says how many records would be re-frozen.
+      const revision = getSpecRevisions(existing).find((rev) => rev.effectiveFrom === effectiveFrom);
+      const affected = revision ? recordsFrozenToRevision(cpkRecords, existing.id, revision.id) : [];
+      setEditingMasterSpec(null);
+      setNewMasterSpecModalOpen(false);
+      if (revision && affected.length > 0) {
+        setSpecCorrection({
+          spec: existing,
+          revisionId: revision.id,
+          effectiveFrom,
+          limits,
+          affected,
+          previous: specLimitSnapshot(revision)
+        });
+      } else {
+        showToast(
+          `Updated ${existing.name}: limits effective ${effectiveFrom} are already on file — choose another effective date`,
+          'warning'
+        );
+      }
+      return;
     }
-
+    const history = applied.history;
     const latestRevision = history[history.length - 1];
     const nextSpec = {
       ...existing,
@@ -1380,18 +1507,45 @@ function App() {
     };
 
     setMasterSpecs((prev) => prev.map((s) => (s.id === existingId ? nextSpec : s)));
-    if (outcome === 'revision') {
+    if (applied.outcome === 'revision') {
       showToast(
-        `Updated ${nextSpec.name}: new limit revision effective ${effectiveFrom} (${history.length} on file)`,
+        `Updated ${nextSpec.name}: new limit revision effective ${latestRevision.effectiveFrom} (${history.length} on file)`,
         'warning'
       );
-    } else if (outcome === 'corrected') {
-      showToast(`Updated ${nextSpec.name}: corrected the limits effective ${effectiveFrom}`);
     } else {
       showToast(`Updated ${nextSpec.name} (limits unchanged, effective ${latestRevision.effectiveFrom})`);
     }
     setEditingMasterSpec(null);
     setNewMasterSpecModalOpen(false);
+  };
+
+  const handleApplySpecCorrection = ({ refreeze }) => {
+    const pending = specCorrection;
+    if (!pending) return;
+    const corrected = correctSpecRevision(
+      pending.spec,
+      pending.limits,
+      pending.revisionId,
+      new Date().toISOString(),
+      cloudSync.userEmail || ''
+    );
+    if (!corrected) {
+      showToast('That revision is no longer on file — reopen the Master Spec and try again.', 'error');
+      setSpecCorrection(null);
+      return;
+    }
+    setMasterSpecs((prev) => prev.map((s) => (s.id === corrected.id ? corrected : s)));
+    const count = pending.affected.length;
+    if (refreeze) {
+      setCpkRecords((prev) => refreezeCpkRecordsToRevision(prev, corrected, pending.revisionId));
+      showToast(`Corrected limits effective ${pending.effectiveFrom} — re-froze ${count} Cpk record(s)`);
+    } else {
+      showToast(
+        `Corrected limits effective ${pending.effectiveFrom} — ${count} Cpk record(s) keep their frozen limits`,
+        'warning'
+      );
+    }
+    setSpecCorrection(null);
   };
 
   const handleDeleteMasterSpec = (spec) => {
@@ -1414,30 +1568,21 @@ function App() {
   };
 
   const handleUpdateCpkMeasurement = (recordId, updates) => {
-    setCpkRecords((prev) =>
-      prev.map((r) =>
-        r.id === recordId
-          ? {
-              ...r,
-              mean: Number(updates.mean),
-              stdDev: Math.max(0.0001, Number(updates.stdDev)),
-              sampleSize: Math.max(5, Number(updates.sampleSize) || 32),
-              date: todayIso()
-            }
-          : r
-      )
-    );
-    setActiveCpkChartRecord((prev) =>
-      prev && prev.id === recordId
-        ? {
-            ...prev,
-            mean: Number(updates.mean),
-            stdDev: Math.max(0.0001, Number(updates.stdDev)),
-            sampleSize: Math.max(5, Number(updates.sampleSize) || 32),
-            date: todayIso()
-          }
-        : prev
-    );
+    // The edit re-dates the record to today, so it is judged by today's limits.
+    const measuredAt = todayIso();
+    const refreeze = (r) => {
+      const next = {
+        ...r,
+        mean: Number(updates.mean),
+        stdDev: Math.max(0.0001, Number(updates.stdDev)),
+        sampleSize: Math.max(5, Number(updates.sampleSize) || 32),
+        date: measuredAt
+      };
+      const spec = masterSpecs.find((s) => s.id === next.specId);
+      return spec ? withFrozenSpecLimits(next, spec) : next;
+    };
+    setCpkRecords((prev) => prev.map((r) => (r.id === recordId ? refreeze(r) : r)));
+    setActiveCpkChartRecord((prev) => (prev && prev.id === recordId ? refreeze(prev) : prev));
     showToast('Updated process capability telemetry & recalculated Cpk');
   };
 
@@ -2675,6 +2820,16 @@ function App() {
                     >
                       <RefreshCw className="w-3 h-3" />
                     </button>
+                    <button
+                      type="button"
+                      onClick={openStateHistory}
+                      disabled={cloudSync.status === 'saving' || cloudSync.status === 'loading'}
+                      title="Browse recent saved revisions and restore one"
+                      aria-label="State history"
+                      className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 disabled:opacity-50"
+                    >
+                      <Clock className="w-3 h-3" />
+                    </button>
                   </>
                 )}
               </div>
@@ -3243,6 +3398,48 @@ function App() {
           )}
           onClose={() => setFeedbackImportDraft(null)}
           onConfirm={handleConfirmFeedbackImport}
+        />
+      )}
+
+      {/* Correcting limits on an existing effective date that frozen records used */}
+      {specCorrection && (
+        <SpecCorrectionModal
+          name={specCorrection.spec.name}
+          code={specCorrection.spec.code}
+          unit={specCorrection.spec.unit}
+          effectiveFrom={specCorrection.effectiveFrom}
+          previous={specCorrection.previous}
+          next={specCorrection.limits}
+          affected={specCorrection.affected}
+          onCancel={() => setSpecCorrection(null)}
+          onApply={handleApplySpecCorrection}
+        />
+      )}
+
+      {/* State history: preview a save's per-slice changes and restore it */}
+      {stateHistory && (
+        <StateHistoryPanel
+          current={stateHistory.current}
+          revisions={stateHistory.revisions}
+          limit={stateHistory.limit}
+          loading={stateHistory.loading}
+          error={stateHistory.error}
+          selected={stateHistory.selected}
+          selectedMeta={stateHistory.meta}
+          data={stateHistory.data}
+          loadingRevision={stateHistory.loadingRevision}
+          restoring={stateHistory.restoring}
+          local={buildWorkspacePayload()}
+          blockedReason={
+            syncConflict
+              ? 'Resolve the save conflict first.'
+              : cloudSync.status === 'saving' || cloudSync.status === 'loading'
+              ? 'Wait for the current sync to finish.'
+              : null
+          }
+          onSelect={selectStateHistoryRevision}
+          onRestore={restoreStateHistoryRevision}
+          onClose={closeStateHistory}
         />
       )}
 

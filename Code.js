@@ -28,8 +28,11 @@ const CONFIG = {
   WEB_APP_URL: 'https://script.google.com/a/macros/minebea.co.th/s/AKfycbz6y_8byEXlOxSWq6y5_azvp129b7CmlIfqhuNGA2BX-LrKTHVnmQdgHwylvx7yFE4C/exec',
   APP_TITLE: 'FFM NPI Ops — NMB-Minebea Thai Ltd.',
   STATE_SHEET: '_FFM_STATE_STORE',
+  STATE_HISTORY_SHEET: '_FFM_STATE_HISTORY',
   AUDIT_SHEET: 'AuditLog',
   CHUNK_SIZE: 40000,
+  // How many replaced copies of the state store to keep, oldest dropped first.
+  HISTORY_LIMIT: 5,
   MIRROR_REVISION_PROP: 'FFM_MIRROR_REVISION',
   MIRROR_REFRESHED_PROP: 'FFM_MIRROR_REFRESHED_AT'
 };
@@ -195,6 +198,12 @@ function ensureAllTabs_() {
     // Migrate an older 5-column AuditLog in place; existing rows keep their values.
     auditSheet.getRange(1, 6).setValue('Executor').setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
   }
+  const historySheet = getOrCreateSheet_(ss, CONFIG.STATE_HISTORY_SHEET);
+  if (historySheet.getLastRow() === 0) {
+    historySheet.getRange(1, 1, 1, 7).setValues([['SliceKey', 'Revision', 'ChunkIndex', 'ChunkCount', 'SavedAt', 'PayloadChunk', 'SavedBy']]);
+    historySheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
+    historySheet.setFrozenRows(1);
+  }
   ['Projects', 'Tasks', 'ProductionRecords', 'MasterSpecs', 'CpkRecords', 'CostProjects', 'CustomerFeedback'].forEach(function(tab) {
     getOrCreateSheet_(ss, tab);
   });
@@ -276,6 +285,27 @@ function getServerInfo() {
  * Loads the complete workspace state from `_FFM_STATE_STORE`.
  * Returns { initialized: false } if the Sheet has not been seeded yet.
  */
+/**
+ * Reassembles one slice from its stored chunks.
+ *
+ * `missing` distinguishes "this slice was never stored" from "the stored chunks
+ * are incomplete or invalid": only the latter means the copy must not be used.
+ */
+function parseChunkGroup_(chunks) {
+  if (!chunks || !chunks.length) return { ok: false, missing: true };
+  chunks.sort(function(a, b) { return a.idx - b.idx; });
+  const declared = chunks[0].count;
+  if (!declared || chunks.length !== declared ||
+      chunks.some(function(c, i) { return c.count !== declared || c.idx !== i; })) {
+    return { ok: false, missing: false };
+  }
+  try {
+    return { ok: true, value: JSON.parse(chunks.map(function(c) { return c.text; }).join('')) };
+  } catch (e) {
+    return { ok: false, missing: false };
+  }
+}
+
 function loadWorkspaceState() {
   const ss = getSpreadsheet_();
   const stateSheet = ss.getSheetByName(CONFIG.STATE_SHEET);
@@ -320,21 +350,9 @@ function loadWorkspaceState() {
   }
 
   const parseKey = function(key) {
-    const chunks = grouped[key];
-    if (!chunks || !chunks.length) return undefined;
-    chunks.sort(function(a, b) { return a.idx - b.idx; });
-    const declared = chunks[0].count;
-    if (!declared || chunks.length !== declared ||
-        chunks.some(function(c, i) { return c.count !== declared || c.idx !== i; })) {
-      corrupted = true;
-      return undefined;
-    }
-    try {
-      return JSON.parse(chunks.map(function(c) { return c.text; }).join(''));
-    } catch (e) {
-      corrupted = true;
-      return undefined;
-    }
+    const result = parseChunkGroup_(grouped[key]);
+    if (!result.ok && !result.missing) corrupted = true;
+    return result.ok ? result.value : undefined;
   };
 
   const meta = parseKey('__META__') || {};
@@ -418,14 +436,19 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
     const actorLabel = userEmail;
     const executorEmail = getExecutorEmail_();
 
-    // Read current revision if present
+    // Read current revision, keeping the rows so the copy being replaced can
+    // be archived before the store is rewritten.
     let prevRevision = 0;
+    let previousRows = [];
     if (stateSheet.getLastRow() >= 2) {
       const existing = stateSheet.getDataRange().getValues();
-      for (let i = 1; i < existing.length; i++) {
-        if (String(existing[i][0]) === '__META__') {
+      previousRows = existing.slice(1).filter(function(row) {
+        return String(row[0] || '').trim();
+      });
+      for (let i = 0; i < previousRows.length; i++) {
+        if (String(previousRows[i][0]) === '__META__') {
           try {
-            const m = JSON.parse(String(existing[i][4] || '{}'));
+            const m = JSON.parse(String(previousRows[i][4] || '{}'));
             prevRevision = Number(m.revision) || 0;
           } catch (e) {}
           break;
@@ -469,6 +492,11 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       }
     });
 
+    // Keep the copy being replaced: every save is undoable from the history tab.
+    if (prevRevision > 0 && previousRows.length > 0) {
+      archiveStateRevision_(ss, prevRevision, previousRows);
+    }
+
     // Rewrite _FFM_STATE_STORE cleanly
     stateSheet.clearContents();
     stateSheet.getRange(1, 1, 1, 5).setValues([['SliceKey', 'ChunkIndex', 'ChunkCount', 'UpdatedAt', 'PayloadChunk']]);
@@ -503,6 +531,146 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Copies the state rows that are about to be overwritten into
+ * `_FFM_STATE_HISTORY`, so a save can be undone. Only the newest
+ * CONFIG.HISTORY_LIMIT revisions are kept.
+ */
+function archiveStateRevision_(ss, revision, rows) {
+  const sheet = getOrCreateSheet_(ss, CONFIG.STATE_HISTORY_SHEET);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, 7).setValues([['SliceKey', 'Revision', 'ChunkIndex', 'ChunkCount', 'SavedAt', 'PayloadChunk', 'SavedBy']]);
+    sheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
+    sheet.setFrozenRows(1);
+  }
+
+  let savedBy = '';
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]) === '__META__' && Number(rows[i][1]) === 0) {
+      try {
+        savedBy = String(JSON.parse(String(rows[i][4] || '{}')).lastSavedBy || '');
+      } catch (e) {}
+      break;
+    }
+  }
+
+  const out = rows.map(function(row) {
+    return [
+      String(row[0] || ''), revision, Number(row[1]) || 0, Number(row[2]) || 0,
+      String(row[3] || ''), String(row[4] || ''), savedBy
+    ];
+  });
+  if (out.length === 0) return;
+  sheet.getRange(sheet.getLastRow() + 1, 1, out.length, 7).setValues(out);
+  pruneStateHistory_(sheet, CONFIG.HISTORY_LIMIT);
+}
+
+/**
+ * Revision keys to delete when more than `keep` are stored. Snapshots are
+ * archived oldest first, so only the oldest block(s) are ever dropped.
+ */
+function historyRevisionsToDrop_(order, keep) {
+  const list = Array.isArray(order) ? order : [];
+  const excess = list.length - Math.max(1, Number(keep) || 1);
+  return excess > 0 ? list.slice(0, excess) : [];
+}
+
+function pruneStateHistory_(sheet, keep) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const revisions = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+  const order = [];
+  revisions.forEach(function(cell) {
+    const key = String(cell[0] || '');
+    if (key && order.indexOf(key) === -1) order.push(key);
+  });
+  const drop = historyRevisionsToDrop_(order, keep);
+  if (drop.length === 0) return;
+  // History is append-only and oldest-first, so the dropped rows are a prefix.
+  let count = 0;
+  while (count < revisions.length && drop.indexOf(String(revisions[count][0] || '')) !== -1) {
+    count += 1;
+  }
+  if (count > 0) sheet.deleteRows(2, count);
+}
+
+/**
+ * Revision list for the History panel: the live revision plus the archived ones,
+ * newest first. Reads only the small metadata columns, never the payloads.
+ */
+function listStateRevisions() {
+  const current = loadWorkspaceState();
+  const sheet = getSpreadsheet_().getSheetByName(CONFIG.STATE_HISTORY_SHEET);
+  const revisions = [];
+  if (sheet && sheet.getLastRow() >= 2) {
+    const count = sheet.getLastRow() - 1;
+    const keys = sheet.getRange(2, 2, count, 1).getValues();
+    const times = sheet.getRange(2, 5, count, 1).getValues();
+    const bys = sheet.getRange(2, 7, count, 1).getValues();
+    for (let i = 0; i < count; i++) {
+      const revision = Number(keys[i][0]) || 0;
+      if (!revision || revisions.some(function(r) { return r.revision === revision; })) continue;
+      revisions.push({
+        revision: revision,
+        lastSavedAt: times[i][0] ? String(times[i][0]) : null,
+        lastSavedBy: bys[i][0] ? String(bys[i][0]) : null
+      });
+    }
+  }
+  return {
+    ok: true,
+    limit: CONFIG.HISTORY_LIMIT,
+    current: current.initialized
+      ? { revision: current.revision, lastSavedAt: current.lastSavedAt, lastSavedBy: current.lastSavedBy }
+      : null,
+    revisions: revisions.sort(function(a, b) { return b.revision - a.revision; })
+  };
+}
+
+/**
+ * One archived revision, reassembled exactly like the live store. Read-only:
+ * restoring is a normal save of this payload, so it becomes a new revision and
+ * the state it replaces stays in history.
+ */
+function loadStateRevision(revision) {
+  const target = Number(revision);
+  if (!target) return { ok: false, error: 'No revision number was supplied.' };
+  const sheet = getSpreadsheet_().getSheetByName(CONFIG.STATE_HISTORY_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) {
+    return { ok: false, error: 'No archived revisions yet.' };
+  }
+
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 7).getValues();
+  const grouped = {};
+  let savedAt = null;
+  let savedBy = null;
+  values.forEach(function(row) {
+    if (Number(row[1]) !== target) return;
+    const key = String(row[0] || '').trim();
+    if (!key) return;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push({ idx: Number(row[2]) || 0, count: Number(row[3]) || 0, text: String(row[5] || '') });
+    if (!savedAt && row[4]) savedAt = String(row[4]);
+    if (!savedBy && row[6]) savedBy = String(row[6]);
+  });
+
+  const data = {};
+  let corrupted = false;
+  PERSISTED_SLICES.forEach(function(slice) {
+    const result = parseChunkGroup_(grouped[slice]);
+    if (result.ok) data[slice] = result.value;
+    else if (!result.missing) corrupted = true;
+  });
+
+  if (Object.keys(data).length === 0) {
+    return { ok: false, error: 'Revision ' + target + ' is no longer in the history.' };
+  }
+  if (corrupted) {
+    return { ok: false, error: 'Revision ' + target + ' is stored incompletely and was not loaded.' };
+  }
+  return { ok: true, revision: target, lastSavedAt: savedAt, lastSavedBy: savedBy, data: data };
 }
 
 /**
@@ -665,10 +833,11 @@ function syncMirrorSheets_(ss, payload) {
     const rows = payload.cpkRecords.map(function(c) {
       return [
         c.id || '', c.model || '', c.phase || '', c.side || '', c.config || '',
-        c.specId || '', c.mean ?? '', c.stdDev ?? '', c.sampleSize ?? '', c.date || ''
+        c.specId || '', c.mean ?? '', c.stdDev ?? '', c.sampleSize ?? '', c.date || '',
+        c.lsl ?? '', c.usl ?? '', c.cpkTarget ?? '', c.specRevisionId || ''
       ];
     });
-    writeTable('CpkRecords', ['ID', 'Model', 'Phase', 'Side', 'Config', 'ParamCode', 'Mean', 'StdDev', 'SampleSize', 'MeasuredDate'], rows);
+    writeTable('CpkRecords', ['ID', 'Model', 'Phase', 'Side', 'Config', 'ParamCode', 'Mean', 'StdDev', 'SampleSize', 'MeasuredDate', 'LSL', 'USL', 'CpkTarget', 'SpecRevision'], rows);
   }
 
   if (Array.isArray(payload.costProjects)) {
