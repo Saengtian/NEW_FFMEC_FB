@@ -3,7 +3,7 @@
     "build": "bun tools/build.mjs",
     "preview": "bun tools/preview-server.mjs 5183",
     "state:import": "bun tools/import-state.mjs",
-    "test": "bun tools/test-fy-helpers.mjs && bun tools/test-cpk-freeze.mjs && bun tools/test-sheetjs-bundle.mjs && bun tools/test-review-fixes.mjs && bun tools/test-state-history.mjs",
+    "test": "bun tools/test-fy-helpers.mjs && bun tools/test-cpk-freeze.mjs && bun tools/test-sheetjs-bundle.mjs && bun tools/test-review-fixes.mjs && bun tools/test-state-history.mjs && bun tools/test-generated-bundle.mjs",
     "deploy": "bun run build && clasp push -f && DESC=\"deploy $(git rev-parse --short HEAD)\" && V=$(clasp version \"$DESC\" | grep -oE 'version [0-9]+' | grep -oE '[0-9]+' | tail -1) && echo \"Updating deployment to version $V ($DESC)\" && clasp update-deployment AKfycbz6y_8byEXlOxSWq6y5_azvp129b7CmlIfqhuNGA2BX-LrKTHVnmQdgHwylvx7yFE4C -V \"$V\" -d \"$DESC\""
   },
   "devDependencies": {
