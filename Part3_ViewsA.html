@@ -1318,6 +1318,8 @@ function BuildTimelineGanttView({
   // Direct manipulation of the stage bars: a drag is only a preview until the
   // pointer is released, so Escape / pointercancel leaves the plan untouched.
   const [stageDrag, setStageDrag] = useState(null);
+  // A drop that would break the sequence is refused, and says why here.
+  const [stageMoveError, setStageMoveError] = useState(null);
   const stageDragRef = useRef(null);
   const suppressClickRef = useRef(false);
   const rescheduleRef = useRef(onReschedule);
@@ -1340,13 +1342,31 @@ function BuildTimelineGanttView({
       else endIso = startIso;
     }
 
+    const schedule = { ...base, [stage.startKey]: startIso, [stage.endKey]: endIso };
     suppressClickRef.current = true;
+
+    // The plan is only saved when the moved stage still fits between its
+    // neighbours and inside the line's MIH; otherwise the bar stays where it was.
+    const conflict = stageMoveConflict(schedule, stage.id);
+    if (conflict) {
+      const when = formatShortDate(conflict.limitIso);
+      setStageMoveError(
+        conflict.kind === 'before-previous'
+          ? `${conflict.stage.label} would start before ${conflict.other.label} finishes (${when}). The schedule was not changed.`
+          : conflict.kind === 'after-next'
+          ? `${conflict.stage.label} would end after ${conflict.other.label} starts (${when}). The schedule was not changed.`
+          : `${conflict.stage.label} would end after FATP MIH (${when}). The schedule was not changed.`
+      );
+      return;
+    }
+    setStageMoveError(null);
+
     if (rescheduleRef.current) {
       rescheduleRef.current(
         stageDragReschedulePayload({
           project: drag.project,
           rowKeys: drag.rowKeys,
-          schedule: { ...base, [stage.startKey]: startIso, [stage.endKey]: endIso }
+          schedule
         })
       );
     }
@@ -1872,6 +1892,24 @@ function BuildTimelineGanttView({
               <span>PBR</span>
             </span>
           </div>
+
+          {stageMoveError && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950 px-3 py-2 text-[11px] font-semibold text-rose-800 dark:text-rose-200"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">{stageMoveError}</span>
+              <button
+                type="button"
+                onClick={() => setStageMoveError(null)}
+                aria-label="Dismiss the schedule warning"
+                className="shrink-0 text-rose-600 dark:text-rose-300 hover:underline"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Split Sticky Left Column + Horizontally Scrollable Gantt Grid */}
@@ -2185,7 +2223,10 @@ function BuildTimelineGanttView({
                             const leftPx = getOffsetPx(startIso);
                             const spanDays = Math.max(1, diffDaysIso(startIso, endIso) + 1);
                             const widthPx = Math.max(16, spanDays * dayWidthPx);
-                            const tone = ganttStageGateTone(rowGateLines, row.rowKeys, st.gateId);
+                            // The fill and the click share one line: whichever line set the
+                            // tone, which on a Compact Config row may be the LHS one.
+                            const stageGate = ganttStageGateDriver(rowGateLines, row.rowKeys, st.gateId);
+                            const tone = stageGate.tone;
 
                             const drag =
                               stageDrag && stageDrag.rowId === row.id && stageDrag.stageId === st.id
@@ -2230,12 +2271,14 @@ function BuildTimelineGanttView({
                                     suppressClickRef.current = false;
                                     return;
                                   }
-                                  onOpenGate(project.id, st.gateId, row.primaryLineKey);
+                                  onOpenGate(project.id, st.gateId, stageGate.lineKey || row.primaryLineKey);
                                 }}
                                 onPointerDown={(event) => startStageDrag(event, project, row, st, 'move')}
                                 title={`${project.model} ${row.sideBadge} ${row.label} · ${st.label}: ${formatShortDate(
                                   startIso
-                                )} – ${formatShortDate(endIso)} · ${spanDays}d · Gate ${tone.label} · Drag to move, drag an edge to resize, click to open Gate Sign-Off`}
+                                )} – ${formatShortDate(endIso)} · ${spanDays}d · Gate ${tone.label}${
+                                  stageGate.differs ? ` · Driven by ${stageGate.lineKey}` : ''
+                                } · Drag to move, drag an edge to resize, click to open Gate Sign-Off`}
                                 style={{
                                   left: `${barLeft}px`,
                                   width: `${barWidth}px`,
@@ -2694,7 +2737,11 @@ function GateSignOffView({
   const [evidenceLabel, setEvidenceLabel] = useState('');
   const [evidenceUrl, setEvidenceUrl] = useState('');
   const [evidenceError, setEvidenceError] = useState('');
-  const evidenceItems = Array.isArray(activeDossier?.evidence) ? activeDossier.evidence : [];
+  // Only real, hand-attached links are listed here: a placeholder or malformed
+  // URL would be a clickable dead end instead of the evidence it claims to be.
+  const evidenceItems = (Array.isArray(activeDossier?.evidence) ? activeDossier.evidence : []).filter(
+    (ev) => isOpenableEvidenceUrl(ev && ev.url)
+  );
 
   const handleSubmitEvidence = (event) => {
     event.preventDefault();
@@ -3365,7 +3412,7 @@ function GateSignOffView({
             <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-56 overflow-y-auto">
               {evidenceItems.length === 0 ? (
                 <div className="p-4 text-xs text-slate-400 dark:text-slate-400">
-                  No evidence linked to this gate yet.
+                  No Drive link yet — attach the folder or file that holds this gate's evidence.
                 </div>
               ) : (
                 evidenceItems.map((ev) => (
@@ -3380,9 +3427,15 @@ function GateSignOffView({
                       <ExternalLink className="w-3.5 h-3.5 shrink-0" />
                       <span className="truncate">{ev.label}</span>
                     </a>
-                    <div className="text-[10px] font-mono text-slate-400 dark:text-slate-400 truncate mt-0.5 pl-5">
+                    <a
+                      href={ev.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={`Open ${ev.url}`}
+                      className="block text-[10px] font-mono text-slate-400 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-300 hover:underline truncate mt-0.5 pl-5"
+                    >
                       {ev.url}
-                    </div>
+                    </a>
                     <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 pl-5">
                       {ev.addedBy} · {ev.addedAt}
                     </div>
