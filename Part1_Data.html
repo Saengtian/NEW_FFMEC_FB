@@ -2496,18 +2496,7 @@ function parseCsvText(text) {
 }
 
 async function loadSheetJsLib() {
-  if (typeof window !== 'undefined' && window.XLSX) return window.XLSX;
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js';
-    script.async = true;
-    script.onload = () => {
-      if (window.XLSX) resolve(window.XLSX);
-      else reject(new Error('Excel parser failed to initialize.'));
-    };
-    script.onerror = () => reject(new Error('Unable to load Excel (.xlsx) parser. Please upload a .csv file.'));
-    document.head.appendChild(script);
-  });
+  return XLSX;
 }
 
 async function parseUploadedTabularFile(file) {
@@ -2540,19 +2529,138 @@ async function parseUploadedTabularFile(file) {
   throw new Error('Unsupported file type. Please upload .xlsx, .xls, or .csv.');
 }
 
-function findMatchingSpec(colHeader, masterSpecs) {
+/**
+ * Resolves an uploaded parameter column/name to a Master Spec.
+ *
+ * The same parameter can exist once per model plus once as an all-models spec,
+ * so a plain "first match wins" would bind a X3082 upload to a X4151 limit.
+ * Candidates are therefore ranked: the record's own model, then the all-models
+ * spec, and only as a last resort another model's spec.
+ */
+function findMatchingSpec(colHeader, masterSpecs, model) {
   const norm = String(colHeader || '')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
   if (!norm) return null;
+  const modelKey = String(model || '').toUpperCase().trim();
+
+  const candidates = masterSpecs.filter((s) => {
+    const codeNorm = s.code.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const nameNorm = s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return norm === codeNorm || norm === nameNorm || norm.includes(codeNorm);
+  });
+  if (!candidates.length) return null;
 
   return (
-    masterSpecs.find((s) => {
-      const codeNorm = s.code.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const nameNorm = s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return norm === codeNorm || norm === nameNorm || norm.includes(codeNorm);
-    }) || null
+    candidates.find((s) => modelKey && String(s.model || '').toUpperCase() === modelKey) ||
+    candidates.find((s) => !s.model) ||
+    candidates[0]
   );
+}
+
+// ============================================================================
+// EFFECTIVE-DATED MASTER SPECIFICATION REVISIONS
+// ----------------------------------------------------------------------------
+// A limit is only true for the window it was in force. Every spec therefore
+// keeps its limit history, and a Cpk is computed with the revision whose
+// `effectiveFrom` is the latest one on or before the record's measured date —
+// so tightening a limit today cannot restate yesterday's capability.
+// ============================================================================
+
+const SPEC_LIMIT_FIELDS = ['specType', 'lsl', 'nominal', 'usl', 'cpkTarget'];
+// Revision-less specs (everything saved before limit history existed) read as
+// one baseline revision that predates every measurement.
+const SPEC_BASELINE_EFFECTIVE = '2000-01-01';
+
+function specLimitSnapshot(source) {
+  const snapshot = {};
+  SPEC_LIMIT_FIELDS.forEach(function (field) {
+    snapshot[field] = source ? source[field] : undefined;
+  });
+  return snapshot;
+}
+
+/** Limit revisions, oldest first. Always returns at least one entry for a spec. */
+function getSpecRevisions(spec) {
+  if (!spec) return [];
+  const stored = Array.isArray(spec.revisions) ? spec.revisions : [];
+  const usable = stored.filter(
+    (rev) => rev && typeof rev.effectiveFrom === 'string' && rev.effectiveFrom
+  );
+  if (usable.length === 0) {
+    return [
+      Object.assign(
+        {
+          id: `${spec.id}-R0`,
+          effectiveFrom: spec.effectiveFrom || SPEC_BASELINE_EFFECTIVE,
+          updatedAt: null,
+          updatedBy: null,
+          baseline: true
+        },
+        specLimitSnapshot(spec)
+      )
+    ];
+  }
+  return usable
+    .slice()
+    .sort((a, b) => String(a.effectiveFrom).localeCompare(String(b.effectiveFrom)));
+}
+
+/** The revision in force on a date: the latest `effectiveFrom` on or before it. */
+function resolveSpecAt(spec, isoDate) {
+  const revisions = getSpecRevisions(spec);
+  if (revisions.length === 0) return null;
+  const date = typeof isoDate === 'string' ? isoDate.slice(0, 10) : '';
+  let inForce = null;
+  revisions.forEach((rev) => {
+    if (!date || String(rev.effectiveFrom) <= date) inForce = rev;
+  });
+  const used = inForce || revisions[0];
+  return {
+    revision: used,
+    revisions,
+    // Measured before any recorded revision: the earliest limits are the honest
+    // best guess, and the UI says so rather than pretending it is exact.
+    predatesFirstRevision: !inForce,
+    isLatest: used === revisions[revisions.length - 1]
+  };
+}
+
+/** A spec merged with the limits in force on the record's measurement date. */
+function effectiveSpecForRecord(spec, record) {
+  if (!spec) return null;
+  const resolved = resolveSpecAt(spec, record && record.date);
+  if (!resolved) return spec;
+  return Object.assign({}, spec, specLimitSnapshot(resolved.revision), {
+    effectiveFrom: resolved.revision.effectiveFrom,
+    revisionNumber: resolved.revisions.indexOf(resolved.revision) + 1,
+    revisionCount: resolved.revisions.length,
+    predatesFirstRevision: resolved.predatesFirstRevision,
+    isLatestRevision: resolved.isLatest
+  });
+}
+
+/** True when two limit snapshots differ (form values arrive as strings). */
+function specLimitsDiffer(a, b) {
+  const left = a || {};
+  const right = b || {};
+  return SPEC_LIMIT_FIELDS.some(
+    (field) => String(left[field] === null ? '' : left[field]) !== String(right[field] === null ? '' : right[field])
+  );
+}
+
+/** "2026-11-25 · R3", or the recorded baseline, for tables and tooltips. */
+function describeSpecLimits(spec) {
+  const revisions = getSpecRevisions(spec);
+  const latest = revisions[revisions.length - 1];
+  if (!latest) return { count: 0, effectiveFrom: '', label: '—' };
+  return {
+    count: revisions.length,
+    effectiveFrom: latest.effectiveFrom,
+    label: latest.baseline
+      ? `baseline (${latest.effectiveFrom})`
+      : `${latest.effectiveFrom} · R${revisions.length}`
+  };
 }
 
 function inferFamilyFromModel(model) {
@@ -2562,6 +2670,44 @@ function inferFamilyFromModel(model) {
   if (m === 'X3784') return 'MacMini';
   if (m === 'X2689') return 'Display';
   return 'MB14"';
+}
+
+/**
+ * Reads a measurement date from an imported cell. Only unambiguous formats are
+ * accepted (ISO, YYYY/MM/DD, DD-MMM-YYYY, a Date, an Excel serial, or D/M/Y
+ * when the positions cannot be confused). Anything else is refused rather than
+ * guessed: a wrong date would bind the record to the wrong limit revision.
+ */
+function toIsoDate(value) {
+  const pad = (n) => String(n).padStart(2, '0');
+  if (value === null || value === undefined || value === '') return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value > 20000 && value < 80000) {
+    const dt = new Date(Math.round((value - 25569) * 86400000));
+    return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
+  }
+  const text = String(value).trim();
+  let m = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (m) return `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+  m = text.match(/^(\d{1,2})[- ]([A-Za-z]{3,})[- ](\d{4})$/);
+  if (m) {
+    const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const mi = months.indexOf(m[2].slice(0, 3).toLowerCase());
+    if (mi >= 0) return `${m[3]}-${pad(mi + 1)}-${pad(m[1])}`;
+  }
+  m = text.match(/^(\d{1,2})[\/](\d{1,2})[\/](\d{4})$/);
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    // 4/11/2026 is either 4 Nov or 11 Apr: refuse instead of guessing.
+    if (a > 12 && b <= 12) return `${m[3]}-${pad(b)}-${pad(a)}`;
+    if (b > 12 && a <= 12) return `${m[3]}-${pad(a)}-${pad(b)}`;
+    return '';
+  }
+  if (/^\d{5}$/.test(text)) return toIsoDate(Number(text));
+  return '';
 }
 
 function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) {
@@ -2584,15 +2730,24 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
   const meanCol = findCol(['mean', 'avg', 'average']);
   const stdCol = findCol(['stddev', 'stdev', 'sigma', 'std']);
   const nCol = findCol(['samplesize', 'count', 'qty', 'n']);
+  const dateCol = findCol(['measureddate', 'testdate', 'inspectiondate', 'date']);
+  let undatedRows = 0;
 
   // Format 1: Pre-aggregated Summary Sheet (ParamCode + Mean + StdDev)
   if (paramCol && meanCol && stdCol) {
     const records = [];
     rows.forEach((r, idx) => {
-      const spec = findMatchingSpec(r[paramCol], masterSpecs);
+      // Resolve the model first: the same parameter code may exist per model.
+      const model = String(r[modelCol] || defaults.model || 'X4151').toUpperCase().trim();
+      const spec = findMatchingSpec(r[paramCol], masterSpecs, model);
       if (!spec) {
         warnings.push(`Row ${idx + 2}: Parameter "${r[paramCol]}" did not match any Master Spec.`);
         return;
+      }
+      if (spec.model && spec.model.toUpperCase() !== model) {
+        warnings.push(
+          `Row ${idx + 2}: No ${model} specification for "${r[paramCol]}"; resolved to ${spec.code} (${spec.model}).`
+        );
       }
       const mean = Number(r[meanCol]);
       const sd = Number(r[stdCol]);
@@ -2600,11 +2755,12 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
         warnings.push(`Row ${idx + 2}: Invalid Mean/StdDev for ${spec.code}.`);
         return;
       }
-      const model = String(r[modelCol] || defaults.model || 'X4151').toUpperCase().trim();
       const phase = String(r[phaseCol] || defaults.phase || 'EVT').toUpperCase().trim();
       const side = String(r[sideCol] || defaults.side || 'RHS').toUpperCase().trim();
       const config = String(r[configCol] || defaults.config || 'ME11').toUpperCase().trim();
       const sampleSize = Math.max(5, Number(r[nCol]) || 32);
+      const measuredAt = toIsoDate(dateCol ? r[dateCol] : '');
+      if (dateCol && !measuredAt) undatedRows += 1;
 
       records.push({
         id: `CPK-IMP-${model}-${side}-${spec.code}-${idx}`,
@@ -2617,10 +2773,16 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
         mean,
         stdDev: sd,
         sampleSize,
-        date: todayIso(),
+        date: measuredAt || todayIso(),
         sourceFile: fileName
       });
     });
+
+    if (undatedRows > 0) {
+      warnings.push(
+        `${undatedRows} row(s) had no readable measurement date; they are dated ${todayIso()} and use that day's limits.`
+      );
+    }
 
     return {
       format: `Pre-Aggregated Summary (${rows.length} rows)`,
@@ -2638,17 +2800,19 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
       phaseCol,
       sideCol,
       configCol,
-      findCol(['serial', 'sn', 'unit', 'sample', 'no', 'id', 'date', 'time'])
+      dateCol,
+      findCol(['serial', 'sn', 'unit', 'sample', 'no', 'id', 'time'])
     ].filter(Boolean)
   );
-  const specColMap = [];
+  // Headers that name a known parameter. The spec itself is resolved per row
+  // group below, because the same header can mean a different model's limits.
+  const specHeaders = [];
   const unmappedColumns = [];
 
   headers.forEach((h) => {
     if (metaCols.has(h)) return;
-    const spec = findMatchingSpec(h, masterSpecs);
-    if (spec) {
-      specColMap.push({ header: h, spec });
+    if (findMatchingSpec(h, masterSpecs)) {
+      specHeaders.push(h);
     } else {
       const numericVals = rows
         .map((r) => r[h])
@@ -2681,7 +2845,7 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
     }
   });
 
-  if (specColMap.length === 0) {
+  if (specHeaders.length === 0) {
     warnings.push(
       'No columns matched existing Master Spec codes. Use the Auto-Generate Master Spec panel below to register uploaded columns.'
     );
@@ -2708,9 +2872,29 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
     grouped.get(gKey).rows.push(r);
   });
 
+  // A group is one measurement run; its date is the latest readable one, so a
+  // multi-day export resolves against the limits in force when it finished.
+  const groupDate = (groupRows) => {
+    if (!dateCol) return todayIso();
+    const dates = groupRows
+      .map((r) => toIsoDate(r[dateCol]))
+      .filter(Boolean)
+      .sort();
+    if (dates.length) return dates[dates.length - 1];
+    undatedRows += 1;
+    return todayIso();
+  };
+
   const records = [];
   grouped.forEach((grp) => {
-    specColMap.forEach(({ header, spec }) => {
+    specHeaders.forEach((header) => {
+      const spec = findMatchingSpec(header, masterSpecs, grp.model);
+      if (!spec) return;
+      if (spec.model && spec.model.toUpperCase() !== grp.model) {
+        warnings.push(
+          `Column "${header}": no ${grp.model} specification; resolved to ${spec.code} (${spec.model}).`
+        );
+      }
       const vals = grp.rows
         .map((r) => r[header])
         .filter((v) => v !== '' && v !== null && v !== undefined)
@@ -2735,15 +2919,21 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
         stdDev: Number(sd.toFixed(5)),
         sampleSize: n,
         rawValues: vals,
-        date: todayIso(),
+        date: groupDate(grp.rows),
         sourceFile: fileName
       });
     });
   });
 
+  if (undatedRows > 0) {
+    warnings.push(
+      `${undatedRows} group(s) had no readable measurement date; they are dated ${todayIso()} and use that day's limits.`
+    );
+  }
+
   return {
-    format: `Wide Raw Measurements (${rows.length} units · ${specColMap.length} matched params)`,
-    matchedSpecs: specColMap.map((s) => s.spec.id),
+    format: `Wide Raw Measurements (${rows.length} units · ${specHeaders.length} matched params)`,
+    matchedSpecs: Array.from(new Set(records.map((r) => r.specId))),
     unmappedColumns,
     records,
     warnings
@@ -2960,7 +3150,8 @@ function buildSampleCpkCsv(mode = 'wide') {
 }
 
 function exportMasterSpecsCsv(masterSpecs) {
-  const header = 'Code,ParameterName,Model,Station,SpecType,LSL,Nominal,USL,Unit,TargetCpk,Metrology,ControlPlanDoc,SamplingPlan';
+  const header =
+    'Code,ParameterName,Model,Station,SpecType,LSL,Nominal,USL,Unit,TargetCpk,Metrology,ControlPlanDoc,SamplingPlan,LimitsEffectiveFrom,LimitRevisionCount';
   const rows = masterSpecs.map((s) =>
     [
       csvText(s.code),
@@ -2975,7 +3166,9 @@ function exportMasterSpecsCsv(masterSpecs) {
       s.cpkTarget,
       csvText(s.metrology),
       csvText(s.docRef),
-      csvText(s.samplingPlan)
+      csvText(s.samplingPlan),
+      csvText(describeSpecLimits(s).effectiveFrom),
+      describeSpecLimits(s).count
     ].join(',')
   );
   triggerCsvDownload('FFM_Master_Specifications.csv', [header, ...rows].join('\n'));
@@ -3160,6 +3353,24 @@ function fiscalYearWindow(fyStartYear) {
     .toISOString()
     .slice(0, 10);
   return { start, end };
+}
+
+/**
+ * One fiscal-year test for every KPI tile. The MIH tile has always measured against
+ * the FY window above; claims and cost saving read the same window (and fiscal-year
+ * tag) so "FY2026" cannot mean two different twelve-month periods on one scorecard.
+ */
+function isInKpiFiscalYear(iso, fiscalYear = KPI_FISCAL_YEAR) {
+  const day = String(iso || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  const { start, end } = fiscalYearWindow(fiscalYear);
+  return day >= start && day <= end;
+}
+
+// Cost-saving initiatives carry a fiscal-year tag rather than a date; untagged
+// records keep the historical default of the current KPI fiscal year.
+function isKpiFiscalYearTag(fyTarget, fiscalYear = KPI_FISCAL_YEAR) {
+  return String(fyTarget || `FY${fiscalYear}`).trim().toUpperCase() === `FY${fiscalYear}`;
 }
 
 /**

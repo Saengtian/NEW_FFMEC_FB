@@ -115,7 +115,7 @@ function OverviewView({
       visibleDashboardSpecs.forEach((spec) => {
         const rec = row.bySpec[spec.id];
         if (!rec) return;
-        const { cpk } = computeCapabilityStats(rec, spec);
+        const { cpk } = computeCapabilityStats(rec, effectiveSpecForRecord(spec, rec));
         if (cpk > 1.33) green += 1;
         else if (cpk >= 1.0) yellow += 1;
         else orange += 1;
@@ -127,11 +127,17 @@ function OverviewView({
 
   // FY2026 KPI scorecard: the six official targets measured against current data.
   const kpiTiles = useMemo(() => {
+    // Every tile uses the MIH tile's fiscal window (1 Apr – 31 Mar), so FY2026 means
+    // the same twelve months here rather than a calendar year or an all-time total.
+    const fyWindow = fiscalYearWindow(KPI_FISCAL_YEAR);
     const claimsFy2026 = (customerFeedback || []).filter(
-      (f) => f.category === 'Claim' && String(f.feedbackDate || '').slice(0, 4) === '2026'
+      (f) => f.category === 'Claim' && isInKpiFiscalYear(f.feedbackDate)
     ).length;
 
-    const annualSavingThb = (costProjects || []).reduce(
+    const fySavingProjects = (costProjects || []).filter((item) =>
+      isKpiFiscalYearTag(item.fyTarget)
+    );
+    const annualSavingThb = fySavingProjects.reduce(
       (sum, item) => sum + (computeCostSavingMetrics(item).annualSavingThb || 0),
       0
     );
@@ -213,11 +219,11 @@ function OverviewView({
         digits: 0,
         mode: 'min',
         targetFormat: (v) => `\u2264 ${v}`,
-        footnote: 'All programs \u00b7 FY2026 to date'
+        footnote: `All programs \u00b7 FY${KPI_FISCAL_YEAR} ${fyWindow.start} to ${fyWindow.end}`
       }),
       build('saving', 'Annual Cost Saving FY2026', annualSavingThb, KPI_TARGETS.annualSavingThb, {
         format: formatThbCompact,
-        footnote: `${(costProjects || []).length} saving initiatives`
+        footnote: `${fySavingProjects.length} saving initiatives tagged FY${KPI_FISCAL_YEAR}`
       }),
       mihTile
     ];
@@ -584,7 +590,8 @@ function OverviewView({
                           </td>
                         );
                       }
-                      const stats = computeCapabilityStats(rec, spec);
+                      const specInForce = effectiveSpecForRecord(spec, rec);
+                      const stats = computeCapabilityStats(rec, specInForce);
                       const tone = getCpkTone(stats.cpk);
                       const isFromLastUpload =
                         lastUploadBatch && rec.uploadBatchId === lastUploadBatch.id;
@@ -595,7 +602,9 @@ function OverviewView({
                             onClick={() => onOpenCpkChart(rec)}
                             title={`${row.model} ${row.side} · ${spec.name}: Cpk ${stats.cpk.toFixed(
                               2
-                            )}${rec.sourceFile ? ` (Uploaded: ${rec.sourceFile})` : ''}`}
+                            )} · limits effective ${specInForce.effectiveFrom}${
+                              rec.sourceFile ? ` (Uploaded: ${rec.sourceFile})` : ''
+                            }`}
                             className={`w-full py-1 px-2 rounded-md border font-bold text-xs transition-colors cursor-pointer ${
                               tone.cellClass
                             } ${isFromLastUpload ? 'ring-2 ring-blue-500/50' : ''}`}
@@ -1298,13 +1307,114 @@ function BuildTimelineGanttView({
   globalSide,
   scheduleOverrides,
   onOpenGate,
-  onEditSchedule
+  onEditSchedule,
+  onReschedule
 }) {
   const [groupMode, setGroupMode] = useState('side'); // 'side' | 'config'
   const [sequenceMode, setSequenceMode] = useState('lhs-first'); // 'lhs-first' | 'rhs-first' | 'readiness'
   const [zoomLevel, setZoomLevel] = useState('week'); // 'week' | 'day'
   const [collapsedProjects, setCollapsedProjects] = useState({}); // projectId -> true
   const boardScrollRef = useRef(null);
+
+  // Direct manipulation of the stage bars: a drag is only a preview until the
+  // pointer is released, so Escape / pointercancel leaves the plan untouched.
+  const [stageDrag, setStageDrag] = useState(null);
+  const stageDragRef = useRef(null);
+  const suppressClickRef = useRef(false);
+  const rescheduleRef = useRef(onReschedule);
+  rescheduleRef.current = onReschedule;
+
+  const commitStageDrag = useCallback((drag) => {
+    if (!drag || !drag.deltaDays) return;
+    const stage = GANTT_STAGES.find((s) => s.id === drag.stageId);
+    const base = drag.schedule || {};
+    if (!stage) return;
+    let startIso = base[stage.startKey];
+    let endIso = base[stage.endKey];
+    if (!startIso || !endIso) return;
+
+    if (drag.mode !== 'resize-end') startIso = addDaysIso(startIso, drag.deltaDays);
+    if (drag.mode !== 'resize-start') endIso = addDaysIso(endIso, drag.deltaDays);
+    // A stage never collapses or inverts: the dragged edge stops at the far one.
+    if (diffDaysIso(startIso, endIso) < 0) {
+      if (drag.mode === 'resize-start') startIso = endIso;
+      else endIso = startIso;
+    }
+
+    suppressClickRef.current = true;
+    if (rescheduleRef.current) {
+      rescheduleRef.current({
+        project: drag.project,
+        rowKeys: drag.rowKeys,
+        label: drag.label,
+        schedule: { ...base, [stage.startKey]: startIso, [stage.endKey]: endIso }
+      });
+    }
+  }, []);
+
+  const isStageDragging = Boolean(stageDrag);
+
+  // Window-level listeners, so a fast drag that leaves the bar still tracks.
+  useEffect(() => {
+    if (!isStageDragging) return undefined;
+    const onMove = (event) => {
+      const drag = stageDragRef.current;
+      if (!drag) return;
+      const deltaDays = Math.round((event.clientX - drag.startX) / drag.dayWidthPx);
+      if (deltaDays === drag.deltaDays) return;
+      // A zero-delta drag is indistinguishable from a click, which still opens the gate.
+      suppressClickRef.current = false;
+      const next = { ...drag, deltaDays };
+      stageDragRef.current = next;
+      setStageDrag(next);
+    };
+    const finish = (commit) => {
+      const drag = stageDragRef.current;
+      stageDragRef.current = null;
+      setStageDrag(null);
+      if (commit) commitStageDrag(drag);
+    };
+    const onPointerUp = () => finish(true);
+    const onPointerCancel = () => finish(false);
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') finish(false);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [isStageDragging, commitStageDrag]);
+
+  const startStageDrag = (event, project, row, stage, mode) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const schedule = row.schedule || {};
+    if (!schedule[stage.startKey] || !schedule[stage.endKey]) return;
+    event.preventDefault();
+    event.stopPropagation();
+    suppressClickRef.current = false;
+    const drag = {
+      project,
+      rowId: row.id,
+      stageId: stage.id,
+      mode,
+      label: `${row.sideBadge} · ${row.label}`,
+      rowKeys: row.rowKeys,
+      schedule,
+      startIso: schedule[stage.startKey],
+      endIso: schedule[stage.endKey],
+      startX: event.clientX,
+      deltaDays: 0,
+      dayWidthPx
+    };
+    stageDragRef.current = drag;
+    setStageDrag(drag);
+  };
 
   // Build normalized rows with side-priority or readiness-driven sequencing
   const timelineGroups = useMemo(() => {
@@ -2049,7 +2159,7 @@ function BuildTimelineGanttView({
                                 ) : null
                               )}
 
-                          {/* Stage Bars */}
+                          {/* Stage Bars — drag to move, drag an edge to resize */}
                           {GANTT_STAGES.map((st) => {
                             const startIso = row.schedule[st.startKey];
                             const endIso = row.schedule[st.endKey];
@@ -2058,23 +2168,84 @@ function BuildTimelineGanttView({
                             const spanDays = Math.max(1, diffDaysIso(startIso, endIso) + 1);
                             const widthPx = Math.max(16, spanDays * dayWidthPx);
 
+                            const drag =
+                              stageDrag && stageDrag.rowId === row.id && stageDrag.stageId === st.id
+                                ? stageDrag
+                                : null;
+                            const dragPx = drag ? drag.deltaDays * dayWidthPx : 0;
+                            let barLeft = leftPx;
+                            let barWidth = widthPx;
+                            if (drag) {
+                              if (drag.mode === 'resize-start') {
+                                const shift = Math.min(dragPx, barWidth - dayWidthPx);
+                                barLeft += shift;
+                                barWidth -= shift;
+                              } else if (drag.mode === 'resize-end') {
+                                barWidth = Math.max(dayWidthPx, barWidth + dragPx);
+                              } else {
+                                barLeft += dragPx;
+                              }
+                            }
+
+                            // The badge previews the dates the drop would commit.
+                            let preview = null;
+                            if (drag) {
+                              let pStart = startIso;
+                              let pEnd = endIso;
+                              if (drag.mode !== 'resize-end') pStart = addDaysIso(pStart, drag.deltaDays);
+                              if (drag.mode !== 'resize-start') pEnd = addDaysIso(pEnd, drag.deltaDays);
+                              if (diffDaysIso(pStart, pEnd) < 0) {
+                                if (drag.mode === 'resize-start') pStart = pEnd;
+                                else pEnd = pStart;
+                              }
+                              preview = { start: pStart, end: pEnd, days: diffDaysIso(pStart, pEnd) + 1 };
+                            }
+
                             return (
                               <button
                                 key={st.id}
                                 type="button"
-                                onClick={() => onOpenGate(project.id, st.gateId, row.primaryLineKey)}
+                                onClick={() => {
+                                  // A committed drag ends with a click; it must not also open the gate.
+                                  if (suppressClickRef.current) {
+                                    suppressClickRef.current = false;
+                                    return;
+                                  }
+                                  onOpenGate(project.id, st.gateId, row.primaryLineKey);
+                                }}
+                                onPointerDown={(event) => startStageDrag(event, project, row, st, 'move')}
                                 title={`${project.model} ${row.sideBadge} ${row.label} · ${st.label}: ${formatShortDate(
                                   startIso
-                                )} – ${formatShortDate(endIso)} · ${spanDays}d (Click to open Gate Sign-Off)`}
+                                )} – ${formatShortDate(endIso)} · ${spanDays}d · Drag to move, drag an edge to resize, click to open Gate Sign-Off`}
                                 style={{
-                                  left: `${leftPx}px`,
-                                  width: `${widthPx}px`
+                                  left: `${barLeft}px`,
+                                  width: `${barWidth}px`,
+                                  touchAction: 'none'
                                 }}
-                                className={`absolute top-2.5 h-7 rounded-md border px-1.5 text-[10px] font-semibold flex items-center overflow-hidden whitespace-nowrap shadow-2xs hover:brightness-110 transition-all cursor-pointer ${
+                                className={`group absolute top-2.5 h-7 rounded-md border px-1.5 text-[10px] font-semibold flex items-center whitespace-nowrap shadow-2xs hover:brightness-110 transition-all cursor-grab active:cursor-grabbing select-none ${
                                   st.barClass
                                 } ${row.hasHold && st.id === 'prep' ? 'ring-2 ring-rose-500 ring-offset-1' : ''}`}
                               >
-                                {widthPx >= 48 ? st.label : st.id.toUpperCase()}
+                                <span
+                                  role="presentation"
+                                  onPointerDown={(event) => startStageDrag(event, project, row, st, 'resize-start')}
+                                  style={{ touchAction: 'none' }}
+                                  className="absolute inset-y-0 left-0 w-2 cursor-ew-resize rounded-l-md bg-white/30 opacity-0 group-hover:opacity-100 group-active:opacity-100 transition-opacity"
+                                />
+                                <span className="min-w-0 truncate">
+                                  {barWidth >= 48 ? st.label : st.id.toUpperCase()}
+                                </span>
+                                <span
+                                  role="presentation"
+                                  onPointerDown={(event) => startStageDrag(event, project, row, st, 'resize-end')}
+                                  style={{ touchAction: 'none' }}
+                                  className="absolute inset-y-0 right-0 w-2 cursor-ew-resize rounded-r-md bg-white/30 opacity-0 group-hover:opacity-100 group-active:opacity-100 transition-opacity"
+                                />
+                                {preview && (
+                                  <span className="pointer-events-none absolute -top-6 left-0 z-30 rounded bg-slate-900/95 dark:bg-slate-700 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-lg tabular-nums">
+                                    {formatShortDate(preview.start)} – {formatShortDate(preview.end)} · {preview.days}d
+                                  </span>
+                                )}
                               </button>
                             );
                           })}
@@ -2132,7 +2303,10 @@ function BuildTimelineGanttView({
               Dashed red vertical line marks <strong className="text-slate-700 dark:text-slate-300">Today ({formatShortDate(todayIso())}, {todayIso().slice(0, 4)})</strong>.
             </span>
           </div>
-          <span>Click any stage bar or milestone diamond to open its Gate Sign-Off dossier.</span>
+          <span>
+            Drag a stage bar to move it, drag either edge to resize it (Esc cancels); click a bar or
+            milestone diamond to open its Gate Sign-Off dossier.
+          </span>
         </div>
       </section>
     </div>
@@ -3545,7 +3719,7 @@ function CpkMasterSpecsView({
     activeCpkRecords.forEach((r) => {
       const spec = specMap[r.specId];
       if (!spec) return;
-      const { cpk } = computeCapabilityStats(r, spec);
+      const { cpk } = computeCapabilityStats(r, effectiveSpecForRecord(spec, r));
       if (cpk > 1.33) green += 1;
       else if (cpk >= 1.0) yellow += 1;
       else orange += 1;
@@ -3792,7 +3966,9 @@ function CpkMasterSpecsView({
                       <th
                         key={spec.id}
                         className="py-2 px-2 text-center whitespace-nowrap min-w-[94px]"
-                        title={`${spec.name} (${spec.docRef})`}
+                        title={`${spec.name} (${spec.docRef}) · limits effective ${
+                          describeSpecLimits(spec).effectiveFrom
+                        } · ${describeSpecLimits(spec).count} revision(s)`}
                       >
                         <div className="font-bold text-slate-800 dark:text-slate-200">{spec.code}</div>
                         <div className="text-[9px] font-medium text-slate-400 dark:text-slate-400 normal-case truncate max-w-[96px] mx-auto">
@@ -3841,7 +4017,8 @@ function CpkMasterSpecsView({
                             </td>
                           );
                         }
-                        const stats = computeCapabilityStats(rec, spec);
+                        const specInForce = effectiveSpecForRecord(spec, rec);
+                        const stats = computeCapabilityStats(rec, specInForce);
                         const tone = getCpkTone(stats.cpk);
                         if (cpkFilter !== 'ALL' && tone.key !== cpkFilter) {
                           return (
@@ -3859,7 +4036,7 @@ function CpkMasterSpecsView({
                               onClick={() => onOpenCpkChart(rec)}
                               title={`${row.model} ${row.side} · ${spec.name}: Cpk ${stats.cpk.toFixed(
                                 2
-                              )} (n=${rec.sampleSize})`}
+                              )} (n=${rec.sampleSize}) · limits effective ${specInForce.effectiveFrom}`}
                               className={`w-full py-1.5 px-2 rounded-md border font-bold text-xs transition-colors cursor-pointer ${
                                 tone.cellClass
                               } ${isFromLastUpload ? 'ring-2 ring-blue-500/50' : ''}`}
@@ -3893,6 +4070,7 @@ function CpkMasterSpecsView({
                   <th className="py-2.5 px-2.5 text-right whitespace-nowrap">USL</th>
                   <th className="py-2.5 px-2 whitespace-nowrap">Unit</th>
                   <th className="py-2.5 px-2.5 text-right whitespace-nowrap">Target Cpk</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Limits Effective</th>
                   <th className="py-2.5 px-3 whitespace-nowrap">Metrology / Gage</th>
                   <th className="py-2.5 px-3 whitespace-nowrap">Control Plan Doc</th>
                   <th className="py-2.5 px-4 text-right whitespace-nowrap">Actions</th>
@@ -3929,6 +4107,13 @@ function CpkMasterSpecsView({
                     <td className="py-2.5 px-2 text-slate-500 dark:text-slate-400">{spec.unit}</td>
                     <td className="py-2.5 px-2.5 text-right font-bold text-emerald-700 dark:text-emerald-300">
                       ≥ {Number(spec.cpkTarget).toFixed(2)}
+                    </td>
+                    <td className="py-2.5 px-2.5 whitespace-nowrap text-slate-600 dark:text-slate-400">
+                      <span
+                        title={`${describeSpecLimits(spec).count} limit revision(s) on file — Cpk records use the one in force on their measurement date`}
+                      >
+                        {describeSpecLimits(spec).label}
+                      </span>
                     </td>
                     <td className="py-2.5 px-3 text-slate-600 dark:text-slate-400 whitespace-nowrap">
                       {spec.metrology}

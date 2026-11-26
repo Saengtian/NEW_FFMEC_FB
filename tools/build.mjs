@@ -25,7 +25,9 @@ const TAILWIND_INPUT = join(ROOT, "tools/tailwind.css");
 /** React/ReactDOM come from node_modules, so nothing is fetched at runtime. */
 const PRELUDE = `import React from 'react';
 import ReactDOM from 'react-dom';
+import XLSX from 'xlsx';
 const { useState, useMemo, useEffect, useRef, useCallback } = React;
+window.XLSX = XLSX;
 `;
 
 /** Mounting used to be a second <script type="text/babel"> at the end of Index. */
@@ -64,8 +66,11 @@ async function buildScript() {
     logLevel: "silent",
   });
 
-  // A literal </script> inside the JS would close the inline tag early.
-  const js = result.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
+  // A literal </script> would close the inline tag early; `<?` is an Apps
+  // Script template scriptlet and must stay escaped in the emitted HTML.
+  const js = result.outputFiles[0].text
+    .replace(/<\/script/gi, "<\\/script")
+    .replace(/<\?/g, "\\u003c?");
   writeFileSync(
     BUNDLE,
     `<!-- Built by tools/build.mjs from Icons.html + Part*.html. Do not edit. -->\n<script>\n${js}\n</script>\n`

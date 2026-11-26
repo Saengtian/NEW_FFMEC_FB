@@ -187,6 +187,7 @@ function App() {
   const [costImportDraft, setCostImportDraft] = useState(null);
   const [feedbackImportDraft, setFeedbackImportDraft] = useState(null);
   const [syncConflict, setSyncConflict] = useState(null);
+  const [workspaceExportCopy, setWorkspaceExportCopy] = useState(null);
   const [signOffModal, setSignOffModal] = useState(null);
   const [kpiDrilldown, setKpiDrilldown] = useState(null);
   const [toast, setToast] = useState(null);
@@ -517,6 +518,40 @@ function App() {
     a.click();
     URL.revokeObjectURL(url);
     showToast('Exported full workspace JSON backup.', 'success');
+  };
+
+  // The Sheet route is blocked by the Workspace device-trust policy on some
+  // machines, so the loaded state can also be copied straight out of the app
+  // and imported into the local preview (bun run state:import).
+  const buildWorkspaceExport = () => ({
+    app: 'FFM NPI Ops',
+    version: 'v2.1.0-GAS',
+    exportedAt: new Date().toISOString(),
+    revision: Number(cloudSync.revision) || 0,
+    lastSavedAt: cloudSync.lastSavedAt || null,
+    lastSavedBy: cloudSync.lastSavedBy || null,
+    data: buildWorkspacePayload()
+  });
+
+  const handleCopyWorkspaceState = async () => {
+    const revision = Number(cloudSync.revision) || 0;
+    const json = JSON.stringify(buildWorkspaceExport());
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        throw new Error('this browser exposes no clipboard API');
+      }
+      await navigator.clipboard.writeText(json);
+      showToast(`Copied workspace JSON · Rev #${revision} · ${Math.round(json.length / 1024)} KB`, 'success');
+    } catch (err) {
+      // A cross-origin Apps Script frame usually denies clipboard-write, so fall
+      // back to a panel that shows the same text, pre-selected.
+      setWorkspaceExportCopy({
+        json,
+        revision,
+        reason: err && err.message ? err.message : String(err)
+      });
+      showToast('Clipboard is blocked here — copy the JSON from the panel.', 'info');
+    }
   };
 
   const handleImportWorkspaceJson = (e) => {
@@ -1273,29 +1308,87 @@ function App() {
   };
 
   const handleSaveMasterSpec = (form, existingId = null) => {
-    const cleanSpec = {
-      id: existingId || `SPEC-${form.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}`,
+    const effectiveFrom = String(form.effectiveFrom || todayIso()).slice(0, 10);
+    const limits = {
+      specType: form.specType || 'two-sided',
+      lsl: form.specType === 'upper' ? 0 : Number(form.lsl),
+      nominal: Number(form.nominal),
+      usl: form.specType === 'lower' ? null : Number(form.usl),
+      cpkTarget: Number(form.cpkTarget) || 1.33
+    };
+    const identity = {
       code: form.code.toUpperCase().trim(),
       name: form.name.trim(),
       model: (form.model || '').trim().toUpperCase(),
       station: form.station || PRODUCTION_STATIONS[3],
       unit: form.unit.trim() || 'mm',
-      specType: form.specType || 'two-sided',
-      lsl: form.specType === 'upper' ? 0 : Number(form.lsl),
-      nominal: Number(form.nominal),
-      usl: form.specType === 'lower' ? null : Number(form.usl),
-      cpkTarget: Number(form.cpkTarget) || 1.33,
       metrology: form.metrology.trim() || 'OMM Optical',
       docRef: form.docRef.trim() || 'SPC-FFM-00',
       samplingPlan: form.samplingPlan.trim() || '32 pcs / Lot'
     };
+    const stamp = new Date().toISOString();
+    const actor = cloudSync.userEmail || '';
 
-    if (existingId) {
-      setMasterSpecs((prev) => prev.map((s) => (s.id === existingId ? cleanSpec : s)));
-      showToast(`Updated Master Specification: ${cleanSpec.name}`);
+    if (!existingId) {
+      const id = `SPEC-${form.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}`;
+      const spec = {
+        id,
+        ...identity,
+        ...limits,
+        effectiveFrom,
+        revisions: [{ id: `${id}-R1`, effectiveFrom, ...limits, updatedAt: stamp, updatedBy: actor }]
+      };
+      setMasterSpecs((prev) => [...prev, spec]);
+      showToast(`Added Master Specification: ${spec.name} (limits effective ${effectiveFrom})`);
+      setEditingMasterSpec(null);
+      setNewMasterSpecModalOpen(false);
+      return;
+    }
+
+    const existing = masterSpecs.find((s) => s.id === existingId);
+    if (!existing) return;
+
+    // Limit history is append-only: a same-day edit corrects that day's entry,
+    // a metadata-only edit adds nothing, any other limit change starts a
+    // revision. Cpk records resolve against this history by their own date.
+    let history = getSpecRevisions(existing).map((rev) => ({ ...rev }));
+    const sameDay = history.find((rev) => rev.effectiveFrom === effectiveFrom);
+    const latest = history[history.length - 1];
+    let outcome = 'metadata';
+    if (sameDay && specLimitsDiffer(sameDay, limits)) {
+      // Re-picking an existing date edits that day's entry instead of stacking
+      // a second revision on the same effective date.
+      history = history.map((rev) =>
+        rev.effectiveFrom === effectiveFrom ? { ...rev, ...limits, updatedAt: stamp, updatedBy: actor } : rev
+      );
+      outcome = 'corrected';
+    } else if (!sameDay && specLimitsDiffer(latest, limits)) {
+      history = [
+        ...history,
+        { id: `${existing.id}-R${history.length + 1}`, effectiveFrom, ...limits, updatedAt: stamp, updatedBy: actor }
+      ].sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+      outcome = 'revision';
+    }
+
+    const latestRevision = history[history.length - 1];
+    const nextSpec = {
+      ...existing,
+      ...identity,
+      ...specLimitSnapshot(latestRevision),
+      effectiveFrom: latestRevision.effectiveFrom,
+      revisions: history
+    };
+
+    setMasterSpecs((prev) => prev.map((s) => (s.id === existingId ? nextSpec : s)));
+    if (outcome === 'revision') {
+      showToast(
+        `Updated ${nextSpec.name}: new limit revision effective ${effectiveFrom} (${history.length} on file)`,
+        'warning'
+      );
+    } else if (outcome === 'corrected') {
+      showToast(`Updated ${nextSpec.name}: corrected the limits effective ${effectiveFrom}`);
     } else {
-      setMasterSpecs((prev) => [...prev, cleanSpec]);
-      showToast(`Added Master Specification: ${cleanSpec.name}`);
+      showToast(`Updated ${nextSpec.name} (limits unchanged, effective ${latestRevision.effectiveFrom})`);
     }
     setEditingMasterSpec(null);
     setNewMasterSpecModalOpen(false);
@@ -2484,13 +2577,22 @@ function App() {
                   {cloudSync.userEmail}
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-1.5 pt-1">
+              <div className="grid grid-cols-3 gap-1.5 pt-1">
                 <button
                   type="button"
                   onClick={handleExportWorkspaceJson}
+                  title="Download the workspace as a JSON file"
                   className="px-2 py-1 rounded bg-slate-800 dark:bg-slate-600 hover:bg-slate-700 text-slate-300 dark:text-slate-300 text-[10px] font-medium inline-flex items-center justify-center gap-1"
                 >
                   <Download className="w-3 h-3" /> Backup
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCopyWorkspaceState}
+                  title="Copy the loaded workspace as JSON (Rev #, slices) for the local preview"
+                  className="px-2 py-1 rounded bg-slate-800 dark:bg-slate-600 hover:bg-slate-700 text-slate-300 dark:text-slate-300 text-[10px] font-medium inline-flex items-center justify-center gap-1"
+                >
+                  <ClipboardCheck className="w-3 h-3" /> Copy
                 </button>
                 <button
                   type="button"
@@ -2752,6 +2854,9 @@ function App() {
                     scheduleOverrides={scheduleOverrides}
                     onOpenGate={navigateToGate}
                     onEditSchedule={(target) => setEditingScheduleTarget(target)}
+                    onReschedule={({ project, rowKeys, schedule }) =>
+                      handleSaveScheduleOverride(project.id, rowKeys, schedule)
+                    }
                   />
                 );
               case 'tasks':
@@ -3152,6 +3257,16 @@ function App() {
           error={syncConflict.error}
           onKeepLocal={handleConflictKeepLocal}
           onUseRemote={handleConflictUseRemote}
+        />
+      )}
+
+      {/* Blocked clipboard: the same export text, pre-selected for a manual copy */}
+      {workspaceExportCopy && (
+        <WorkspaceExportModal
+          json={workspaceExportCopy.json}
+          revision={workspaceExportCopy.revision}
+          reason={workspaceExportCopy.reason}
+          onClose={() => setWorkspaceExportCopy(null)}
         />
       )}
 
