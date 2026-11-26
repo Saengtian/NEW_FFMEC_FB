@@ -6,3 +6,7 @@ bun.lockb
 tools/**
 .preview/**
 docs/**
+# Local agent/workspace metadata (never part of the script project)
+.gemini/**
+.github/**
+.freebuff/**

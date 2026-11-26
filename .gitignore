@@ -11,6 +11,10 @@ tools/.styles.tmp.css
 # Freebuff workspace metadata
 .freebuff/
 
+# Local agent hooks — machine-specific absolute paths, never part of the app
+.gemini/
+.github/hooks/
+
 # Secrets and local credentials
 .env
 .env.*
