@@ -1640,40 +1640,114 @@ function computeProductionMetrics(rec) {
 // GANTT TIMELINE HELPERS & SIDE-PRIORITY / READINESS SEQUENCING
 // ============================================================================
 
+// The stage cue lives with the stage it describes: gate sign-off owns a bar's fill,
+// so each stage keeps a coded edge and glyph that stay readable on a clipped bar.
 const GANTT_STAGES = [
   {
     id: 'prep',
     label: 'Prep / BBR / BRR',
+    shortLabel: 'Prep',
+    glyph: '▸',
+    edgeClass: 'bg-sky-600 dark:bg-sky-400',
     startKey: 'prepStart',
     endKey: 'brrEnd',
-    gateId: 'brr',
-    barClass: 'bg-slate-700 text-white border-slate-800'
+    gateId: 'brr'
   },
   {
     id: 'mbo',
     label: 'MBO & OK2B',
+    shortLabel: 'MBO',
+    glyph: '◆',
+    edgeClass: 'bg-violet-600 dark:bg-violet-400',
     startKey: 'mboStart',
     endKey: 'mboEnd',
-    gateId: 'mbo',
-    barClass: 'bg-amber-500 text-white border-amber-600'
+    gateId: 'mbo'
   },
   {
     id: 'main',
     label: 'Main Build',
+    shortLabel: 'Main',
+    glyph: '■',
+    edgeClass: 'bg-fuchsia-600 dark:bg-fuchsia-400',
     startKey: 'mainStart',
     endKey: 'mainEnd',
-    gateId: 'main',
-    barClass: 'bg-blue-600 text-white border-blue-700'
+    gateId: 'main'
   },
   {
     id: 'oqc',
     label: 'Final OQC',
+    shortLabel: 'OQC',
+    glyph: '●',
+    edgeClass: 'bg-teal-600 dark:bg-teal-400',
     startKey: 'oqcStart',
     endKey: 'oqcEnd',
-    gateId: 'oqc',
-    barClass: 'bg-indigo-600 text-white border-indigo-700'
+    gateId: 'oqc'
   }
 ];
+
+// A Gantt bar is coloured by the gate it delivers against, not by its stage, so a
+// glance answers "is this stage cleared to run?". The list runs best to worst, which
+// is both the legend order and the severity a row with several lines compares
+// against. Each text/background pair keeps the 10px bar text readable in both themes.
+const GANTT_GATE_TONES = [
+  {
+    status: 'Approved',
+    label: 'Approved',
+    barClass:
+      'bg-emerald-700 text-white border-emerald-900 dark:bg-emerald-500 dark:text-emerald-950 dark:border-emerald-300',
+    swatchClass:
+      'bg-emerald-700 border-emerald-900 dark:bg-emerald-500 dark:border-emerald-300'
+  },
+  {
+    status: 'Conditional',
+    label: 'Conditional',
+    barClass:
+      'bg-orange-300 text-orange-950 border-orange-600 dark:bg-orange-400 dark:text-orange-950 dark:border-orange-200',
+    swatchClass:
+      'bg-orange-300 border-orange-600 dark:bg-orange-400 dark:border-orange-200'
+  },
+  {
+    status: 'In Review',
+    label: 'In Review',
+    barClass:
+      'bg-amber-300 text-amber-950 border-amber-600 dark:bg-amber-400 dark:text-amber-950 dark:border-amber-200',
+    swatchClass:
+      'bg-amber-300 border-amber-600 dark:bg-amber-400 dark:border-amber-200'
+  },
+  {
+    status: 'Pending',
+    label: 'Not signed off',
+    barClass:
+      'bg-slate-200 text-slate-800 border-slate-500 dark:bg-slate-700 dark:text-slate-100 dark:border-slate-500',
+    swatchClass: 'bg-slate-200 border-slate-500 dark:bg-slate-700 dark:border-slate-500'
+  },
+  {
+    status: 'Blocked',
+    label: 'Blocked',
+    barClass:
+      'bg-rose-700 text-white border-rose-900 dark:bg-rose-400 dark:text-rose-950 dark:border-rose-300',
+    swatchClass: 'bg-rose-700 border-rose-900 dark:bg-rose-400 dark:border-rose-300'
+  }
+];
+
+// A gate with no dossier, and any status this list does not know, reads as unsigned.
+const GANTT_GATE_UNSIGNED_TONE = GANTT_GATE_TONES.find((tone) => tone.status === 'Pending');
+
+function ganttGateTone(status) {
+  return GANTT_GATE_TONES.find((tone) => tone.status === status) || GANTT_GATE_UNSIGNED_TONE;
+}
+
+// The tone a stage bar is painted with. A row with several lines (a Compact Config
+// row spans both sides) takes its weakest line, so a combined bar is never more
+// optimistic than its worst line; with no line to judge, the gate is unsigned.
+function ganttStageGateTone(projGateLines, rowKeys, gateId) {
+  const keys = rowKeys || [];
+  if (keys.length === 0) return GANTT_GATE_UNSIGNED_TONE;
+  return keys.reduce((worst, key) => {
+    const tone = ganttGateTone(projGateLines?.[key]?.[gateId]?.status);
+    return GANTT_GATE_TONES.indexOf(tone) > GANTT_GATE_TONES.indexOf(worst) ? tone : worst;
+  }, GANTT_GATE_TONES[0]);
+}
 
 function parseIsoDate(iso) {
   const [y, m, d] = (iso || todayIso()).split('-').map(Number);
