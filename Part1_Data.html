@@ -3888,11 +3888,12 @@ function csvText(value) {
  *
  * The number is the highest suffix already in use + 1, so deleting a record can
  * never hand its ID to a new one (a reused ID would silently merge the new
- * record with stale gate/import references). The candidate is also checked
- * against the full ID set to catch suffixes the numeric scan cannot see
- * (e.g. `CI-12B`).
+ * record with stale gate/import references). A persisted high-water mark keeps
+ * the number even after the record itself is deleted; the numeric scan is only
+ * its floor. The candidate is also checked against the full ID set to catch
+ * suffixes the numeric scan cannot see (e.g. `CI-12B`).
  */
-function nextId(prefix, items) {
+function nextId(prefix, items, maxSeen) {
   const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(`^${escaped}(\\d+)$`);
   const used = new Set(
@@ -3905,13 +3906,26 @@ function nextId(prefix, items) {
     const match = id.match(pattern);
     if (match) highest = Math.max(highest, Number(match[1]));
   });
-  let seq = highest + 1;
+  let seq = Math.max(maxSeen || 0, highest) + 1;
   let candidate = `${prefix}${String(seq).padStart(2, '0')}`;
   while (used.has(candidate)) {
     seq += 1;
     candidate = `${prefix}${String(seq).padStart(2, '0')}`;
   }
   return candidate;
+}
+
+/**
+ * Returns a new counter map with `prefix` raised to at least `number`. Callers
+ * invoke it in the same handler that adds the record, so a later deletion cannot
+ * hand that number to a new record. Existing keys and the input are untouched.
+ */
+function withIdCounter(counters, prefix, number) {
+  const current = counters && typeof counters === 'object' ? counters : {};
+  return {
+    ...current,
+    [prefix]: Math.max(current[prefix] || 0, number)
+  };
 }
 
 /**
@@ -3962,7 +3976,8 @@ const PAYLOAD_SLICE_LABELS = {
   costProjects: 'Cost initiatives',
   customerFeedback: 'Customer feedback',
   scheduleOverrides: 'Schedule overrides',
-  teamMembers: 'Team members'
+  teamMembers: 'Team members',
+  idCounters: 'ID counters'
 };
 
 function payloadRecordLabel(slice, key, item) {

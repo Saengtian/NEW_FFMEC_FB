@@ -43,6 +43,7 @@ const SLICE_TYPES = {
   customerFeedback: "array",
   scheduleOverrides: "object",
   teamMembers: "array",
+  idCounters: "object",
 };
 
 const problems = [];

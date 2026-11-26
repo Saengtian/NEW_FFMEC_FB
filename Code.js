@@ -72,7 +72,8 @@ const PERSISTED_SLICES = [
   'costProjects',
   'customerFeedback',
   'scheduleOverrides',
-  'teamMembers'
+  'teamMembers',
+  'idCounters'
 ];
 
 /**

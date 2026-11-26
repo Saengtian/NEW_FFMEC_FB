@@ -1645,20 +1645,23 @@ function NewProjectModal({ onClose, onSubmit }) {
 /**
  * Next unused ME## config for a project line. Deriving it from the row count
  * reused a deleted line's config, and a config+side pair is the row's identity.
+ * `maxSeen` is that project's persisted high-water mark, so a deleted line's
+ * number is never issued again.
  */
-function nextBuildMatrixConfig(project) {
+function nextBuildMatrixConfig(project, maxSeen) {
   const side = getSideList(project?.side || 'RHS & LHS')[0] || 'RHS';
   const usedKeys = new Set(
     (project?.buildMatrix || []).map(
       (row) => `${String(row.config || '').toUpperCase()}-${row.side || 'RHS'}`
     )
   );
-  let configNo = 11 + (project?.buildMatrix?.length || 0);
+  // Configs start at ME11; maxSeen is the last number issued, not the next one.
+  let configNo = Math.max(11, (maxSeen || 0) + 1);
   while (usedKeys.has(`ME${configNo}-${side}`)) configNo += 1;
   return `ME${configNo}`;
 }
 
-function BuildMatrixRowModal({ project, initialRow = null, onClose, onSubmit }) {
+function BuildMatrixRowModal({ project, initialRow = null, maxSeen = 0, onClose, onSubmit }) {
   const isEditing = Boolean(initialRow);
   const availableSides = getSideList(project?.side || 'RHS & LHS');
   const [form, setForm] = useState(() =>
@@ -1680,7 +1683,7 @@ function BuildMatrixRowModal({ project, initialRow = null, onClose, onSubmit }) 
           fatpMih: initialRow.fatpMih || project?.mihDate || ''
         }
       : {
-          config: nextBuildMatrixConfig(project),
+          config: nextBuildMatrixConfig(project, maxSeen),
           side: availableSides[0] || 'RHS',
           apnRev: '610-00873-03 / Rev.02',
           code7E: `7E-${project?.model || 'X4151'}R-15`,
