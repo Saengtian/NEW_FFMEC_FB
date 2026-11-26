@@ -42,6 +42,7 @@ const SLICE_TYPES = {
   costProjects: "array",
   customerFeedback: "array",
   scheduleOverrides: "object",
+  teamMembers: "array",
 };
 
 const problems = [];

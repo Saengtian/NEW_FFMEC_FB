@@ -1003,6 +1003,122 @@ const PROCESS_STEPS = [
 ];
 
 // Tasks & AIL categories — every action item carries one of these.
+// ============================================================================
+// TEAM, PRODUCT ASSIGNMENT & WORKLOAD
+// ============================================================================
+
+// Roles as the PEN-81-0002 org chart uses them. The order is also how a member
+// list reads: management first, then the functions that support the build.
+const TEAM_ROLES = [
+  'Engineering Manager',
+  'Program Leader · Head-section',
+  'Program Leader',
+  'Engineering · Head-section',
+  'NPI Engineer',
+  'Quality Manager',
+  'QNPI',
+  'IPQC',
+  'IQC/SQE',
+  'Production',
+  'Maintenance'
+];
+
+// Seeded from the plant's team sheet: who reports to whom, and which products each
+// person carries. Emails are deliberately blank — they are typed in once, by the
+// owner, rather than invented here. `reportsTo` holds a member id, so renaming a
+// manager never breaks the chain.
+const INITIAL_TEAM_MEMBERS = [
+  { id: 'TM-01', name: 'Horikawa', role: 'Engineering Manager', reportsTo: '', email: '', products: [] },
+  { id: 'TM-02', name: 'Saengtian', role: 'Program Leader · Head-section', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-03', name: 'Piyasak', role: 'Program Leader', reportsTo: 'TM-02', email: '', products: ['MB14"'] },
+  { id: 'TM-04', name: 'Touchakorn', role: 'Program Leader', reportsTo: 'TM-02', email: '', products: ['MB16"'] },
+  { id: 'TM-05', name: 'Umarporn', role: 'Program Leader', reportsTo: 'TM-02', email: '', products: ['Desktop'] },
+  { id: 'TM-06', name: 'Teradech', role: 'Engineering · Head-section', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-07', name: 'Chanoknan', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: ['X3083', 'X4152'] },
+  { id: 'TM-08', name: 'Nuengruthai', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: ['X3083', 'X4152'] },
+  { id: 'TM-09', name: 'Phatita', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: ['X3439'] },
+  { id: 'TM-10', name: 'Kanpitcha', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: ['X3721'] },
+  { id: 'TM-11', name: 'Rungnapa', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: ['X3784', 'X2689'] },
+  { id: 'TM-12', name: 'Patcharapong', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: ['X3082', 'X4151', 'X4026'] },
+  { id: 'TM-13', name: 'Ronilo', role: 'Quality Manager', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-14', name: 'Panida', role: 'Quality Manager', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-15', name: 'Anakepong', role: 'QNPI', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-16', name: 'Panthong', role: 'QNPI', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-17', name: 'Sasiwimon', role: 'IPQC', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-18', name: 'Arrisara', role: 'IPQC', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-19', name: 'Phatharachai', role: 'IQC/SQE', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-20', name: 'Suwannee', role: 'Production', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-21', name: 'Narut', role: 'Maintenance', reportsTo: 'TM-01', email: '', products: [] }
+];
+
+/**
+ * A member's workload, derived from the workspace instead of typed in, so the
+ * number cannot drift from the plan: the Config × Side lines behind their
+ * products, the open tasks on those programs, and the gate dossiers still
+ * waiting for their signature. A member with no product assigned (a manager,
+ * QC or support function) is measured across the whole portfolio. Approver
+ * names can list several people (`Horikawa / Saengtian`), so each part is
+ * matched separately.
+ *
+ * The records themselves come back with the counts, so the board can open what
+ * it is counting: `openTasks` carries enough to open the task drawer and
+ * `signOffs` the program/line/gate the dossier lives on.
+ */
+function computeTeamWorkload(member, projects, tasks, gateRecords) {
+  const gateOf = (gateId) => {
+    const gate = NPI_GATES.find((g) => g.id === gateId);
+    return { gateCode: gate?.code || '', gateShort: gate?.short || String(gateId || '') };
+  };
+  const products = (member?.products || [])
+    .map((product) => String(product || '').trim().toLowerCase())
+    .filter(Boolean);
+  const scopedProjects = products.length
+    ? projects.filter((project) => products.includes(String(project.model || '').trim().toLowerCase()))
+    : projects;
+  const projectById = new Map(scopedProjects.map((project) => [project.id, project]));
+  const lines = scopedProjects.reduce((sum, project) => sum + (project.buildMatrix || []).length, 0);
+
+  const openTasks = tasks
+    .filter((task) => projectById.has(task.projectId) && task.status !== 'Done')
+    .map((task) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      dueDate: task.dueDate,
+      projectId: task.projectId,
+      gateId: task.gateId,
+      projectModel: projectById.get(task.projectId).model,
+      ...gateOf(task.gateId)
+    }));
+
+  const name = String(member?.name || '').trim().toLowerCase();
+  const signOffs = [];
+  projectById.forEach((project, projectId) => {
+    Object.entries(gateRecords[projectId] || {}).forEach(([lineKey, lineGates]) => {
+      Object.entries(lineGates || {}).forEach(([gateId, dossier]) => {
+        const approvers = Array.isArray(dossier?.approvers) ? dossier.approvers : [];
+        approvers.forEach((approver) => {
+          if (approver?.decision === 'Approved' || approver?.decision === 'Conditional') return;
+          const named = String(approver?.name || '')
+            .split('/')
+            .map((part) => part.trim().toLowerCase());
+          if (!name || !named.includes(name)) return;
+          signOffs.push({
+            projectId,
+            projectModel: project.model,
+            lineKey,
+            gateId,
+            decision: approver.decision || 'Pending',
+            ...gateOf(gateId)
+          });
+        });
+      });
+    });
+  });
+
+  return { lines, openTasks, signOffs, load: openTasks.length + signOffs.length };
+}
+
 const TASK_CATEGORIES = ['Yield and Scrap', 'Cost reduction', 'Customer feedback', 'DOE'];
 
 // Items logged before the category field existed stay "Uncategorised" until someone sets them.
@@ -1737,16 +1853,25 @@ function ganttGateTone(status) {
   return GANTT_GATE_TONES.find((tone) => tone.status === status) || GANTT_GATE_UNSIGNED_TONE;
 }
 
-// The tone a stage bar is painted with. A row with several lines (a Compact Config
-// row spans both sides) takes its weakest line, so a combined bar is never more
-// optimistic than its worst line; with no line to judge, the gate is unsigned.
-function ganttStageGateTone(projGateLines, rowKeys, gateId) {
+// The tone a stage bar is painted with, and the line that tone came from. A row
+// with several lines (a Compact Config row spans both sides) takes its weakest
+// line, so a combined bar is never more optimistic than its worst line; that same
+// line is the one a click opens, otherwise the bar and its dossier disagree. With
+// no line to judge, the gate is unsigned. `differs` reports that the row's lines
+// disagree, so a tooltip can name the line that decided the colour.
+function ganttStageGateDriver(projGateLines, rowKeys, gateId) {
   const keys = rowKeys || [];
-  if (keys.length === 0) return GANTT_GATE_UNSIGNED_TONE;
-  return keys.reduce((worst, key) => {
-    const tone = ganttGateTone(projGateLines?.[key]?.[gateId]?.status);
-    return GANTT_GATE_TONES.indexOf(tone) > GANTT_GATE_TONES.indexOf(worst) ? tone : worst;
-  }, GANTT_GATE_TONES[0]);
+  if (keys.length === 0) return { tone: GANTT_GATE_UNSIGNED_TONE, lineKey: null, differs: false };
+  const tones = keys.map((key) => ganttGateTone(projGateLines?.[key]?.[gateId]?.status));
+  let worst = 0;
+  tones.forEach((tone, idx) => {
+    if (GANTT_GATE_TONES.indexOf(tone) > GANTT_GATE_TONES.indexOf(tones[worst])) worst = idx;
+  });
+  return {
+    tone: tones[worst],
+    lineKey: keys[worst],
+    differs: new Set(tones.map((tone) => tone.status)).size > 1
+  };
 }
 
 function parseIsoDate(iso) {
@@ -1801,6 +1926,42 @@ function getDefaultScheduleForRow(project, row) {
     mih,
     pbr
   };
+}
+
+/**
+ * Why a stage's proposed dates cannot be the plan, or null when they can. A stage
+ * may move, but not out of order: it cannot begin before the stage it follows has
+ * finished, cannot finish after the stage that follows it has begun, and cannot
+ * run past the line's FATP MIH. Bar dates are inclusive, so a stage starts at
+ * least the day after its predecessor ends. The board refuses the drop instead of
+ * writing a schedule the build could never run.
+ */
+function stageMoveConflict(schedule, stageId) {
+  const idx = GANTT_STAGES.findIndex((stage) => stage.id === stageId);
+  if (idx < 0) return null;
+  const stage = GANTT_STAGES[idx];
+  const startIso = schedule?.[stage.startKey];
+  const endIso = schedule?.[stage.endKey];
+  if (!startIso || !endIso) return null;
+
+  const previous = GANTT_STAGES[idx - 1];
+  const previousEnd = previous ? schedule[previous.endKey] : null;
+  if (previousEnd && diffDaysIso(previousEnd, startIso) < 1) {
+    return { stageId, kind: 'before-previous', stage, other: previous, limitIso: previousEnd };
+  }
+
+  const next = GANTT_STAGES[idx + 1];
+  const nextStart = next ? schedule[next.startKey] : null;
+  if (nextStart && diffDaysIso(endIso, nextStart) < 1) {
+    return { stageId, kind: 'after-next', stage, other: next, limitIso: nextStart };
+  }
+
+  const mih = schedule?.mih;
+  if (mih && diffDaysIso(mih, endIso) > 0) {
+    return { stageId, kind: 'after-mih', stage, other: null, limitIso: mih };
+  }
+
+  return null;
 }
 
 function getLineReadinessInfo(lineGates = {}) {
@@ -3250,7 +3411,8 @@ const PAYLOAD_SLICE_LABELS = {
   cpkRecords: 'Cpk measurements',
   costProjects: 'Cost initiatives',
   customerFeedback: 'Customer feedback',
-  scheduleOverrides: 'Schedule overrides'
+  scheduleOverrides: 'Schedule overrides',
+  teamMembers: 'Team members'
 };
 
 function payloadRecordLabel(slice, key, item) {
@@ -3262,6 +3424,7 @@ function payloadRecordLabel(slice, key, item) {
     if (slice === 'customerFeedback') {
       return `${item.id || key} · ${item.model || ''} · ${item.issueItem || ''}`.trim();
     }
+    if (slice === 'teamMembers') return `${item.id || key} · ${item.name || ''}`.trim();
     if (item.id) return String(item.id);
   }
   return String(key);
@@ -3836,37 +3999,10 @@ function createSingleGateDossier(project, gate, variant, initialStatus, leaderNa
     },
   ];
 
-  // Evidence is append-only: the Google Drive links that back a gate decision stay
-  // attached to the dossier (and its audit trail) for later retrieval.
-  const evidenceFolder = `https://drive.google.com/drive/folders/1FFM-PEN81-${project.id.replace('PRJ-', '')}-${variant.key}-${gate.code}`;
-  const baseEvidence = isPast
-    ? [
-        {
-          id: `${project.id}-${variant.key}-${gate.id}-ev1`,
-          label: `${gate.code} ${gate.short} · signed gate pack (PDF)`,
-          url: `https://drive.google.com/file/d/1${project.id.replace('PRJ-', '')}${gate.code}RevB/view`,
-          addedBy: roster.em.options[0],
-          addedAt: '2026-11-20 15:00'
-        },
-        {
-          id: `${project.id}-${variant.key}-${gate.id}-ev2`,
-          label: `${gate.code} ${gate.short} · build matrix & MO SPP evidence`,
-          url: evidenceFolder,
-          addedBy: roster.qa.options[0],
-          addedAt: '2026-11-20 15:05'
-        }
-      ]
-    : isActive
-    ? [
-        {
-          id: `${project.id}-${variant.key}-${gate.id}-ev1`,
-          label: `${gate.code} ${gate.short} · gate evidence (in progress)`,
-          url: evidenceFolder,
-          addedBy: roster.em.options[0],
-          addedAt: '2026-11-21 09:20'
-        }
-      ]
-    : [];
+  // Evidence is append-only and hand-attached: a dossier is seeded with no Drive
+  // links, because an invented folder or file id opens a 404 instead of the data.
+  // Reviewers attach the real link in the sign-off centre, and it stays with the
+  // dossier (and its audit trail) from then on.
 
   const gateIdx = NPI_GATES.findIndex((g) => g.id === gate.id);
   return {
@@ -3875,7 +4011,7 @@ function createSingleGateDossier(project, gate, variant, initialStatus, leaderNa
     targetDate: customOverride.targetDate || `2026-12-${String(Math.min(28, 2 + gateIdx * 3)).padStart(2, '0')}`,
     criteria: customOverride.criteria || baseCriteria,
     approvers: customOverride.approvers || baseApprovers,
-    evidence: customOverride.evidence || baseEvidence,
+    evidence: customOverride.evidence || [],
     auditLog:
       customOverride.auditLog ||
       (isPast
@@ -3889,6 +4025,44 @@ function createSingleGateDossier(project, gate, variant, initialStatus, leaderNa
           ]
         : [])
   };
+}
+
+/**
+ * Drive links on a gate dossier are evidence someone attached by hand, so only a
+ * real https:// URL is worth showing. Seeds written before links were attached
+ * by hand carried placeholder ids (…/folders/1FFM-PEN81-… and
+ * …/file/d/1<project><gate>RevB) that Google answers with 404, so they are
+ * recognised here and dropped instead of being rendered as clickable dead ends.
+ */
+const PLACEHOLDER_EVIDENCE_URL = /^https?:\/\/drive\.google\.com\/(?:drive\/folders\/1FFM-|file\/d\/[^/]+RevB\/view)/;
+
+function isOpenableEvidenceUrl(url) {
+  const value = String(url || '').trim();
+  return /^https?:\/\//i.test(value) && !PLACEHOLDER_EVIDENCE_URL.test(value);
+}
+
+/** Drop placeholder Drive links from stored gate dossiers; returns the count. */
+function purgePlaceholderEvidence(gateRecords) {
+  let removed = 0;
+  const records = {};
+  Object.entries(gateRecords || {}).forEach(([projectId, lines]) => {
+    records[projectId] = {};
+    Object.entries(lines || {}).forEach(([lineKey, gates]) => {
+      records[projectId][lineKey] = {};
+      Object.entries(gates || {}).forEach(([gateId, dossier]) => {
+        if (!dossier) return;
+        const evidence = Array.isArray(dossier.evidence) ? dossier.evidence : null;
+        const kept = evidence ? evidence.filter((ev) => isOpenableEvidenceUrl(ev && ev.url)) : null;
+        if (!kept || kept.length === evidence.length) {
+          records[projectId][lineKey][gateId] = dossier;
+          return;
+        }
+        removed += evidence.length - kept.length;
+        records[projectId][lineKey][gateId] = { ...dossier, evidence: kept };
+      });
+    });
+  });
+  return { records, removed };
 }
 
 function createInitialGateRecords() {

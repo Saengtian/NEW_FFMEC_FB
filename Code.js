@@ -46,7 +46,8 @@ const PERSISTED_SLICES = [
   'cpkRecords',
   'costProjects',
   'customerFeedback',
-  'scheduleOverrides'
+  'scheduleOverrides',
+  'teamMembers'
 ];
 
 /**

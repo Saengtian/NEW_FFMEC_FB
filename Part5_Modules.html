@@ -3622,4 +3622,648 @@ function KpiDeepDiveModal({
   );
 }
 
+// ============================================================================
+// VIEW 10: TEAM MEMBERS, PRODUCT ASSIGNMENT & WORKLOAD (CRUD)
+// ============================================================================
+
+function TeamMembersView({ members, projects, tasks, gateRecords, onOpenNew, onEdit, onDelete, onOpenTask, onOpenGate }) {
+  const [search, setSearch] = useState('');
+  const [roleFilter, setRoleFilter] = useState('ALL');
+  const [productFilter, setProductFilter] = useState('ALL');
+  // What the workload column is currently showing the records behind.
+  const [drilldown, setDrilldown] = useState(null);
+
+  // Roles actually held, in roster order — a filter never offers an empty option.
+  const roleOptions = useMemo(
+    () => Array.from(new Set(members.map((member) => member.role).filter(Boolean))),
+    [members]
+  );
+
+  const productOptions = useMemo(() => {
+    const set = new Set();
+    members.forEach((member) => (member.products || []).forEach((product) => set.add(product)));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [members]);
+
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return members
+      .filter((member) => roleFilter === 'ALL' || member.role === roleFilter)
+      .filter((member) => productFilter === 'ALL' || (member.products || []).includes(productFilter))
+      .filter((member) => {
+        if (!q) return true;
+        return [member.name, member.role, member.email, (member.products || []).join(', ')].some((value) =>
+          String(value || '').toLowerCase().includes(q)
+        );
+      })
+      // Load walks every gate dossier, so it is only computed for visible members.
+      .map((member) => ({ member, workload: computeTeamWorkload(member, projects, tasks, gateRecords) }));
+  }, [members, projects, tasks, gateRecords, search, roleFilter, productFilter]);
+
+  const nameById = useMemo(() => {
+    const map = {};
+    members.forEach((member) => {
+      map[member.id] = member.name;
+    });
+    return map;
+  }, [members]);
+
+  const summary = useMemo(() => {
+    const covered = new Set();
+    let totalLoad = 0;
+    let unassigned = 0;
+    let withoutEmail = 0;
+    rows.forEach(({ member, workload }) => {
+      (member.products || []).forEach((product) => covered.add(product));
+      totalLoad += workload.load;
+      if ((member.products || []).length === 0) unassigned += 1;
+      if (!String(member.email || '').trim()) withoutEmail += 1;
+    });
+    return { products: covered.size, totalLoad, unassigned, withoutEmail };
+  }, [rows]);
+
+  const maxLoad = useMemo(() => Math.max(1, ...rows.map((row) => row.workload.load)), [rows]);
+
+  const selectClass =
+    'px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:border-blue-500';
+
+  return (
+    <div className="space-y-5">
+      {/* Team KPI strip: directory size, product cover and what is still missing */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Team Members</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums">
+            {rows.length}
+            <span className="text-xs font-normal text-slate-400 dark:text-slate-400"> / {members.length}</span>
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+            {summary.unassigned} without a product assignment
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Products Covered</div>
+          <div className="text-2xl font-bold text-blue-700 dark:text-blue-300 tabular-nums">
+            {summary.products}
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+            {productOptions.length} distinct products on file
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Open Workload</div>
+          <div className="text-2xl font-bold text-amber-700 dark:text-amber-300 tabular-nums">
+            {summary.totalLoad}
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+            open tasks + signatures still owed
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Email on File</div>
+          <div
+            className={`text-2xl font-bold tabular-nums ${
+              summary.withoutEmail > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-700 dark:text-emerald-300'
+            }`}
+          >
+            {rows.length - summary.withoutEmail}
+            <span className="text-xs font-normal text-slate-400 dark:text-slate-400"> / {rows.length}</span>
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+            {summary.withoutEmail > 0 ? `${summary.withoutEmail} member(s) still need an address` : 'Everyone reachable'}
+          </div>
+        </div>
+      </div>
+
+      <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+        {/* Toolbar: search, role, product, add */}
+        <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center gap-2 justify-between">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-400 dark:text-slate-500" />
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Name, role, email or product"
+                className="pl-8 pr-2.5 py-1.5 w-56 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} className={selectClass}>
+              <option value="ALL">All roles</option>
+              {roleOptions.map((role) => (
+                <option key={role} value={role}>
+                  {role}
+                </option>
+              ))}
+            </select>
+            <select
+              value={productFilter}
+              onChange={(e) => setProductFilter(e.target.value)}
+              className={selectClass}
+            >
+              <option value="ALL">All products</option>
+              {productOptions.map((product) => (
+                <option key={product} value={product}>
+                  {product}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <button
+            type="button"
+            onClick={onOpenNew}
+            className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Add member</span>
+          </button>
+        </div>
+
+        {rows.length === 0 ? (
+          <div className="p-8 text-center text-xs text-slate-400 dark:text-slate-400">
+            No team member matches this filter.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800/60 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                <tr>
+                  <th className="px-4 py-2 font-bold">Member</th>
+                  <th className="px-3 py-2 font-bold">Role</th>
+                  <th className="px-3 py-2 font-bold">Reports to</th>
+                  <th className="px-3 py-2 font-bold">Products</th>
+                  <th className="px-3 py-2 font-bold">Workload</th>
+                  <th className="px-3 py-2 font-bold text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {rows.map(({ member, workload }) => (
+                  <tr key={member.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/60 transition-colors">
+                    <td className="px-4 py-2.5">
+                      <div className="font-bold text-slate-900 dark:text-slate-100">{member.name}</div>
+                      {String(member.email || '').trim() ? (
+                        <a
+                          href={`mailto:${member.email}`}
+                          className="text-[10px] text-blue-700 dark:text-blue-300 hover:underline inline-flex items-center gap-1"
+                        >
+                          <Mail className="w-3 h-3" />
+                          {member.email}
+                        </a>
+                      ) : (
+                        <span className="text-[10px] text-slate-400 dark:text-slate-500">No email on file</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300">{member.role}</td>
+                    <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300">
+                      {nameById[member.reportsTo] || '—'}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {(member.products || []).length === 0 ? (
+                        <span className="text-slate-400 dark:text-slate-500">Portfolio-wide</span>
+                      ) : (
+                        <span className="flex flex-wrap gap-1">
+                          {(member.products || []).map((product) => (
+                            <span
+                              key={product}
+                              className="px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[10px] font-semibold text-slate-700 dark:text-slate-200"
+                            >
+                              {product}
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 min-w-[190px]">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setDrilldown({ member, workload, focus: 'tasks' })}
+                          title={`Open ${member.name}'s workload`}
+                          aria-label={`Open ${member.name}'s workload`}
+                          className="w-8 text-right font-bold tabular-nums text-slate-900 dark:text-slate-100 hover:text-blue-700 dark:hover:text-blue-300 hover:underline"
+                        >
+                          {workload.load}
+                        </button>
+                        <div className="flex-1 h-2 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                          <div
+                            className={`h-full ${
+                              workload.load >= maxLoad && workload.load > 0
+                                ? 'bg-amber-500'
+                                : 'bg-blue-500 dark:bg-blue-600'
+                            }`}
+                            style={{ width: `${Math.max(2, (workload.load / maxLoad) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+                      <div className="text-[10px] text-slate-500 dark:text-slate-400 tabular-nums mt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => setDrilldown({ member, workload, focus: 'tasks' })}
+                          title={`Show ${member.name}'s open tasks`}
+                          className="hover:text-blue-700 dark:hover:text-blue-300 hover:underline"
+                        >
+                          {workload.openTasks.length} open task{workload.openTasks.length === 1 ? '' : 's'}
+                        </button>
+                        {' · '}
+                        <button
+                          type="button"
+                          onClick={() => setDrilldown({ member, workload, focus: 'signOffs' })}
+                          title={`Show the dossiers waiting for ${member.name}'s signature`}
+                          className="hover:text-blue-700 dark:hover:text-blue-300 hover:underline"
+                        >
+                          {workload.signOffs.length} signature{workload.signOffs.length === 1 ? '' : 's'} owed
+                        </button>
+                        {` · ${workload.lines} line${workload.lines === 1 ? '' : 's'}`}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onEdit(member)}
+                          title={`Edit ${member.name}`}
+                          aria-label={`Edit ${member.name}`}
+                          className="p-1.5 rounded-md text-slate-400 dark:text-slate-400 hover:text-blue-700 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950 transition-colors"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onDelete(member)}
+                          title={`Remove ${member.name}`}
+                          aria-label={`Remove ${member.name}`}
+                          className="p-1.5 rounded-md text-slate-400 dark:text-slate-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="px-4 py-2.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 text-[10px] text-slate-500 dark:text-slate-400">
+          Workload is derived from the plan: open tasks on the member's products plus the gate signatures still
+          owed. A member with no product is measured across the portfolio. Click a count to see the records behind it.
+        </div>
+      </section>
+
+      {drilldown && (
+        <TeamWorkloadDrawer
+          member={drilldown.member}
+          workload={drilldown.workload}
+          focus={drilldown.focus}
+          onClose={() => setDrilldown(null)}
+          onOpenTask={(taskId) => {
+            setDrilldown(null);
+            onOpenTask(taskId);
+          }}
+          onOpenGate={(projectId, lineKey, gateId) => {
+            setDrilldown(null);
+            onOpenGate(projectId, lineKey, gateId);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The records behind one member's workload: the open tasks on their products and
+ * the gate dossiers still missing their signature. Each row opens the thing it
+ * names — the task drawer, or the gate at the dossier's own program and line.
+ */
+function TeamWorkloadDrawer({ member, workload, focus, onClose, onOpenTask, onOpenGate }) {
+  const [tab, setTab] = useState(focus === 'signOffs' ? 'signOffs' : 'tasks');
+  const tabs = [
+    { id: 'tasks', label: 'Open tasks', count: workload.openTasks.length },
+    { id: 'signOffs', label: 'Signatures owed', count: workload.signOffs.length }
+  ];
+  const items = tab === 'tasks' ? workload.openTasks : workload.signOffs;
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/40 backdrop-blur-[1px]">
+      <div className="w-full max-w-lg bg-white dark:bg-slate-900 h-full shadow-2xl border-l border-slate-200 dark:border-slate-800 flex flex-col">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">{member.name}</h3>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+              {member.role} · {workload.load} open item{workload.load === 1 ? '' : 's'} across{' '}
+              {workload.lines} line{workload.lines === 1 ? '' : 's'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="p-1.5 rounded-lg text-slate-400 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-5 pt-3 flex flex-wrap items-center gap-1.5">
+          {tabs.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setTab(item.id)}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${
+                tab === item.id
+                  ? 'bg-slate-900 dark:bg-slate-700 text-white border-slate-900 dark:border-slate-700'
+                  : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
+            >
+              {item.label} ({item.count})
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-3 space-y-2 text-xs">
+          {items.length === 0 ? (
+            <p className="py-8 text-center text-slate-400 dark:text-slate-500">
+              {tab === 'tasks'
+                ? 'No open tasks on this member’s programs.'
+                : 'No signatures outstanding on this member’s programs.'}
+            </p>
+          ) : (
+            items.map((item, index) =>
+              tab === 'tasks' ? (
+                <button
+                  key={`${item.id}-${index}`}
+                  type="button"
+                  onClick={() => onOpenTask(item.id)}
+                  className="w-full text-left p-3 rounded-lg border border-slate-200 dark:border-slate-800 hover:border-blue-300 dark:hover:border-blue-800 hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors flex items-start gap-2"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400">
+                      {item.id} · {item.projectModel}
+                      {item.gateCode ? ` · ${item.gateCode} ${item.gateShort}` : ''}
+                    </div>
+                    <div className="font-semibold text-slate-800 dark:text-slate-100 leading-snug mt-0.5">
+                      {item.title}
+                    </div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                      Due {item.dueDate || '—'}
+                    </div>
+                  </div>
+                  <StatusBadge status={item.status} />
+                  <ChevronRight className="w-3.5 h-3.5 shrink-0 text-slate-300 dark:text-slate-600" />
+                </button>
+              ) : (
+                <button
+                  key={`${item.projectId}-${item.lineKey}-${item.gateId}-${index}`}
+                  type="button"
+                  onClick={() => onOpenGate(item.projectId, item.lineKey, item.gateId)}
+                  className="w-full text-left p-3 rounded-lg border border-slate-200 dark:border-slate-800 hover:border-blue-300 dark:hover:border-blue-800 hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors flex items-start gap-2"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400">
+                      {item.projectModel} · {item.lineKey}
+                    </div>
+                    <div className="font-semibold text-slate-800 dark:text-slate-100 leading-snug mt-0.5">
+                      {item.gateCode} {item.gateShort}
+                    </div>
+                    <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                      {item.decision === 'Rejected' ? 'Rejected — must be re-signed' : 'Awaiting the signature'}
+                    </div>
+                  </div>
+                  <StatusBadge status={item.decision} />
+                  <ChevronRight className="w-3.5 h-3.5 shrink-0 text-slate-300 dark:text-slate-600" />
+                </button>
+              )
+            )
+          )}
+        </div>
+
+        <div className="px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 text-[10px] text-slate-500 dark:text-slate-400">
+          Counted from the live plan, never stored on the member. A member with no product assignment is measured
+          across the whole portfolio.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TeamMemberModal({ member, members, onClose, onSubmit }) {
+  const [form, setForm] = useState(() => ({
+    name: member?.name || '',
+    role: member?.role || TEAM_ROLES[0],
+    reportsTo: member?.reportsTo || '',
+    email: member?.email || '',
+    products: (member?.products || []).join(', ')
+  }));
+  const [error, setError] = useState('');
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    const name = form.name.trim();
+    if (!name) {
+      setError('Enter the member name.');
+      return;
+    }
+    const email = form.email.trim();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setError('Enter a full email address, e.g. name@minebea.co.th');
+      return;
+    }
+    onSubmit({
+      name,
+      role: form.role,
+      reportsTo: form.reportsTo,
+      email,
+      products: form.products
+        .split(',')
+        .map((product) => product.trim())
+        .filter(Boolean)
+    });
+  };
+
+  const managerOptions = members.filter((m) => !member || m.id !== member.id);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-lg bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs"
+      >
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+              {member ? `Edit ${member.name}` : 'Add Team Member'}
+            </h3>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+              Who is on the program, which products they carry and how to reach them.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-400"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-3.5">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Name</label>
+              <input
+                type="text"
+                required
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="e.g. Patcharapong"
+                className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Role</label>
+              <select
+                value={form.role}
+                onChange={(e) => setForm({ ...form, role: e.target.value })}
+                className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 focus:outline-none focus:border-blue-500"
+              >
+                {TEAM_ROLES.map((role) => (
+                  <option key={role} value={role}>
+                    {role}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Email</label>
+              <input
+                type="email"
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                placeholder="name@minebea.co.th"
+                className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Reports to</label>
+              <select
+                value={form.reportsTo}
+                onChange={(e) => setForm({ ...form, reportsTo: e.target.value })}
+                className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 focus:outline-none focus:border-blue-500"
+              >
+                <option value="">— None —</option>
+                {managerOptions.map((manager) => (
+                  <option key={manager.id} value={manager.id}>
+                    {manager.name} · {manager.role}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+              Product assignment
+            </label>
+            <input
+              type="text"
+              value={form.products}
+              onChange={(e) => setForm({ ...form, products: e.target.value })}
+              placeholder='X4151, X4026, MB14"'
+              className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 focus:outline-none focus:border-blue-500"
+            />
+            <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
+              Comma separated model or product names. Leave empty for a portfolio-wide role — workload then counts
+              every program.
+            </p>
+          </div>
+
+          {error && <p className="text-[11px] font-semibold text-rose-600 dark:text-rose-400">{error}</p>}
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+          >
+            Cancel
+          </button>
+          <button type="submit" className="px-4 py-2 rounded-lg font-semibold bg-blue-600 text-white hover:bg-blue-700">
+            {member ? 'Save changes' : 'Add member'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function DeleteTeamMemberModal({ member, reports, workload, onClose, onConfirm }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Remove Team Member</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-400"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-3">
+          <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
+            Remove this member from the team directory? Their tasks, gate dossiers and audit trail stay exactly as
+            they are — this only removes the directory entry.
+          </p>
+          <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-800 space-y-1">
+            <div className="font-bold text-slate-900 dark:text-slate-100">
+              {member.name} · {member.role}
+            </div>
+            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+              {(member.products || []).join(', ') || 'Portfolio-wide'} · workload {workload.load} (
+              {workload.openTasks.length} open tasks, {workload.signOffs.length} signatures owed)
+            </div>
+            {reports.length > 0 && (
+              <div className="text-[11px] text-amber-700 dark:text-amber-300">
+                {reports.length} member{reports.length === 1 ? '' : 's'} report to them and move under — None —
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="px-4 py-2 rounded-lg font-semibold bg-rose-600 text-white hover:bg-rose-700"
+          >
+            Remove member
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 </script>

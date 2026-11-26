@@ -152,6 +152,7 @@ function App() {
   );
   const [costProjects, setCostProjects] = useState(INITIAL_COST_PROJECTS);
   const [customerFeedback, setCustomerFeedback] = useState(INITIAL_CUSTOMER_FEEDBACK);
+  const [teamMembers, setTeamMembers] = useState(INITIAL_TEAM_MEMBERS);
   const [selectedProjectId, setSelectedProjectId] = useState('PRJ-X4151');
   const [selectedGateId, setSelectedGateId] = useState('mbo');
   const [selectedLineKey, setSelectedLineKey] = useState('ME11-RHS');
@@ -186,6 +187,9 @@ function App() {
   const [newFeedbackModalOpen, setNewFeedbackModalOpen] = useState(false);
   const [editingFeedback, setEditingFeedback] = useState(null);
   const [deletingFeedback, setDeletingFeedback] = useState(null);
+  const [newTeamMemberModalOpen, setNewTeamMemberModalOpen] = useState(false);
+  const [editingTeamMember, setEditingTeamMember] = useState(null);
+  const [deletingTeamMember, setDeletingTeamMember] = useState(null);
   const [costImportDraft, setCostImportDraft] = useState(null);
   const [feedbackImportDraft, setFeedbackImportDraft] = useState(null);
   const [syncConflict, setSyncConflict] = useState(null);
@@ -250,17 +254,25 @@ function App() {
     cpkRecords,
     costProjects,
     customerFeedback,
+    teamMembers,
     scheduleOverrides
   });
 
   const hydrateFromPayload = (data) => {
-    if (!data || typeof data !== 'object') return 0;
+    if (!data || typeof data !== 'object') return null;
     let frozenLimits = 0;
+    let purgedEvidence = 0;
     isHydratingRef.current = true;
     try {
       if (Array.isArray(data.projects)) setProjects(data.projects);
       if (Array.isArray(data.tasks)) setTasks(data.tasks.map(normalizeTask));
-      if (data.gateRecords && typeof data.gateRecords === 'object') setGateRecords(data.gateRecords);
+      if (data.gateRecords && typeof data.gateRecords === 'object') {
+        // Stored dossiers can still carry Drive links the old seed invented, which
+        // open a 404. Drop them here so a save writes the cleaned dossiers back.
+        const purged = purgePlaceholderEvidence(data.gateRecords);
+        purgedEvidence = purged.removed;
+        setGateRecords(purged.records);
+      }
       if (Array.isArray(data.productionRecords)) setProductionRecords(data.productionRecords);
       if (Array.isArray(data.masterSpecs)) setMasterSpecs(data.masterSpecs);
       if (Array.isArray(data.cpkRecords)) {
@@ -276,6 +288,7 @@ function App() {
       }
       if (Array.isArray(data.costProjects)) setCostProjects(data.costProjects);
       if (Array.isArray(data.customerFeedback)) setCustomerFeedback(data.customerFeedback);
+      if (Array.isArray(data.teamMembers)) setTeamMembers(data.teamMembers);
       if (data.scheduleOverrides && typeof data.scheduleOverrides === 'object') setScheduleOverrides(data.scheduleOverrides);
     } catch (err) {
       console.error('hydrateFromPayload failed:', err);
@@ -286,7 +299,7 @@ function App() {
     setTimeout(() => {
       isHydratingRef.current = false;
     }, 150);
-    return frozenLimits;
+    return { frozenLimits, purgedEvidence };
   };
 
   // ---------------------------------------------------------------------------
@@ -525,9 +538,9 @@ function App() {
           return;
         }
         if (res && res.initialized && res.data) {
-          let frozenLimits = 0;
+          let backfill = { frozenLimits: 0, purgedEvidence: 0 };
           try {
-            frozenLimits = hydrateFromPayload(res.data) || 0;
+            backfill = hydrateFromPayload(res.data) || backfill;
           } catch (err) {
             console.error('hydrateFromPayload threw:', err);
             showToast('Failed to apply loaded data: ' + (err && err.message ? err.message : String(err)), 'error');
@@ -544,11 +557,16 @@ function App() {
             sheetUrl: res.sheetUrl || prev.sheetUrl,
             errorMsg: null
           }));
-          if (frozenLimits > 0) {
-            saveSchedulerRef.current.schedule([
-              `Froze measurement-time Cpk limits on ${frozenLimits} record(s)`
-            ]);
+          // A loaded copy that needed cleaning is saved back without waiting for
+          // an edit, so the next reader never sees the stale rows.
+          const backfillNotes = [];
+          if (backfill.frozenLimits > 0) {
+            backfillNotes.push(`Froze measurement-time Cpk limits on ${backfill.frozenLimits} record(s)`);
           }
+          if (backfill.purgedEvidence > 0) {
+            backfillNotes.push(`Removed ${backfill.purgedEvidence} placeholder Drive link(s)`);
+          }
+          if (backfillNotes.length > 0) saveSchedulerRef.current.schedule(backfillNotes);
           if (showNotice) showToast(`Reloaded workspace from Google Sheet (Rev #${res.revision || 1})`, 'success');
         } else {
           // First run on an empty Sheet: seed baseline data automatically
@@ -604,7 +622,7 @@ function App() {
     // user's revision is never overwritten by an autosave.
     if (syncConflictRef.current) return;
     saveSchedulerRef.current.schedule(['Auto-sync from FFM NPI Ops']);
-  }, [projects, tasks, gateRecords, productionRecords, masterSpecs, cpkRecords, costProjects, customerFeedback, scheduleOverrides]);
+  }, [projects, tasks, gateRecords, productionRecords, masterSpecs, cpkRecords, costProjects, customerFeedback, teamMembers, scheduleOverrides]);
 
   // A pending debounced save must not be lost when the page is closed or hidden
   useEffect(() => {
@@ -1323,6 +1341,34 @@ function App() {
     showToast(
       `Updated Gantt timeline for ${project.model} (${keys.length} ${keys.length === 1 ? 'line' : 'lines'})`
     );
+  };
+
+  // Team directory: who is on the program, what they own and how to reach them.
+  // Workload is derived at render time (computeTeamWorkload), never stored.
+  const handleSaveTeamMember = (form, memberId = null) => {
+    if (memberId) {
+      setTeamMembers((prev) => prev.map((m) => (m.id === memberId ? { ...m, ...form } : m)));
+      showToast(`Updated ${form.name}`);
+    } else {
+      const id = nextId('TM-', teamMembers);
+      setTeamMembers((prev) => [...prev, { ...form, id }]);
+      showToast(`Added ${form.name} to the team`);
+    }
+    setNewTeamMemberModalOpen(false);
+    setEditingTeamMember(null);
+  };
+
+  const handleDeleteTeamMember = (memberId) => {
+    const removed = teamMembers.find((m) => m.id === memberId);
+    if (!removed) return;
+    // Reports point at member ids: drop the link rather than leave a dangling manager.
+    setTeamMembers((prev) =>
+      prev
+        .filter((m) => m.id !== memberId)
+        .map((m) => (m.reportsTo === memberId ? { ...m, reportsTo: '' } : m))
+    );
+    setDeletingTeamMember(null);
+    showToast(`Removed ${removed.name} from the team`);
   };
 
   const handleCreateTask = (form) => {
@@ -2568,7 +2614,8 @@ function App() {
         (c) => c.nmbStatus === 'Open' || c.customerStatus === 'Open'
       ).length
     },
-    { id: 'production', label: 'Production Records', icon: Database }
+    { id: 'production', label: 'Production Records', icon: Database },
+    { id: 'team', label: 'Team & Workload', icon: Users }
   ];
 
   const viewTitles = {
@@ -2580,7 +2627,8 @@ function App() {
     cpk: 'Process Capability (Cpk) & Master Specifications',
     costs: 'FFM Projects & Cost Saving Portfolio (VA/VE · Yield · HC)',
     feedback: 'FFM Customer Feedback, FA & 8D FACA Tracker (Y2026)',
-    production: 'Production Records (Yield, UPH & Efficiency)'
+    production: 'Production Records (Yield, UPH & Efficiency)',
+    team: 'Team Members, Product Assignment & Workload'
   };
 
   return (
@@ -3130,6 +3178,20 @@ function App() {
                     onDeleteRecord={(rec) => setDeletingProdRecord(rec)}
                   />
                 );
+              case 'team':
+                return (
+                  <TeamMembersView
+                    members={teamMembers}
+                    projects={projects}
+                    tasks={tasks}
+                    gateRecords={gateRecords}
+                    onOpenNew={() => setNewTeamMemberModalOpen(true)}
+                    onEdit={(member) => setEditingTeamMember(member)}
+                    onDelete={(member) => setDeletingTeamMember(member)}
+                    onOpenTask={(taskId) => setActiveTaskDrawerId(taskId)}
+                    onOpenGate={(projectId, lineKey, gateId) => navigateToGate(projectId, gateId, lineKey)}
+                  />
+                );
               default:
                 return null;
             }
@@ -3342,6 +3404,30 @@ function App() {
           item={deletingFeedback}
           onClose={() => setDeletingFeedback(null)}
           onConfirm={() => handleDeleteFeedback(deletingFeedback)}
+        />
+      )}
+
+      {/* Create / Edit Team Member Modal */}
+      {(newTeamMemberModalOpen || editingTeamMember) && (
+        <TeamMemberModal
+          member={editingTeamMember}
+          members={teamMembers}
+          onClose={() => {
+            setNewTeamMemberModalOpen(false);
+            setEditingTeamMember(null);
+          }}
+          onSubmit={(form) => handleSaveTeamMember(form, editingTeamMember?.id || null)}
+        />
+      )}
+
+      {/* Delete Team Member Confirmation Modal */}
+      {deletingTeamMember && (
+        <DeleteTeamMemberModal
+          member={deletingTeamMember}
+          reports={teamMembers.filter((m) => m.reportsTo === deletingTeamMember.id)}
+          workload={computeTeamWorkload(deletingTeamMember, projects, tasks, gateRecords)}
+          onClose={() => setDeletingTeamMember(null)}
+          onConfirm={() => handleDeleteTeamMember(deletingTeamMember.id)}
         />
       )}
 

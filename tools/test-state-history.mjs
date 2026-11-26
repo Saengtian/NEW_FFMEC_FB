@@ -111,9 +111,10 @@ check("slices that are empty on both sides are omitted", () => {
 });
 
 check("every persisted slice has a human label", () => {
-  eq(Object.keys(api.PAYLOAD_SLICE_LABELS).length, 9);
+  eq(Object.keys(api.PAYLOAD_SLICE_LABELS).length, 10);
   eq(api.PAYLOAD_SLICE_LABELS.masterSpecs, 'Master specs');
   eq(api.PAYLOAD_SLICE_LABELS.scheduleOverrides, 'Schedule overrides');
+  eq(api.PAYLOAD_SLICE_LABELS.teamMembers, 'Team members');
 });
 
 check("pruning drops only the oldest revisions", () => {
