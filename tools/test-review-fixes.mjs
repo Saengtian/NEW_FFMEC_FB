@@ -17,6 +17,8 @@
  *  - a team member's workload counts only the tasks assigned to them (a stored
  *    member id first, then the roster name behind free text like
  *    "Patcharapong J."), and matches their name among multi-name approvers
+ *  - a program the workspace does not run is a third state: it is not a typo
+ *    (no amber flag) and it is not "no assignment" (no portfolio-wide scope)
  *
  * The helpers are read straight out of Part1_Data.html — the same text
  * tools/build.mjs compiles — so the tests cannot drift from a copy of a rule.
@@ -57,13 +59,24 @@ const DECLARATIONS = [
   /function parseIsoDate\([\s\S]*?\n}/,
   /function addDaysIso\([\s\S]*?\n}/,
   /function diffDaysIso\([\s\S]*?\n}/,
+  /function isoDateParts\([\s\S]*?\n}/,
+  /function formatShortDate\([\s\S]*?\n}/,
+  /function formatMonthDay\([\s\S]*?\n}/,
+  /function sampleQuantile\([\s\S]*?\n}/,
+  /function cpkBoxSummary\([\s\S]*?\n}/,
   /function getDefaultScheduleForRow\([\s\S]*?\n}/,
   /function stageMoveConflict\([\s\S]*?\n}/,
   /const NPI_GATES = \[[\s\S]*?\n\];/,
   /function normalizePersonName\([\s\S]*?\n}/,
   /function teamMemberForOwner\([\s\S]*?\n}/,
+  /function unassignedOpenTasks\([\s\S]*?\n}/,
   /function normalizeProductKey\([\s\S]*?\n}/,
+  /function distinctProductStrings\([\s\S]*?\n}/,
+  /function distinctProgramValues\([\s\S]*?\n}/,
   /function programModels\([\s\S]*?\n}/,
+  /function programFamilies\([\s\S]*?\n}/,
+  /function productMatchesProject\([\s\S]*?\n}/,
+  /function memberExternalPrograms\([\s\S]*?\n}/,
   /function unmatchedProducts\([\s\S]*?\n}/,
   /const GATE_SIGN_OFF_DUE_KEYS = \{[\s\S]*?\n\};/,
   /function gateSignOffDueIso\([\s\S]*?\n}/,
@@ -83,7 +96,7 @@ const pieces = DECLARATIONS.map((pattern) => {
 
 const api = new Function(
   `"use strict";\n${pieces.join("\n")}\n` +
-    "return { KPI_FISCAL_YEAR, applySpecLimitEdit, kpiFiscalScopeLabel, stageDragReschedulePayload, isOpenableEvidenceUrl, purgePlaceholderEvidence, ganttStageGateDriver, ganttGateTone, GANTT_GATE_TONES, GANTT_GATE_UNSIGNED_TONE, stageMoveConflict, normalizePersonName, teamMemberForOwner, programModels, unmatchedProducts, getDefaultScheduleForRow, gateSignOffDueIso, lineGateSchedule, compareSignOffsByDue, computeTeamWorkload };"
+    "return { KPI_FISCAL_YEAR, applySpecLimitEdit, kpiFiscalScopeLabel, stageDragReschedulePayload, isOpenableEvidenceUrl, purgePlaceholderEvidence, ganttStageGateDriver, ganttGateTone, GANTT_GATE_TONES, GANTT_GATE_UNSIGNED_TONE, stageMoveConflict, normalizePersonName, teamMemberForOwner, unassignedOpenTasks, distinctProductStrings, programModels, programFamilies, productMatchesProject, memberExternalPrograms, unmatchedProducts, formatShortDate, formatMonthDay, sampleQuantile, cpkBoxSummary, getDefaultScheduleForRow, gateSignOffDueIso, lineGateSchedule, compareSignOffsByDue, computeTeamWorkload };"
 )();
 
 // The gate decision ledger is written in Code.js, so its row builder is read out
@@ -370,6 +383,7 @@ const TEAM_PROJECTS = [
   {
     id: 'PRJ-X4151',
     model: 'X4151',
+    familyGroup: 'MB14"',
     mihDate: '2026-12-24',
     buildMatrix: [
       { config: 'ME11', side: 'RHS', fatpMih: '2026-12-24' },
@@ -379,6 +393,7 @@ const TEAM_PROJECTS = [
   {
     id: 'PRJ-X4026',
     model: 'X4026',
+    familyGroup: 'MB14"',
     mihDate: '2027-01-20',
     buildMatrix: [{ config: 'ME11', side: 'RHS', fatpMih: '2027-01-20' }]
   }
@@ -430,9 +445,81 @@ check("a seeded 'Name I.' owner resolves to the roster", () => {
   equal(api.teamMemberForOwner('', 'kanya r.', TEAM_MEMBERS), null);
   equal(api.teamMemberForOwner('', 'NMB Eng', TEAM_MEMBERS), null);
 });
+check('open tasks with no roster owner are collected as unassigned', () => {
+  deep(api.unassignedOpenTasks(TEAM_TASKS, TEAM_MEMBERS).map((task) => task.id), ['T-5']);
+  // A stored id that names a current member owns the task whatever the text says.
+  deep(
+    api.unassignedOpenTasks(
+      [{ id: 'T-4', status: 'Blocked', ownerId: 'TM-12', owner: 'Supachai M.' }],
+      TEAM_MEMBERS
+    ),
+    []
+  );
+  // Finished work is never unassigned work.
+  deep(api.unassignedOpenTasks([{ id: 'T-2', status: 'Done', owner: 'Kanya R.' }], TEAM_MEMBERS), []);
+  // A removed member's id leaves the task claimable again.
+  deep(
+    api
+      .unassignedOpenTasks(
+        [{ id: 'T-9', status: 'Open', ownerId: 'TM-GONE', owner: 'Kanya R.' }],
+        TEAM_MEMBERS
+      )
+      .map((task) => task.id),
+    ['T-9']
+  );
+});
+
 check("a stored member id wins over stale free text", () => {
   equal(api.teamMemberForOwner('TM-12', 'Supachai M.', TEAM_MEMBERS)?.id, 'TM-12');
 });
+check('plan dates read as zero-padded mm/dd', () => {
+  equal(api.formatMonthDay('2026-12-04'), '12/04');
+  equal(api.formatMonthDay('2027-01-05'), '01/05');
+  equal(api.formatMonthDay(' 2026-12-05 '), '12/05');
+  equal(api.formatMonthDay('2026-12-05T08:00:00Z'), '12/05');
+  // Bad input must not be dressed up as a date: the parser fills gaps for
+  // scheduling, so the formatter has to reject what it invented.
+  equal(api.formatMonthDay(''), '—');
+  equal(api.formatMonthDay(null), '—');
+  equal(api.formatMonthDay('not-a-date'), '—');
+  equal(api.formatMonthDay('2026-12'), '—');
+  equal(api.formatMonthDay('2026-13-40'), '—');
+  equal(api.formatMonthDay('2025-02-29'), '—');
+});
+check('both date formatters reject what the parser had to invent', () => {
+  equal(api.formatShortDate('2026-12-05'), 'Dec 5');
+  equal(api.formatShortDate('not-a-date'), '—');
+  equal(api.formatShortDate('2026-13-40'), '—');
+  equal(api.formatShortDate(''), '—');
+});
+
+check('a raw box plot uses sample quartiles and 1.5 IQR whiskers', () => {
+  const box = api.cpkBoxSummary({ mean: 5, stdDev: 2.5, rawValues: [1, 2, 3, 4, 5, 6, 7, 8, 9] });
+  equal(box.basis, 'raw');
+  equal(box.q1, 3);
+  equal(box.median, 5);
+  equal(box.q3, 7);
+  // 1.5 × IQR fences sit at -3 and 13, so every sample stays a whisker end.
+  equal(box.low, 1);
+  equal(box.high, 9);
+});
+
+check('a summary-only reading falls back to mean ± σ with ±3σ whiskers', () => {
+  const box = api.cpkBoxSummary({ mean: 10, stdDev: 2 });
+  equal(box.basis, 'normal');
+  equal(box.low, 4);
+  equal(box.q1, 8);
+  equal(box.median, 10);
+  equal(box.q3, 12);
+  equal(box.high, 16);
+});
+
+check('quantiles interpolate between neighbours and survive one sample', () => {
+  equal(api.sampleQuantile([1, 2, 3, 4], 0.5), 2.5);
+  equal(api.sampleQuantile([5], 0.9), 5);
+  assert.ok(Number.isNaN(api.sampleQuantile([], 0.5)));
+});
+
 check("an owed gate is due on its own milestone in the line plan", () => {
   const project = TEAM_PROJECTS[0];
   const schedule = api.getDefaultScheduleForRow(project, project.buildMatrix[0]);
@@ -475,12 +562,60 @@ check('a gate with no plan date sorts after the dated ones', () => {
   ].sort(api.compareSignOffsByDue);
   equal(sorted.map((item) => item.dueIso).join(','), '2026-11-01,2026-12-05,');
 });
-check('the product picker offers only models that exist', () => {
+check('the product picker offers only models and families that exist', () => {
   equal(api.programModels(TEAM_PROJECTS).join(','), 'X4026,X4151');
+  equal(api.programFamilies(TEAM_PROJECTS).join(','), 'MB14"');
   equal(api.programModels([]).length, 0);
+  equal(api.programFamilies([]).length, 0);
+});
+check('a product list is trimmed and deduplicated by spelling', () => {
+  deep(api.distinctProductStrings([' X4151 ', 'x4151', '', null, 'X4026']), ['X4151', 'X4026']);
+  deep(api.distinctProductStrings([]), []);
+});
+
+check('the match rule takes a product as stored', () => {
+  assert.ok(api.productMatchesProject(' mb14" ', TEAM_PROJECTS[0]));
+  assert.ok(api.productMatchesProject('X4026', TEAM_PROJECTS[1]));
+  assert.ok(!api.productMatchesProject('X4115', TEAM_PROJECTS[1]));
+  assert.ok(!api.productMatchesProject('  ', TEAM_PROJECTS[1]));
+});
+
+check('the typo list is judged by the rule workload scopes by', () => {
+  // A model, a padded family, a program that is not in this scope, a typo and a
+  // program name from elsewhere: only the last three are unmatched.
+  deep(api.unmatchedProducts(['X4151', ' mb14" ', 'X4152', 'X4115', 'desktop'], TEAM_PROJECTS), [
+    'X4152',
+    'X4115',
+    'desktop'
+  ]);
+});
+
+check('a family assignment covers every program in that family', () => {
+  const load = api.computeTeamWorkload(
+    { id: 'TM-99', name: 'Family Owner', products: ['MB14"'] },
+    TEAM_PROJECTS,
+    TEAM_TASKS,
+    TEAM_GATES,
+    TEAM_MEMBERS,
+    {}
+  );
+  // X4151 has two lines and X4026 one; both belong to MB14".
+  equal(load.lines, 3);
+  equal(api.unmatchedProducts(['MB14"'], TEAM_PROJECTS).length, 0);
+});
+check('a model assignment still covers only its own program', () => {
+  const load = api.computeTeamWorkload(
+    { id: 'TM-98', name: 'Model Owner', products: ['X4026'] },
+    TEAM_PROJECTS,
+    TEAM_TASKS,
+    TEAM_GATES,
+    TEAM_MEMBERS,
+    {}
+  );
+  equal(load.lines, 1);
 });
 check('a product that matches no program is flagged', () => {
-  equal(api.unmatchedProducts(['x4151', 'X4115', 'X4115', 'MB14"'], TEAM_PROJECTS).join(','), 'X4115,MB14"');
+  equal(api.unmatchedProducts(['x4151', 'X4115', 'X4115', 'MB99"'], TEAM_PROJECTS).join(','), 'X4115,MB99"');
   equal(api.unmatchedProducts(['X4026'], TEAM_PROJECTS).length, 0);
   // Padding and casing are not a different program.
   equal(api.unmatchedProducts([' X4151 ', 'x4151'], TEAM_PROJECTS).length, 0);
@@ -508,6 +643,55 @@ check('a product typo zeroes the lines it was meant to cover', () => {
   // ...and the flag is what makes that zero visible instead of silent.
   equal(api.unmatchedProducts(['X4115'], TEAM_PROJECTS).join(','), 'X4115');
 });
+check('a program outside this workspace covers nothing and is not portfolio-wide', () => {
+  const load = api.computeTeamWorkload(
+    { id: 'TM-05', name: 'Umarporn', products: [], externalProducts: ['Desktop'] },
+    TEAM_PROJECTS,
+    TEAM_TASKS,
+    TEAM_GATES,
+    TEAM_MEMBERS,
+    {}
+  );
+  equal(load.portfolioWide, false);
+  equal(load.lines, 0);
+  equal(load.signOffs.length, 0);
+  equal(load.load, 0);
+  deep(load.externalPrograms, ['Desktop']);
+});
+
+check('nothing on file is still the only portfolio-wide state', () => {
+  const blank = api.computeTeamWorkload(
+    { id: 'TM-01', name: 'Horikawa', products: [] },
+    TEAM_PROJECTS,
+    TEAM_TASKS,
+    TEAM_GATES,
+    TEAM_MEMBERS,
+    {}
+  );
+  equal(blank.portfolioWide, true);
+  equal(blank.lines, 3);
+  // A live model next to an outside program scopes to the model alone.
+  const mixed = api.computeTeamWorkload(
+    { id: 'TM-98', name: 'Mixed', products: ['X4026'], externalProducts: ['X3439'] },
+    TEAM_PROJECTS,
+    TEAM_TASKS,
+    TEAM_GATES,
+    TEAM_MEMBERS,
+    {}
+  );
+  equal(mixed.portfolioWide, false);
+  equal(mixed.lines, 1);
+});
+
+check('outside programs are kept apart from product typos', () => {
+  deep(api.memberExternalPrograms({ externalProducts: [' X3439 ', 'x3439', ''] }), ['X3439']);
+  const member = { products: [], externalProducts: ['X3439'] };
+  // The typo flag only ever looks at products, so an outside program cannot raise it.
+  equal(api.unmatchedProducts(member.products, TEAM_PROJECTS).length, 0);
+  equal(api.unmatchedProducts(['X3439'], TEAM_PROJECTS).join(','), 'X3439');
+  deep(api.memberExternalPrograms({}), []);
+});
+
 check("a member with no program of their own owns no one else's tasks", () => {
   const load = api.computeTeamWorkload(TEAM_MEMBERS[2], TEAM_PROJECTS, TEAM_TASKS, TEAM_GATES, TEAM_MEMBERS);
   equal(load.lines, 3);

@@ -52,6 +52,14 @@ check("Bundle.html contains sheet_to_json", () => {
   assert.ok(read("Bundle.html").includes("sheet_to_json"));
 });
 
+check("Bundle.html has no raw http:// (Apps Script truncates the line)", () => {
+  assert.ok(!read("Bundle.html").includes("http://"));
+});
+
+check("Bundle.html escapes http:// as http:\\/\\/", () => {
+  assert.ok(read("Bundle.html").includes("http:\\/\\/"));
+});
+
 for (const r of results) {
   console.log(`  ${r.ok ? "pass" : "FAIL"}  ${r.label}${r.ok ? "" : `  (${r.message})`}`);
 }
