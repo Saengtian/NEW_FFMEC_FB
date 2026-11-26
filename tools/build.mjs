@@ -71,9 +71,13 @@ async function buildScript() {
   // that line; on SheetJS's long minified lines that silently deleted ~49 KB
   // and left an unterminated string (startup SyntaxError). `\/` is a no-op
   // escape inside JS strings/regexes/templates, so runtime values stay intact.
+  // For the same reason it reads `<?` as the start of a template scriptlet, so
+  // SheetJS's literal "<?xml" declaration needs its delimiter broken — `\?` is
+  // likewise the same character to the running JS.
   const js = result.outputFiles[0].text
     .replace(/<\/script/gi, "<\\/script")
-    .replaceAll("http://", "http:\\/\\/");
+    .replaceAll("http://", "http:\\/\\/")
+    .replaceAll("<?", "<\\?");
   writeFileSync(
     BUNDLE,
     `<!-- Built by tools/build.mjs from Icons.html + Part*.html. Do not edit. -->\n<script>\n${js}\n</script>\n`
