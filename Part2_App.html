@@ -1306,6 +1306,13 @@ function App() {
     if (!project || !row) return;
     const rowKey = `${row.config}-${row.side || 'RHS'}`;
 
+    // Seeded/imported rows never pass through the add/edit handler, so their
+    // configs have no counter until deletion. Record it before removing the row:
+    // withIdCounter is monotonic, and a deleted config must not be reissued.
+    setIdCounters((prev) =>
+      withIdCounter(prev, 'ME:' + projectId, Number(row.config.replace(/^ME/i, '')) || 0)
+    );
+
     setProjects((prev) =>
       prev.map((p) =>
         p.id === projectId
