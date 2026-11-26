@@ -16,7 +16,7 @@
 - No `cdn.sheetjs.com` string may remain in `Part1_Data.html` or `Bundle.html`.
 - Apps Script V8; `Index.html` inlines files with `<?!= include(...) ?>`; all top-level names share one global scope, so keep helper names unique.
 - `tools/**` is excluded by `.claspignore`; tests never ship to Apps Script.
-- Test runner: `bun test` currently runs `tools/test-fy-helpers.mjs`; extend it to also run the new bundle test.
+- Test runner: `bun run test` currently runs `tools/test-fy-helpers.mjs`; extend it to also run the new bundle test. Bare `bun test` is Bun's built-in file-discovery runner and does not execute package scripts here.
 - Compiled output must remain a single `Bundle.html` accepted by `clasp push -f`. Baseline size: 646,367 bytes.
 - Deployment is a separate, explicitly confirmed operation. This plan stops at local verification.
 
@@ -24,7 +24,7 @@
 
 - **CDN URL survives in output** → Task 1 test asserts `cdn.sheetjs.com` is absent from both `Part1_Data.html` and `Bundle.html`.
 - **Bundled namespace lacks `read` / `utils.sheet_to_json`** → Task 1 test asserts `Bundle.html` contains `0.20.2` and `sheet_to_json`; Task 3 rebuilds and re-runs it.
-- **Existing fiscal-year helpers break when `Part1_Data.html` changes** → Task 3 runs the unchanged `bun tools/test-fy-helpers.mjs` as part of `bun test`.
+- **Existing fiscal-year helpers break when `Part1_Data.html` changes** → Task 3 runs the unchanged `bun tools/test-fy-helpers.mjs` as part of `bun run test`.
 - **Bundle grows past what Apps Script accepts** → Task 3 records size before/after and runs `clasp status` to confirm the same 11 tracked files.
 - **Offline/restricted network still fails via script injection** → Task 1 test asserts the `loadSheetJsLib` body contains no `createElement('script')`.
 
@@ -38,7 +38,7 @@
 
 **Interfaces:**
 - Consumes: none
-- Produces: `bun test` runs both `tools/test-fy-helpers.mjs` and `tools/test-sheetjs-bundle.mjs`.
+- Produces: `bun run test` runs both `tools/test-fy-helpers.mjs` and `tools/test-sheetjs-bundle.mjs`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -157,15 +157,15 @@ async function loadSheetJsLib() {
 ```
 Keep the function name and async signature; remove the CDN URL and the `<script>` injection entirely.
 
-- [ ] **Step 4: Run the new test to verify it passes**
+- [ ] **Step 4: Rebuild the bundle, then run the new test to verify it passes**
 
-Run: `bun tools/test-sheetjs-bundle.mjs`
-Expected: PASS — all 6 checks pass.
+Run: `bun run build && bun run test`
+Expected: PASS — all 6 checks pass. `Bundle.html` must be regenerated from the new sources before the compiled-output checks are evaluated.
 
 - [ ] **Step 5: Commit the implementation**
 
 ```bash
-git add package.json bun.lock tools/build.mjs Part1_Data.html
+git add package.json bun.lock tools/build.mjs Part1_Data.html Bundle.html
 git commit -m "feat: bundle SheetJS locally instead of CDN"
 ```
 
@@ -174,7 +174,7 @@ git commit -m "feat: bundle SheetJS locally instead of CDN"
 **Files:** none
 
 **Interfaces:**
-- Consumes: `bun test` from Task 1 and the compiled `Bundle.html` from Task 2.
+- Consumes: `bun run test` from Task 1 and the compiled `Bundle.html` from Task 2.
 - Produces: evidence that the local bundle is complete and still ships as 11 Apps Script files.
 
 - [ ] **Step 1: Rebuild and record size**
@@ -184,7 +184,7 @@ Expected: exit 0. Record the new `Bundle.html` byte size; it must exceed the 646
 
 - [ ] **Step 2: Run the full test suite**
 
-Run: `bun test`
+Run: `bun run test`
 Expected: both suites pass — fiscal-year checks and all 6 SheetJS bundle checks.
 
 - [ ] **Step 3: Confirm no CDN reference remains**
