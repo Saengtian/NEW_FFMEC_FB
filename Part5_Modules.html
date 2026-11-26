@@ -3626,7 +3626,18 @@ function KpiDeepDiveModal({
 // VIEW 10: TEAM MEMBERS, PRODUCT ASSIGNMENT & WORKLOAD (CRUD)
 // ============================================================================
 
-function TeamMembersView({ members, projects, tasks, gateRecords, onOpenNew, onEdit, onDelete, onOpenTask, onOpenGate }) {
+function TeamMembersView({
+  members,
+  projects,
+  tasks,
+  gateRecords,
+  scheduleOverrides,
+  onOpenNew,
+  onEdit,
+  onDelete,
+  onOpenTask,
+  onOpenGate
+}) {
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('ALL');
   const [productFilter, setProductFilter] = useState('ALL');
@@ -3657,8 +3668,14 @@ function TeamMembersView({ members, projects, tasks, gateRecords, onOpenNew, onE
         );
       })
       // Load walks every gate dossier, so it is only computed for visible members.
-      .map((member) => ({ member, workload: computeTeamWorkload(member, projects, tasks, gateRecords) }));
-  }, [members, projects, tasks, gateRecords, search, roleFilter, productFilter]);
+      .map((member) => ({
+        member,
+        // Keyed by the same normalisation the workload uses, so a padded or
+        // re-cased stored string is flagged wherever it is counted.
+        unmatchedKeys: new Set(unmatchedProducts(member.products, projects).map(normalizeProductKey)),
+        workload: computeTeamWorkload(member, projects, tasks, gateRecords, members, scheduleOverrides)
+      }));
+  }, [members, projects, tasks, gateRecords, scheduleOverrides, search, roleFilter, productFilter]);
 
   const nameById = useMemo(() => {
     const map = {};
@@ -3669,18 +3686,27 @@ function TeamMembersView({ members, projects, tasks, gateRecords, onOpenNew, onE
   }, [members]);
 
   const summary = useMemo(() => {
+    // Cover counts only models that exist as a program — the same rule the amber
+    // chips use, so a typo cannot inflate this card the way it used to inflate
+    // workload. Members holding an unmatched product are counted separately.
+    const known = new Set(programModels(projects).map(normalizeProductKey));
     const covered = new Set();
     let totalLoad = 0;
     let unassigned = 0;
     let withoutEmail = 0;
-    rows.forEach(({ member, workload }) => {
-      (member.products || []).forEach((product) => covered.add(product));
+    let unmatchedMembers = 0;
+    rows.forEach(({ member, workload, unmatchedKeys }) => {
+      (member.products || []).forEach((product) => {
+        const key = normalizeProductKey(product);
+        if (known.has(key)) covered.add(key);
+      });
       totalLoad += workload.load;
       if ((member.products || []).length === 0) unassigned += 1;
       if (!String(member.email || '').trim()) withoutEmail += 1;
+      if (unmatchedKeys.size > 0) unmatchedMembers += 1;
     });
-    return { products: covered.size, totalLoad, unassigned, withoutEmail };
-  }, [rows]);
+    return { products: covered.size, totalLoad, unassigned, withoutEmail, unmatchedMembers, programs: known.size };
+  }, [rows, projects]);
 
   const maxLoad = useMemo(() => Math.max(1, ...rows.map((row) => row.workload.load)), [rows]);
 
@@ -3706,9 +3732,20 @@ function TeamMembersView({ members, projects, tasks, gateRecords, onOpenNew, onE
           <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Products Covered</div>
           <div className="text-2xl font-bold text-blue-700 dark:text-blue-300 tabular-nums">
             {summary.products}
+            <span className="text-xs font-normal text-slate-400 dark:text-slate-400"> / {summary.programs}</span>
           </div>
-          <div className="text-[11px] text-slate-500 dark:text-slate-400">
-            {productOptions.length} distinct products on file
+          <div
+            className={`text-[11px] ${
+              summary.unmatchedMembers > 0
+                ? 'font-semibold text-amber-700 dark:text-amber-300'
+                : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            {summary.unmatchedMembers > 0
+              ? `${summary.unmatchedMembers} member${summary.unmatchedMembers === 1 ? '' : 's'} hold${
+                  summary.unmatchedMembers === 1 ? 's' : ''
+                } a product that matches no program`
+              : 'Every assigned product is a live program'}
           </div>
         </div>
 
@@ -3802,7 +3839,7 @@ function TeamMembersView({ members, projects, tasks, gateRecords, onOpenNew, onE
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {rows.map(({ member, workload }) => (
+                {rows.map(({ member, workload, unmatchedKeys }) => (
                   <tr key={member.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/60 transition-colors">
                     <td className="px-4 py-2.5">
                       <div className="font-bold text-slate-900 dark:text-slate-100">{member.name}</div>
@@ -3827,14 +3864,28 @@ function TeamMembersView({ members, projects, tasks, gateRecords, onOpenNew, onE
                         <span className="text-slate-400 dark:text-slate-500">Portfolio-wide</span>
                       ) : (
                         <span className="flex flex-wrap gap-1">
-                          {(member.products || []).map((product) => (
-                            <span
-                              key={product}
-                              className="px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[10px] font-semibold text-slate-700 dark:text-slate-200"
-                            >
-                              {product}
-                            </span>
-                          ))}
+                          {(member.products || []).map((product, index) => {
+                            const orphan = unmatchedKeys.has(normalizeProductKey(product));
+                            return (
+                              // Legacy rows can repeat a product; the index keeps the keys unique.
+                              <span
+                                key={`${product}-${index}`}
+                                title={
+                                  orphan
+                                    ? `No program uses ${product} — it adds no lines or tasks to the workload`
+                                    : `${product} is a live program`
+                                }
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-semibold ${
+                                  orphan
+                                    ? 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200'
+                                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200'
+                                }`}
+                              >
+                                {orphan && <AlertTriangle className="w-2.5 h-2.5 shrink-0" />}
+                                {product}
+                              </span>
+                            );
+                          })}
                         </span>
                       )}
                     </td>
@@ -3911,8 +3962,10 @@ function TeamMembersView({ members, projects, tasks, gateRecords, onOpenNew, onE
         )}
 
         <div className="px-4 py-2.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 text-[10px] text-slate-500 dark:text-slate-400">
-          Workload is derived from the plan: open tasks on the member's products plus the gate signatures still
-          owed. A member with no product is measured across the portfolio. Click a count to see the records behind it.
+          Workload is derived from the plan: the member's own open tasks plus the gate signatures still owed. An
+          amber product matches no program and contributes nothing — pick a real model in that member's row. A task
+          with no roster match belongs to nobody, and a member with no product is measured across the portfolio.
+          Click a count to see the records behind it.
         </div>
       </section>
 
@@ -3948,6 +4001,19 @@ function TeamWorkloadDrawer({ member, workload, focus, onClose, onOpenTask, onOp
     { id: 'signOffs', label: 'Signatures owed', count: workload.signOffs.length }
   ];
   const items = tab === 'tasks' ? workload.openTasks : workload.signOffs;
+
+  // The soonest deadline in the list and how many signatures share that line and
+  // date: the number that actually holds a build, as opposed to a total count.
+  const nextDeadline = useMemo(() => {
+    const dated = workload.signOffs.filter((item) => item.dueIso);
+    if (dated.length === 0) return null;
+    const first = dated[0];
+    const count = dated.filter(
+      (item) =>
+        item.dueIso === first.dueIso && item.projectId === first.projectId && item.lineKey === first.lineKey
+    ).length;
+    return { first, count, daysLeft: diffDaysIso(todayIso(), first.dueIso) };
+  }, [workload.signOffs]);
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/40 backdrop-blur-[1px]">
@@ -3988,11 +4054,30 @@ function TeamWorkloadDrawer({ member, workload, focus, onClose, onOpenTask, onOp
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-3 space-y-2 text-xs">
+          {tab === 'signOffs' && nextDeadline && (
+            <div
+              className={`px-3 py-2 rounded-lg border text-[11px] font-semibold ${
+                nextDeadline.daysLeft < 0
+                  ? 'border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950 text-rose-800 dark:text-rose-200'
+                  : 'border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200'
+              }`}
+            >
+              {nextDeadline.count} signature{nextDeadline.count === 1 ? '' : 's'} blocking{' '}
+              {nextDeadline.first.projectModel} · {nextDeadline.first.lineKey}, due{' '}
+              {formatShortDate(nextDeadline.first.dueIso)}
+              <div className="font-normal mt-0.5">
+                {nextDeadline.daysLeft < 0
+                  ? `${Math.abs(nextDeadline.daysLeft)} day${Math.abs(nextDeadline.daysLeft) === 1 ? '' : 's'} past the plan date`
+                  : `${nextDeadline.daysLeft} day${nextDeadline.daysLeft === 1 ? '' : 's'} left in the plan`}
+              </div>
+            </div>
+          )}
+
           {items.length === 0 ? (
             <p className="py-8 text-center text-slate-400 dark:text-slate-500">
               {tab === 'tasks'
-                ? 'No open tasks on this member’s programs.'
-                : 'No signatures outstanding on this member’s programs.'}
+                ? 'No open tasks assigned to this member.'
+                : 'No signatures outstanding for this member.'}
             </p>
           ) : (
             items.map((item, index) =>
@@ -4032,8 +4117,20 @@ function TeamWorkloadDrawer({ member, workload, focus, onClose, onOpenTask, onOp
                     <div className="font-semibold text-slate-800 dark:text-slate-100 leading-snug mt-0.5">
                       {item.gateCode} {item.gateShort}
                     </div>
-                    <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
-                      {item.decision === 'Rejected' ? 'Rejected — must be re-signed' : 'Awaiting the signature'}
+                    <div
+                      className={`text-[10px] mt-0.5 ${
+                        item.dueIso && diffDaysIso(todayIso(), item.dueIso) < 0
+                          ? 'font-semibold text-rose-600 dark:text-rose-400'
+                          : 'text-slate-500 dark:text-slate-400'
+                      }`}
+                    >
+                      {item.dueIso
+                        ? diffDaysIso(todayIso(), item.dueIso) < 0
+                          ? `Overdue since ${formatShortDate(item.dueIso)}`
+                          : `Sign by ${formatShortDate(item.dueIso)}`
+                        : 'No plan date for this gate'}
+                      {' · '}
+                      {item.decision === 'Rejected' ? 'rejected — must be re-signed' : 'awaiting the signature'}
                     </div>
                   </div>
                   <StatusBadge status={item.decision} />
@@ -4045,23 +4142,47 @@ function TeamWorkloadDrawer({ member, workload, focus, onClose, onOpenTask, onOp
         </div>
 
         <div className="px-5 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 text-[10px] text-slate-500 dark:text-slate-400">
-          Counted from the live plan, never stored on the member. A member with no product assignment is measured
-          across the whole portfolio.
+          Counted from the live plan, never stored on the member: each signature carries the date its line's gate
+          sequence needs it by, and the list runs closest deadline first. A member with no product assignment is
+          measured across the whole portfolio.
         </div>
       </div>
     </div>
   );
 }
 
-function TeamMemberModal({ member, members, onClose, onSubmit }) {
+function TeamMemberModal({ member, members, projects = [], onClose, onSubmit }) {
   const [form, setForm] = useState(() => ({
     name: member?.name || '',
     role: member?.role || TEAM_ROLES[0],
     reportsTo: member?.reportsTo || '',
     email: member?.email || '',
-    products: (member?.products || []).join(', ')
+    products: (member?.products || []).map(String)
   }));
   const [error, setError] = useState('');
+
+  // Only models that exist as a program are offered; anything else already on
+  // file is kept visible (and flagged) rather than dropped behind the user's back.
+  const programs = programModels(projects);
+  const unmatched = unmatchedProducts(form.products, projects);
+
+  const toggleProduct = (model) => {
+    const key = normalizeProductKey(model);
+    const selected = form.products.some((product) => normalizeProductKey(product) === key);
+    setForm({
+      ...form,
+      products: selected
+        ? form.products.filter((product) => normalizeProductKey(product) !== key)
+        : [...form.products, model]
+    });
+  };
+
+  // Removes every spelling of one product, so the warning cannot survive a click
+  // because the stored string was padded or differently cased.
+  const removeProduct = (product) => {
+    const key = normalizeProductKey(product);
+    setForm({ ...form, products: form.products.filter((entry) => normalizeProductKey(entry) !== key) });
+  };
 
   const handleSubmit = (event) => {
     event.preventDefault();
@@ -4080,10 +4201,18 @@ function TeamMemberModal({ member, members, onClose, onSubmit }) {
       role: form.role,
       reportsTo: form.reportsTo,
       email,
-      products: form.products
-        .split(',')
-        .map((product) => product.trim())
-        .filter(Boolean)
+      // A picked model keeps the program's own spelling; a leftover string is
+      // kept as typed until someone removes it.
+      products: Array.from(
+        new Set(
+          form.products
+            .map((product) => {
+              const match = programs.find((model) => normalizeProductKey(model) === normalizeProductKey(product));
+              return match || product.trim();
+            })
+            .filter(Boolean)
+        )
+      )
     });
   };
 
@@ -4175,17 +4304,66 @@ function TeamMemberModal({ member, members, onClose, onSubmit }) {
             <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
               Product assignment
             </label>
-            <input
-              type="text"
-              value={form.products}
-              onChange={(e) => setForm({ ...form, products: e.target.value })}
-              placeholder='X4151, X4026, MB14"'
-              className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 focus:outline-none focus:border-blue-500"
-            />
+            <div className="flex flex-wrap gap-1.5 p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40">
+              {programs.length === 0 ? (
+                <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                  No NPI program exists yet — every member is portfolio-wide until one is created.
+                </span>
+              ) : (
+                programs.map((model) => {
+                  const selected = form.products.some(
+                    (product) => normalizeProductKey(product) === normalizeProductKey(model)
+                  );
+                  return (
+                    <button
+                      key={model}
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={() => toggleProduct(model)}
+                      className={`px-2 py-1 rounded-md border text-[11px] font-semibold transition-colors ${
+                        selected
+                          ? 'bg-blue-600 border-blue-600 text-white'
+                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-blue-400 dark:hover:border-blue-700'
+                      }`}
+                    >
+                      {model}
+                    </button>
+                  );
+                })
+              )}
+            </div>
             <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
-              Comma separated model or product names. Leave empty for a portfolio-wide role — workload then counts
-              every program.
+              Only models that exist as an NPI program are offered. Leave all unselected for a portfolio-wide role —
+              workload then counts every program.
             </p>
+
+            {unmatched.length > 0 && (
+              <div
+                role="alert"
+                className="mt-2 px-2.5 py-2 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950 text-[10px] text-amber-800 dark:text-amber-200 space-y-1"
+              >
+                <div className="flex items-start gap-1.5 font-semibold">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    No program uses {unmatched.join(', ')}. On file it matches nothing, so it adds no lines or tasks
+                    to this member's workload.
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1 pl-5">
+                  {unmatched.map((product) => (
+                    <button
+                      key={product}
+                      type="button"
+                      onClick={() => removeProduct(product)}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-400 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900"
+                    >
+                      Remove {product}
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {error && <p className="text-[11px] font-semibold text-rose-600 dark:text-rose-400">{error}</p>}

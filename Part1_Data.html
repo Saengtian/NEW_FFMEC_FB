@@ -1051,35 +1051,156 @@ const INITIAL_TEAM_MEMBERS = [
   { id: 'TM-21', name: 'Narut', role: 'Maintenance', reportsTo: 'TM-01', email: '', products: [] }
 ];
 
+// A free-text owner is written as people write it — "Patcharapong J." — so the
+// trailing initials are dropped before the name is compared with the roster.
+function normalizePersonName(value) {
+  const parts = String(value || '')
+    .toLowerCase()
+    .replace(/[.,]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  while (parts.length > 1 && parts[parts.length - 1].length <= 2) parts.pop();
+  return parts.join(' ');
+}
+
+/**
+ * Who a task belongs to. A stored member id is authoritative; rows that only
+ * carry free text (the seeded `Patcharapong J.`) are matched against the roster
+ * by name. An owner nobody matches — `Kanya R.` is not on the team sheet, and
+ * neither is `NMB Eng` — belongs to no member, so it never inflates a workload.
+ */
+function teamMemberForOwner(ownerId, ownerText, teamMembers) {
+  const roster = Array.isArray(teamMembers) ? teamMembers : [];
+  const linked = roster.find((member) => member && member.id === ownerId);
+  if (linked) return linked;
+  const name = normalizePersonName(ownerText);
+  if (!name) return null;
+  const matches = roster.filter((member) => member && normalizePersonName(member.name) === name);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+// One normalisation for a product string. Workload scoping, the picker and the
+// amber flag all compare through it, so padding or casing can never make them
+// disagree about whether a stored product is a real program.
+function normalizeProductKey(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+// The products a member can carry are the programs that actually exist: the
+// picker offers these, so a model nobody runs can never be assigned by hand. Two
+// programs spelled differently in case are one option.
+function programModels(projects) {
+  const models = new Map();
+  (projects || []).forEach((project) => {
+    const model = String(project?.model || '').trim();
+    const key = normalizeProductKey(model);
+    if (key && !models.has(key)) models.set(key, model);
+  });
+  return Array.from(models.values()).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+/**
+ * The products on file that match no program. Workload scopes by project model,
+ * so one of these silently contributes nothing — a typo (`X4115`), or a family
+ * name (`MB14"`) typed where a model belongs. Callers surface them instead of
+ * letting the member read as idle. Repeats collapse onto the first spelling.
+ */
+function unmatchedProducts(products, projects) {
+  const known = new Set(programModels(projects).map(normalizeProductKey));
+  const seen = new Set();
+  return (products || [])
+    .map((product) => String(product || '').trim())
+    .filter((product) => {
+      const key = normalizeProductKey(product);
+      if (!key || known.has(key) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+// The plan date each gate's signature must be cleared by. The four build gates
+// close their own stage (the next stage starts the following day); the review and
+// logistics gates sit on the schedule's own review, ETD, MIH and PBR marks. Every
+// one of these is derived from the sequence that ends at the line's FATP MIH, so a
+// dragged schedule moves its signatures with it.
+const GATE_SIGN_OFF_DUE_KEYS = {
+  prep: 'prepStart',
+  bbr: 'prepStart',
+  brr: 'brrEnd',
+  mbo: 'mboEnd',
+  main: 'mainEnd',
+  oqc: 'oqcEnd',
+  ship: 'etd',
+  mih: 'mih',
+  pbr: 'pbr'
+};
+
+function gateSignOffDueIso(gateId, schedule) {
+  const key = GATE_SIGN_OFF_DUE_KEYS[gateId];
+  return (key && schedule?.[key]) || null;
+}
+
+/**
+ * The plan a line's gates are measured against: a dragged schedule if someone set
+ * one, otherwise the default sequence built back from that row's FATP MIH.
+ */
+function lineGateSchedule(project, lineKey, scheduleOverrides) {
+  const manual = scheduleOverrides?.[`${project?.id}::${lineKey}`];
+  if (manual) return manual;
+  const rows = project?.buildMatrix || [];
+  const row =
+    rows.find((candidate) => `${candidate.config}-${candidate.side || 'RHS'}` === lineKey) ||
+    rows.find((candidate) => candidate.config === String(lineKey || '').split('-')[0]) ||
+    null;
+  return getDefaultScheduleForRow(project, row);
+}
+
+// Closest deadline first, so the drawer opens on what is about to stop a build. A
+// gate with no plan position has no deadline to race and sorts after the rest.
+function compareSignOffsByDue(a, b) {
+  const aDue = a?.dueIso || '9999-12-31';
+  const bDue = b?.dueIso || '9999-12-31';
+  if (aDue !== bDue) return aDue.localeCompare(bDue);
+  const aKey = `${a?.projectModel || ''} ${a?.lineKey || ''} ${a?.gateCode || ''}`;
+  const bKey = `${b?.projectModel || ''} ${b?.lineKey || ''} ${b?.gateCode || ''}`;
+  return aKey.localeCompare(bKey);
+}
+
 /**
  * A member's workload, derived from the workspace instead of typed in, so the
  * number cannot drift from the plan: the Config × Side lines behind their
- * products, the open tasks on those programs, and the gate dossiers still
- * waiting for their signature. A member with no product assigned (a manager,
- * QC or support function) is measured across the whole portfolio. Approver
- * names can list several people (`Horikawa / Saengtian`), so each part is
- * matched separately.
+ * products, the open tasks assigned to them, and the gate dossiers still
+ * waiting for their signature. A task counts for the person it is assigned to,
+ * not for everyone on the program, so two engineers sharing a model do not
+ * share each other's actions. A member with no product assigned (a manager, QC
+ * or support function) is measured across the whole portfolio for signatures.
+ * Approver names can list several people (`Horikawa / Saengtian`), so each part
+ * is matched separately.
  *
  * The records themselves come back with the counts, so the board can open what
  * it is counting: `openTasks` carries enough to open the task drawer and
- * `signOffs` the program/line/gate the dossier lives on.
+ * `signOffs` the program/line/gate the dossier lives on, plus the date the line's
+ * plan needs that signature. Sign-offs come back closest deadline first.
  */
-function computeTeamWorkload(member, projects, tasks, gateRecords) {
+function computeTeamWorkload(member, projects, tasks, gateRecords, teamMembers, scheduleOverrides) {
   const gateOf = (gateId) => {
     const gate = NPI_GATES.find((g) => g.id === gateId);
     return { gateCode: gate?.code || '', gateShort: gate?.short || String(gateId || '') };
   };
-  const products = (member?.products || [])
-    .map((product) => String(product || '').trim().toLowerCase())
-    .filter(Boolean);
+  const products = (member?.products || []).map(normalizeProductKey).filter(Boolean);
   const scopedProjects = products.length
-    ? projects.filter((project) => products.includes(String(project.model || '').trim().toLowerCase()))
+    ? projects.filter((project) => products.includes(normalizeProductKey(project.model)))
     : projects;
-  const projectById = new Map(scopedProjects.map((project) => [project.id, project]));
+  const projectById = new Map(projects.map((project) => [project.id, project]));
   const lines = scopedProjects.reduce((sum, project) => sum + (project.buildMatrix || []).length, 0);
 
-  const openTasks = tasks
-    .filter((task) => projectById.has(task.projectId) && task.status !== 'Done')
+  const openTasks = (tasks || [])
+    .filter((task) => task.status !== 'Done' && projectById.has(task.projectId))
+    .filter((task) => {
+      const owner = teamMemberForOwner(task.ownerId, task.owner, teamMembers);
+      return Boolean(member?.id && owner) && owner.id === member.id;
+    })
     .map((task) => ({
       id: task.id,
       title: task.title,
@@ -1091,23 +1212,27 @@ function computeTeamWorkload(member, projects, tasks, gateRecords) {
       ...gateOf(task.gateId)
     }));
 
-  const name = String(member?.name || '').trim().toLowerCase();
+  const name = normalizePersonName(member?.name);
   const signOffs = [];
-  projectById.forEach((project, projectId) => {
+  scopedProjects.forEach((project) => {
+    const projectId = project.id;
     Object.entries(gateRecords[projectId] || {}).forEach(([lineKey, lineGates]) => {
+      const schedule = lineGateSchedule(project, lineKey, scheduleOverrides);
       Object.entries(lineGates || {}).forEach(([gateId, dossier]) => {
         const approvers = Array.isArray(dossier?.approvers) ? dossier.approvers : [];
         approvers.forEach((approver) => {
           if (approver?.decision === 'Approved' || approver?.decision === 'Conditional') return;
           const named = String(approver?.name || '')
             .split('/')
-            .map((part) => part.trim().toLowerCase());
+            .map(normalizePersonName);
           if (!name || !named.includes(name)) return;
           signOffs.push({
             projectId,
             projectModel: project.model,
             lineKey,
             gateId,
+            // When this line's plan needs the signature to keep its build date.
+            dueIso: gateSignOffDueIso(gateId, schedule),
             decision: approver.decision || 'Pending',
             ...gateOf(gateId)
           });
@@ -1115,6 +1240,8 @@ function computeTeamWorkload(member, projects, tasks, gateRecords) {
       });
     });
   });
+
+  signOffs.sort(compareSignOffsByDue);
 
   return { lines, openTasks, signOffs, load: openTasks.length + signOffs.length };
 }

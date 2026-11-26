@@ -12,8 +12,11 @@
  *    worst, and anything the list does not know reads as not signed off
  *  - a dragged stage is only saved when it still fits between its neighbouring
  *    stages and inside the line's FATP MIH
- *  - a team member's workload counts only the programs they own, and matches
- *    their name among multi-name approvers
+ *  - the server's sign-off ledger appends a row only for a decision this save
+ *    actually changed, and never for a dossier the same save created
+ *  - a team member's workload counts only the tasks assigned to them (a stored
+ *    member id first, then the roster name behind free text like
+ *    "Patcharapong J."), and matches their name among multi-name approvers
  *
  * The helpers are read straight out of Part1_Data.html — the same text
  * tools/build.mjs compiles — so the tests cannot drift from a copy of a rule.
@@ -28,6 +31,7 @@ import assert from "node:assert/strict";
 
 const ROOT = join(import.meta.dir, "..");
 const source = readFileSync(join(ROOT, "Part1_Data.html"), "utf8");
+const serverSource = readFileSync(join(ROOT, "Code.js"), "utf8");
 
 /** Top-level declarations the fixes are made of. Functions end at column 0. */
 const DECLARATIONS = [
@@ -51,9 +55,20 @@ const DECLARATIONS = [
   /function ganttStageGateDriver\([\s\S]*?\n}/,
   /const GANTT_STAGES = \[[\s\S]*?\n\];/,
   /function parseIsoDate\([\s\S]*?\n}/,
+  /function addDaysIso\([\s\S]*?\n}/,
   /function diffDaysIso\([\s\S]*?\n}/,
+  /function getDefaultScheduleForRow\([\s\S]*?\n}/,
   /function stageMoveConflict\([\s\S]*?\n}/,
   /const NPI_GATES = \[[\s\S]*?\n\];/,
+  /function normalizePersonName\([\s\S]*?\n}/,
+  /function teamMemberForOwner\([\s\S]*?\n}/,
+  /function normalizeProductKey\([\s\S]*?\n}/,
+  /function programModels\([\s\S]*?\n}/,
+  /function unmatchedProducts\([\s\S]*?\n}/,
+  /const GATE_SIGN_OFF_DUE_KEYS = \{[\s\S]*?\n\};/,
+  /function gateSignOffDueIso\([\s\S]*?\n}/,
+  /function lineGateSchedule\([\s\S]*?\n}/,
+  /function compareSignOffsByDue\([\s\S]*?\n}/,
   /function computeTeamWorkload\([\s\S]*?\n}/,
 ];
 
@@ -68,7 +83,28 @@ const pieces = DECLARATIONS.map((pattern) => {
 
 const api = new Function(
   `"use strict";\n${pieces.join("\n")}\n` +
-    "return { KPI_FISCAL_YEAR, applySpecLimitEdit, kpiFiscalScopeLabel, stageDragReschedulePayload, isOpenableEvidenceUrl, purgePlaceholderEvidence, ganttStageGateDriver, ganttGateTone, GANTT_GATE_TONES, GANTT_GATE_UNSIGNED_TONE, stageMoveConflict, computeTeamWorkload };"
+    "return { KPI_FISCAL_YEAR, applySpecLimitEdit, kpiFiscalScopeLabel, stageDragReschedulePayload, isOpenableEvidenceUrl, purgePlaceholderEvidence, ganttStageGateDriver, ganttGateTone, GANTT_GATE_TONES, GANTT_GATE_UNSIGNED_TONE, stageMoveConflict, normalizePersonName, teamMemberForOwner, programModels, unmatchedProducts, getDefaultScheduleForRow, gateSignOffDueIso, lineGateSchedule, compareSignOffsByDue, computeTeamWorkload };"
+)();
+
+// The gate decision ledger is written in Code.js, so its row builder is read out
+// of the server file the same way — the test cannot drift from a copy of a rule.
+const SERVER_DECLARATIONS = [
+  /const SIGN_OFF_LEDGER_HEADERS = \[[\s\S]*?\n\];/,
+  /const GATE_LEDGER_LABELS = \{[\s\S]*?\n\};/,
+  /function signOffLedgerRows\([\s\S]*?\n}/
+];
+
+const serverPieces = SERVER_DECLARATIONS.map((pattern) => {
+  const match = serverSource.match(pattern);
+  if (!match) {
+    console.error(`Code.js no longer declares ${pattern} — update this test, the ledger moved.`);
+    process.exit(1);
+  }
+  return match[0];
+});
+
+const serverApi = new Function(
+  `"use strict";\n${serverPieces.join("\n")}\n` + "return { SIGN_OFF_LEDGER_HEADERS, signOffLedgerRows };"
 )();
 
 const results = [];
@@ -329,15 +365,39 @@ check("an unknown stage is not checked", () => {
 });
 
 // The team board derives workload instead of storing it, so the counts have to
-// follow the member's own programs and the approver names on each dossier.
+// follow the person a task is assigned to and the approver names on each dossier.
 const TEAM_PROJECTS = [
-  { id: 'PRJ-X4151', model: 'X4151', buildMatrix: [{}, {}] },
-  { id: 'PRJ-X4026', model: 'X4026', buildMatrix: [{}] }
+  {
+    id: 'PRJ-X4151',
+    model: 'X4151',
+    mihDate: '2026-12-24',
+    buildMatrix: [
+      { config: 'ME11', side: 'RHS', fatpMih: '2026-12-24' },
+      { config: 'ME11', side: 'LHS', fatpMih: '2026-12-24' }
+    ]
+  },
+  {
+    id: 'PRJ-X4026',
+    model: 'X4026',
+    mihDate: '2027-01-20',
+    buildMatrix: [{ config: 'ME11', side: 'RHS', fatpMih: '2027-01-20' }]
+  }
+];
+const TEAM_MEMBERS = [
+  { id: 'TM-12', name: 'Patcharapong', role: 'NPI Engineer', products: ['X4151'] },
+  { id: 'TM-04', name: 'Touchakorn', role: 'Program Leader', products: ['X4151'] },
+  { id: 'TM-01', name: 'Horikawa', role: 'Engineering Manager', products: [] }
 ];
 const TEAM_TASKS = [
-  { projectId: 'PRJ-X4151', status: 'Open' },
-  { projectId: 'PRJ-X4151', status: 'Done' },
-  { projectId: 'PRJ-X4026', status: 'Blocked' }
+  // Seeded rows carry no member id: only the free text names the owner.
+  { id: 'T-1', projectId: 'PRJ-X4151', status: 'Open', owner: 'Patcharapong J.' },
+  { id: 'T-2', projectId: 'PRJ-X4151', status: 'Done', owner: 'Patcharapong J.' },
+  // Same program, someone else's task.
+  { id: 'T-3', projectId: 'PRJ-X4151', status: 'Open', owner: 'Touchakorn T.' },
+  // A stored id wins over the text an earlier edit left behind.
+  { id: 'T-4', projectId: 'PRJ-X4026', status: 'Blocked', ownerId: 'TM-12', owner: 'Supachai M.' },
+  // Nobody on the roster owns this, so it pads no one's workload.
+  { id: 'T-5', projectId: 'PRJ-X4151', status: 'Open', owner: 'Kanya R.' }
 ];
 const TEAM_GATES = {
   'PRJ-X4151': {
@@ -353,35 +413,193 @@ const TEAM_GATES = {
   }
 };
 
-check("workload counts only the member's own programs", () => {
-  const load = api.computeTeamWorkload(
-    { name: 'Patcharapong', products: ['x4151'] },
-    TEAM_PROJECTS,
-    TEAM_TASKS,
-    TEAM_GATES
-  );
+check("workload counts only the tasks assigned to the member", () => {
+  const load = api.computeTeamWorkload(TEAM_MEMBERS[0], TEAM_PROJECTS, TEAM_TASKS, TEAM_GATES, TEAM_MEMBERS);
   equal(load.lines, 2);
-  equal(load.openTasks.length, 1);
+  // T-1 by roster name, T-4 by member id; T-3 sits on the same program but is
+  // someone else's, and T-5 belongs to a name the roster does not know.
+  equal(load.openTasks.map((task) => task.id).join(','), 'T-1,T-4');
   equal(load.openTasks[0].projectModel, 'X4151');
   equal(load.signOffs.length, 0);
-  equal(load.load, 1);
+  equal(load.load, 2);
 });
-check("a portfolio-wide member is measured across every program", () => {
-  const load = api.computeTeamWorkload({ name: 'Nobody', products: [] }, TEAM_PROJECTS, TEAM_TASKS, TEAM_GATES);
+check("a seeded 'Name I.' owner resolves to the roster", () => {
+  equal(api.teamMemberForOwner('', 'Patcharapong J.', TEAM_MEMBERS)?.id, 'TM-12');
+  equal(api.teamMemberForOwner('', 'Touchakorn T.', TEAM_MEMBERS)?.id, 'TM-04');
+  // Off-roster names stay unowned instead of being guessed onto someone.
+  equal(api.teamMemberForOwner('', 'kanya r.', TEAM_MEMBERS), null);
+  equal(api.teamMemberForOwner('', 'NMB Eng', TEAM_MEMBERS), null);
+});
+check("a stored member id wins over stale free text", () => {
+  equal(api.teamMemberForOwner('TM-12', 'Supachai M.', TEAM_MEMBERS)?.id, 'TM-12');
+});
+check("an owed gate is due on its own milestone in the line plan", () => {
+  const project = TEAM_PROJECTS[0];
+  const schedule = api.getDefaultScheduleForRow(project, project.buildMatrix[0]);
+  equal(api.gateSignOffDueIso('brr', schedule), schedule.brrEnd);
+  equal(api.gateSignOffDueIso('mbo', schedule), schedule.mboEnd);
+  equal(api.gateSignOffDueIso('main', schedule), schedule.mainEnd);
+  equal(api.gateSignOffDueIso('oqc', schedule), schedule.oqcEnd);
+  equal(api.gateSignOffDueIso('ship', schedule), schedule.etd);
+  equal(api.gateSignOffDueIso('mih', schedule), schedule.mih);
+  equal(api.gateSignOffDueIso('not-a-gate', schedule), null);
+});
+check('the gate sequence runs forward from prep to PBR and ends past MIH', () => {
+  const project = TEAM_PROJECTS[0];
+  const schedule = api.getDefaultScheduleForRow(project, project.buildMatrix[0]);
+  const order = ['prep', 'bbr', 'brr', 'mbo', 'main', 'oqc', 'ship', 'mih', 'pbr'];
+  const dates = order.map((gateId) => api.gateSignOffDueIso(gateId, schedule));
+  dates.forEach((date, idx) => {
+    assert.ok(date, `${order[idx]} has no due date`);
+    if (idx > 0) assert.ok(dates[idx - 1] <= date, `${order[idx - 1]} falls after ${order[idx]}`);
+  });
+  equal(dates[order.indexOf('mih')], schedule.mih);
+});
+check('a signature carries its deadline and the override moves it', () => {
+  const member = { id: 'TM-99', name: 'Saengtian', products: [] };
+  const load = api.computeTeamWorkload(member, TEAM_PROJECTS, TEAM_TASKS, TEAM_GATES, TEAM_MEMBERS, {});
+  const plan = api.getDefaultScheduleForRow(TEAM_PROJECTS[0], TEAM_PROJECTS[0].buildMatrix[0]);
+  equal(load.signOffs.length, 1);
+  equal(load.signOffs[0].dueIso, plan.brrEnd);
+  // A dragged line schedule is the plan its signatures are judged against.
+  const moved = api.computeTeamWorkload(member, TEAM_PROJECTS, TEAM_TASKS, TEAM_GATES, TEAM_MEMBERS, {
+    'PRJ-X4151::ME11-RHS': { ...plan, brrEnd: '2027-02-01' }
+  });
+  equal(moved.signOffs[0].dueIso, '2027-02-01');
+});
+check('a gate with no plan date sorts after the dated ones', () => {
+  const sorted = [
+    { dueIso: null, projectModel: 'X9', lineKey: 'ME1-RHS', gateCode: 'G9' },
+    { dueIso: '2026-12-05', projectModel: 'X1', lineKey: 'ME1-RHS', gateCode: 'G4' },
+    { dueIso: '2026-11-01', projectModel: 'X1', lineKey: 'ME2-RHS', gateCode: 'G3' }
+  ].sort(api.compareSignOffsByDue);
+  equal(sorted.map((item) => item.dueIso).join(','), '2026-11-01,2026-12-05,');
+});
+check('the product picker offers only models that exist', () => {
+  equal(api.programModels(TEAM_PROJECTS).join(','), 'X4026,X4151');
+  equal(api.programModels([]).length, 0);
+});
+check('a product that matches no program is flagged', () => {
+  equal(api.unmatchedProducts(['x4151', 'X4115', 'X4115', 'MB14"'], TEAM_PROJECTS).join(','), 'X4115,MB14"');
+  equal(api.unmatchedProducts(['X4026'], TEAM_PROJECTS).length, 0);
+  // Padding and casing are not a different program.
+  equal(api.unmatchedProducts([' X4151 ', 'x4151'], TEAM_PROJECTS).length, 0);
+});
+check('a padded product scopes workload exactly like a clean one', () => {
+  const load = api.computeTeamWorkload(
+    { id: 'TM-12', name: 'Patcharapong', products: [' x4151 '] },
+    TEAM_PROJECTS,
+    TEAM_TASKS,
+    TEAM_GATES,
+    TEAM_MEMBERS,
+    {}
+  );
+  equal(load.lines, 2);
+});
+check('a product typo zeroes the lines it was meant to cover', () => {
+  const typo = api.computeTeamWorkload(
+    { id: 'TM-12', name: 'Patcharapong', products: ['X4115'] },
+    TEAM_PROJECTS,
+    TEAM_TASKS,
+    TEAM_GATES,
+    TEAM_MEMBERS
+  );
+  equal(typo.lines, 0);
+  // ...and the flag is what makes that zero visible instead of silent.
+  equal(api.unmatchedProducts(['X4115'], TEAM_PROJECTS).join(','), 'X4115');
+});
+check("a member with no program of their own owns no one else's tasks", () => {
+  const load = api.computeTeamWorkload(TEAM_MEMBERS[2], TEAM_PROJECTS, TEAM_TASKS, TEAM_GATES, TEAM_MEMBERS);
   equal(load.lines, 3);
-  equal(load.openTasks.length, 2);
-  equal(load.signOffs.length, 0);
+  equal(load.openTasks.length, 0);
+  // The portfolio-wide signature still counts: Horikawa owes the pending BRR.
+  equal(load.signOffs.length, 1);
+  equal(load.load, load.signOffs.length);
 });
 check("a multi-name approver owes a signature to each name on it", () => {
-  const load = api.computeTeamWorkload({ name: 'saengtian', products: [] }, TEAM_PROJECTS, TEAM_TASKS, TEAM_GATES);
+  const load = api.computeTeamWorkload(
+    { id: 'TM-02', name: 'saengtian', products: [] },
+    TEAM_PROJECTS,
+    TEAM_TASKS,
+    TEAM_GATES,
+    TEAM_MEMBERS
+  );
   equal(load.signOffs.length, 1);
   // The dossier comes back with its program and line, so the board can open it.
   equal(load.signOffs[0].projectId, 'PRJ-X4151');
   equal(load.signOffs[0].lineKey, 'ME11-RHS');
   equal(load.signOffs[0].gateCode, 'G3');
-  const panida = api.computeTeamWorkload({ name: 'Panida', products: [] }, TEAM_PROJECTS, TEAM_TASKS, TEAM_GATES);
+  const panida = api.computeTeamWorkload(
+    { id: 'TM-14', name: 'Panida', products: [] },
+    TEAM_PROJECTS,
+    TEAM_TASKS,
+    TEAM_GATES,
+    TEAM_MEMBERS
+  );
   equal(panida.signOffs.length, 1);
-  equal(panida.load, 3);
+  equal(panida.load, 1);
+});
+
+// --- sign-off ledger (Code.js) ---
+
+const LEDGER_PROJECTS = [{ id: 'PRJ-X4151', model: 'X4151' }];
+const ledgerRecords = (decision) => ({
+  'PRJ-X4151': {
+    'ME11-RHS': {
+      mbo: {
+        approvers: [
+          { name: 'Horikawa', role: 'Engineering Manager', decision, remark: 'Verified against the MBO checklist' }
+        ]
+      }
+    }
+  }
+});
+const LEDGER_META = {
+  timestamp: '2026-11-26T10:00:00.000Z',
+  revision: 7,
+  userEmail: 'auditor@minebea.co.th'
+};
+
+check('a changed decision appends one immutable row naming the signer', () => {
+  const rows = serverApi.signOffLedgerRows(
+    ledgerRecords('Pending'),
+    ledgerRecords('Approved'),
+    LEDGER_PROJECTS,
+    LEDGER_META
+  );
+  equal(rows.length, 1);
+  equal(
+    rows[0].join('|'),
+    '2026-11-26T10:00:00.000Z|7|PRJ-X4151|X4151|ME11-RHS|G4 MBO & OK2B|Horikawa|Engineering Manager|Approved|Verified against the MBO checklist|auditor@minebea.co.th'
+  );
+  equal(rows[0].length, serverApi.SIGN_OFF_LEDGER_HEADERS.length);
+});
+check('an unchanged save appends nothing', () => {
+  equal(
+    serverApi.signOffLedgerRows(ledgerRecords('Approved'), ledgerRecords('Approved'), LEDGER_PROJECTS, LEDGER_META).length,
+    0
+  );
+});
+check('a gate this save created is not somebody approving', () => {
+  equal(serverApi.signOffLedgerRows({}, ledgerRecords('Approved'), LEDGER_PROJECTS, LEDGER_META).length, 0);
+});
+check('the first seed has no ledger to write', () => {
+  equal(serverApi.signOffLedgerRows(null, ledgerRecords('Approved'), LEDGER_PROJECTS, LEDGER_META).length, 0);
+});
+check('a rejection is a decision too', () => {
+  const rows = serverApi.signOffLedgerRows(
+    ledgerRecords('Approved'),
+    ledgerRecords('Rejected'),
+    LEDGER_PROJECTS,
+    LEDGER_META
+  );
+  equal(rows.length, 1);
+  equal(rows[0][8], 'Rejected');
+});
+check('the ledger header names the program, gate, approver and signer', () => {
+  ['Timestamp', 'Program', 'Line', 'Gate', 'Approver', 'Decision', 'SignedInEmail'].forEach((column) => {
+    assert.ok(serverApi.SIGN_OFF_LEDGER_HEADERS.indexOf(column) !== -1, `missing ${column}`);
+  });
 });
 
 for (const r of results) {

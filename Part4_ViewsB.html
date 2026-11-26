@@ -1377,17 +1377,23 @@ function DeleteBuildMatrixRowModal({ project, row, onClose, onConfirm }) {
   );
 }
 
-function NewTaskModal({ projects, onClose, onSubmit }) {
-  const [form, setForm] = useState({
-    projectId: projects[0]?.id || 'PRJ-X4151',
-    gateId: projects[0]?.currentGateId || 'mbo',
-    processStep: PROCESS_STEPS[0],
-    category: TASK_CATEGORIES[0],
-    title: '',
-    owner: 'Patcharapong J.',
-    priority: 'High',
-    dueDate: '2026-12-05',
-    description: ''
+function NewTaskModal({ projects, members = [], onClose, onSubmit }) {
+  const [form, setForm] = useState(() => {
+    const owner = 'Patcharapong J.';
+    return {
+      projectId: projects[0]?.id || 'PRJ-X4151',
+      gateId: projects[0]?.currentGateId || 'mbo',
+      processStep: PROCESS_STEPS[0],
+      category: TASK_CATEGORIES[0],
+      title: '',
+      owner,
+      // Preselect the seed name's roster entry, so a new task is personal without
+      // anyone having to notice the picker.
+      ownerId: teamMemberForOwner('', owner, members)?.id || '',
+      priority: 'High',
+      dueDate: '2026-12-05',
+      description: ''
+    };
   });
 
   const handleSubmit = (e) => {
@@ -1486,11 +1492,33 @@ function NewTaskModal({ projects, onClose, onSubmit }) {
           <div className="grid grid-cols-3 gap-2.5">
             <div>
               <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">DRI Owner</label>
-              <input
-                value={form.owner}
-                onChange={(e) => setForm({ ...form, owner: e.target.value })}
-                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
-              />
+              <select
+                value={form.ownerId}
+                onChange={(e) => {
+                  const linked = members.find((member) => member.id === e.target.value) || null;
+                  setForm({
+                    ...form,
+                    ownerId: linked ? linked.id : '',
+                    owner: linked ? linked.name : form.owner
+                  });
+                }}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                <option value="">Not on the roster</option>
+                {members.map((member) => (
+                  <option key={member.id} value={member.id}>
+                    {member.name} · {member.role}
+                  </option>
+                ))}
+              </select>
+              {!form.ownerId && (
+                <input
+                  value={form.owner}
+                  onChange={(e) => setForm({ ...form, owner: e.target.value })}
+                  placeholder="e.g. Kanya R."
+                  className="w-full mt-1 px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+                />
+              )}
             </div>
             <div>
               <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Priority</label>

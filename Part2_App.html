@@ -1380,6 +1380,8 @@ function App() {
       category: TASK_CATEGORIES.includes(form.category) ? form.category : TASK_CATEGORIES[0],
       title: form.title,
       owner: form.owner || 'Patcharapong J.',
+      // The roster link survives a rename; the text is the readable fallback.
+      ownerId: form.ownerId || '',
       priority: form.priority || 'High',
       status: 'To Do',
       dueDate: form.dueDate || '2026-12-05',
@@ -3185,6 +3187,7 @@ function App() {
                     projects={projects}
                     tasks={tasks}
                     gateRecords={gateRecords}
+                    scheduleOverrides={scheduleOverrides}
                     onOpenNew={() => setNewTeamMemberModalOpen(true)}
                     onEdit={(member) => setEditingTeamMember(member)}
                     onDelete={(member) => setDeletingTeamMember(member)}
@@ -3244,6 +3247,7 @@ function App() {
       {newTaskModalOpen && (
         <NewTaskModal
           projects={projects}
+          members={teamMembers}
           onClose={() => setNewTaskModalOpen(false)}
           onSubmit={handleCreateTask}
         />
@@ -3412,6 +3416,7 @@ function App() {
         <TeamMemberModal
           member={editingTeamMember}
           members={teamMembers}
+          projects={projects}
           onClose={() => {
             setNewTeamMemberModalOpen(false);
             setEditingTeamMember(null);
@@ -3425,7 +3430,7 @@ function App() {
         <DeleteTeamMemberModal
           member={deletingTeamMember}
           reports={teamMembers.filter((m) => m.reportsTo === deletingTeamMember.id)}
-          workload={computeTeamWorkload(deletingTeamMember, projects, tasks, gateRecords)}
+          workload={computeTeamWorkload(deletingTeamMember, projects, tasks, gateRecords, teamMembers, scheduleOverrides)}
           onClose={() => setDeletingTeamMember(null)}
           onConfirm={() => handleDeleteTeamMember(deletingTeamMember.id)}
         />
