@@ -60,6 +60,14 @@ check("Bundle.html escapes http:// as http:\\/\\/", () => {
   assert.ok(read("Bundle.html").includes("http:\\/\\/"));
 });
 
+check("Bundle.html has no raw https:// (Apps Script truncates the line)", () => {
+  assert.ok(!read("Bundle.html").includes("https://"));
+});
+
+check("Bundle.html escapes https:// as https:\\/\\/", () => {
+  assert.ok(read("Bundle.html").includes("https:\\/\\/"));
+});
+
 for (const r of results) {
   console.log(`  ${r.ok ? "pass" : "FAIL"}  ${r.label}${r.ok ? "" : `  (${r.message})`}`);
 }

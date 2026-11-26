@@ -74,9 +74,15 @@ async function buildScript() {
   // For the same reason it reads `<?` as the start of a template scriptlet, so
   // SheetJS's literal "<?xml" declaration needs its delimiter broken — `\?` is
   // likewise the same character to the running JS.
+  // `https://` is truncated the same way (`//` starts a line comment to the
+  // HTML pipeline), including inside ordinary string literals. The Drive-link
+  // validation message is one such string, and losing the rest of its line
+  // left an unterminated call — the "Invalid or unexpected token" startup
+  // error. Escape its delimiter too.
   const js = result.outputFiles[0].text
     .replace(/<\/script/gi, "<\\/script")
     .replaceAll("http://", "http:\\/\\/")
+    .replaceAll("https://", "https:\\/\\/")
     .replaceAll("<?", "<\\?");
   writeFileSync(
     BUNDLE,
