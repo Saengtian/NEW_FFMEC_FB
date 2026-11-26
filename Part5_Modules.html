@@ -2984,12 +2984,32 @@ const KPI_FAMILY_BUILDERS = {
 
 function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, thinNote }) {
   const [activeIdx, setActiveIdx] = useState(null);
+  const wrapRef = useRef(null);
+  const [chartW, setChartW] = useState(640);
+
+  // The viewBox follows the rendered width: a fixed 640-wide box inside a narrow
+  // modal used to shrink every label to ~4px and letterbox the plot.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const measure = () => {
+      const width = Math.round(el.getBoundingClientRect().width);
+      if (width > 0) setChartW(Math.max(280, Math.min(960, width)));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   if (!points || points.length === 0) return null;
   const hasThin = points.some((p) => p.thin);
-  const W = 640;
+  const W = chartW;
   const H = 190;
   const padL = 38;
-  const padR = 14;
+  // Keep the target label in its own right gutter so it never prints over the
+  // last point, the way the report KPI charts already do.
+  const padR = target === null || target === undefined ? 16 : 76;
   const padT = 14;
   const padB = 26;
 
@@ -3014,10 +3034,11 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
   const xTickIdx = points.length <= 4 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
 
   return (
-    <div>
+    <div ref={wrapRef}>
     <svg
       viewBox={`0 0 ${W} ${H}`}
-      className="w-full h-48"
+      className="w-full"
+      style={{ display: 'block', height: 'auto' }}
       role="group"
       aria-label={`KPI trend chart, ${points.length} point${points.length === 1 ? '' : 's'} from ${points[0].label} to ${points[points.length - 1].label}. Use Tab to step through each point.`}
     >
@@ -3044,7 +3065,7 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
             strokeWidth="1"
             strokeDasharray="5 4"
           />
-          <text x={W - padR} y={yOf(target) - 4} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px' }}>
+          <text x={W - 3} y={yOf(target) + 3} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px' }}>
             target {target.toFixed(digits)}{unit}
           </text>
         </g>
@@ -3636,6 +3657,7 @@ function TeamMembersView({
   onEdit,
   onDelete,
   onOpenTask,
+  onAssignTaskOwner,
   onOpenGate
 }) {
   const [search, setSearch] = useState('');
@@ -3651,25 +3673,42 @@ function TeamMembersView({
   );
 
   const productOptions = useMemo(() => {
-    const set = new Set();
-    members.forEach((member) => (member.products || []).forEach((product) => set.add(product)));
-    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    const options = [];
+    members.forEach((member) => {
+      options.push(...(member.products || []), ...memberExternalPrograms(member));
+    });
+    return distinctProductStrings(options).sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true })
+    );
   }, [members]);
 
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     return members
       .filter((member) => roleFilter === 'ALL' || member.role === roleFilter)
-      .filter((member) => productFilter === 'ALL' || (member.products || []).includes(productFilter))
+      .filter((member) => {
+        if (productFilter === 'ALL') return true;
+        const picked = normalizeProductKey(productFilter);
+        return [...(member.products || []), ...memberExternalPrograms(member)].some(
+          (product) => normalizeProductKey(product) === picked
+        );
+      })
       .filter((member) => {
         if (!q) return true;
-        return [member.name, member.role, member.email, (member.products || []).join(', ')].some((value) =>
-          String(value || '').toLowerCase().includes(q)
-        );
+        return [
+          member.name,
+          member.role,
+          member.email,
+          (member.products || []).join(', '),
+          memberExternalPrograms(member).join(', ')
+        ].some((value) => String(value || '').toLowerCase().includes(q));
       })
       // Load walks every gate dossier, so it is only computed for visible members.
       .map((member) => ({
         member,
+        // Programs outside this workspace are listed separately: they are never a
+        // typo and never a reason to read the member as portfolio-wide.
+        external: memberExternalPrograms(member),
         // Keyed by the same normalisation the workload uses, so a padded or
         // re-cased stored string is flagged wherever it is counted.
         unmatchedKeys: new Set(unmatchedProducts(member.products, projects).map(normalizeProductKey)),
@@ -3685,27 +3724,59 @@ function TeamMembersView({
     return map;
   }, [members]);
 
+  // Open work nobody on the roster owns. Personal counts cannot show it, so the
+  // board lists it here — one row per task, soonest due first.
+  const unassignedTasks = useMemo(() => {
+    const modelById = {};
+    projects.forEach((project) => {
+      modelById[project.id] = project.model;
+    });
+    return unassignedOpenTasks(tasks, members)
+      .map((task) => {
+        const gate = NPI_GATES.find((entry) => entry.id === task.gateId);
+        return { task, projectModel: modelById[task.projectId] || '', gateCode: gate?.code || '' };
+      })
+      .sort((a, b) => {
+        const dueA = a.task.dueDate || '9999-12-31';
+        const dueB = b.task.dueDate || '9999-12-31';
+        if (dueA !== dueB) return dueA.localeCompare(dueB);
+        return String(a.task.id).localeCompare(String(b.task.id));
+      });
+  }, [tasks, members, projects]);
+
   const summary = useMemo(() => {
-    // Cover counts only models that exist as a program — the same rule the amber
-    // chips use, so a typo cannot inflate this card the way it used to inflate
-    // workload. Members holding an unmatched product are counted separately.
-    const known = new Set(programModels(projects).map(normalizeProductKey));
-    const covered = new Set();
+    // A program counts as covered when some member names its model or its family
+    // — the same rule the amber chips use, so a typo cannot inflate this card the
+    // way it used to inflate workload.
+    const coveredPrograms = new Set();
     let totalLoad = 0;
     let unassigned = 0;
+    let externalMembers = 0;
     let withoutEmail = 0;
     let unmatchedMembers = 0;
-    rows.forEach(({ member, workload, unmatchedKeys }) => {
+    rows.forEach(({ member, workload, unmatchedKeys, external }) => {
       (member.products || []).forEach((product) => {
-        const key = normalizeProductKey(product);
-        if (known.has(key)) covered.add(key);
+        projects.forEach((project) => {
+          if (productMatchesProject(product, project)) coveredPrograms.add(project.id);
+        });
       });
       totalLoad += workload.load;
-      if ((member.products || []).length === 0) unassigned += 1;
+      // Portfolio-wide means nothing on file at all. A program this workspace does
+      // not run is still an assignment, so it cannot count as unassigned.
+      if ((member.products || []).length === 0 && external.length === 0) unassigned += 1;
+      if (external.length > 0) externalMembers += 1;
       if (!String(member.email || '').trim()) withoutEmail += 1;
       if (unmatchedKeys.size > 0) unmatchedMembers += 1;
     });
-    return { products: covered.size, totalLoad, unassigned, withoutEmail, unmatchedMembers, programs: known.size };
+    return {
+      programsCovered: coveredPrograms.size,
+      programs: projects.length,
+      totalLoad,
+      unassigned,
+      externalMembers,
+      withoutEmail,
+      unmatchedMembers
+    };
   }, [rows, projects]);
 
   const maxLoad = useMemo(() => Math.max(1, ...rows.map((row) => row.workload.load)), [rows]);
@@ -3725,13 +3796,15 @@ function TeamMembersView({
           </div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400">
             {summary.unassigned} without a product assignment
+            {summary.externalMembers > 0 &&
+              ` · ${summary.externalMembers} assigned outside this workspace`}
           </div>
         </div>
 
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
-          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Products Covered</div>
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Programs Covered</div>
           <div className="text-2xl font-bold text-blue-700 dark:text-blue-300 tabular-nums">
-            {summary.products}
+            {summary.programsCovered}
             <span className="text-xs font-normal text-slate-400 dark:text-slate-400"> / {summary.programs}</span>
           </div>
           <div
@@ -3774,6 +3847,104 @@ function TeamMembersView({
           </div>
         </div>
       </div>
+
+      <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              Unassigned work
+              <span
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold tabular-nums border ${
+                  unassignedTasks.length > 0
+                    ? 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-800'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-800'
+                }`}
+              >
+                {unassignedTasks.length}
+              </span>
+            </h2>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              Open tasks whose owner is not on the roster — they count for nobody until someone claims them.
+            </p>
+          </div>
+          {unassignedTasks.length === 0 && (
+            <span className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+              Every open task has a roster owner
+            </span>
+          )}
+        </div>
+
+        {unassignedTasks.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800/60 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                <tr>
+                  <th className="px-4 py-2 font-bold">Task</th>
+                  <th className="px-3 py-2 font-bold">Program · Gate</th>
+                  <th className="px-3 py-2 font-bold">Due</th>
+                  <th className="px-3 py-2 font-bold">Owner on file</th>
+                  <th className="px-3 py-2 font-bold">Claim</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {unassignedTasks.map(({ task, projectModel, gateCode }) => (
+                  <tr key={task.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/60 transition-colors">
+                    <td className="px-4 py-2.5">
+                      <button
+                        type="button"
+                        onClick={() => onOpenTask(task.id)}
+                        title={`Open ${task.id}`}
+                        className="text-left group"
+                      >
+                        <div className="text-[10px] font-mono font-bold text-slate-500 dark:text-slate-400">
+                          {task.id} · {task.status}
+                        </div>
+                        <div className="font-semibold text-slate-800 dark:text-slate-100 leading-snug group-hover:text-blue-700 dark:group-hover:text-blue-300">
+                          {task.title}
+                        </div>
+                      </button>
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                      {projectModel || '—'}
+                      {gateCode ? ` · ${gateCode}` : ''}
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300 tabular-nums whitespace-nowrap">
+                      {task.dueDate || '—'}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className="font-medium text-slate-700 dark:text-slate-300">
+                        {String(task.owner || '').trim() || 'No owner'}
+                      </span>
+                      {task.ownerId && (
+                        <div className="text-[10px] text-slate-400 dark:text-slate-500">
+                          stored member {task.ownerId} is not on the roster
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <select
+                        value=""
+                        onChange={(event) => {
+                          if (event.target.value) onAssignTaskOwner(task.id, event.target.value);
+                        }}
+                        aria-label={`Assign ${task.id} to a roster member`}
+                        className={selectClass}
+                      >
+                        <option value="">Assign to…</option>
+                        {members.map((member) => (
+                          <option key={member.id} value={member.id}>
+                            {member.name} · {member.role}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
       <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
         {/* Toolbar: search, role, product, add */}
@@ -3839,7 +4010,7 @@ function TeamMembersView({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {rows.map(({ member, workload, unmatchedKeys }) => (
+                {rows.map(({ member, workload, unmatchedKeys, external }) => (
                   <tr key={member.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/60 transition-colors">
                     <td className="px-4 py-2.5">
                       <div className="font-bold text-slate-900 dark:text-slate-100">{member.name}</div>
@@ -3860,10 +4031,15 @@ function TeamMembersView({
                       {nameById[member.reportsTo] || '—'}
                     </td>
                     <td className="px-3 py-2.5">
-                      {(member.products || []).length === 0 ? (
+                      {(member.products || []).length === 0 && external.length === 0 ? (
                         <span className="text-slate-400 dark:text-slate-500">Portfolio-wide</span>
                       ) : (
-                        <span className="flex flex-wrap gap-1">
+                        <span className="flex flex-wrap items-center gap-1">
+                          {(member.products || []).length === 0 && (
+                            <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                              No program in this workspace
+                            </span>
+                          )}
                           {(member.products || []).map((product, index) => {
                             const orphan = unmatchedKeys.has(normalizeProductKey(product));
                             return (
@@ -3886,6 +4062,15 @@ function TeamMembersView({
                               </span>
                             );
                           })}
+                          {external.map((product) => (
+                            <span
+                              key={`external-${product}`}
+                              title={`${product} is not a program in this workspace — kept on file; it adds no lines, tasks or signatures here`}
+                              className="inline-flex items-center px-1.5 py-0.5 rounded border border-dashed border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-[10px] font-semibold text-slate-500 dark:text-slate-400"
+                            >
+                              {product}
+                            </span>
+                          ))}
                         </span>
                       )}
                     </td>
@@ -3930,6 +4115,9 @@ function TeamMembersView({
                           {workload.signOffs.length} signature{workload.signOffs.length === 1 ? '' : 's'} owed
                         </button>
                         {` · ${workload.lines} line${workload.lines === 1 ? '' : 's'}`}
+                        {workload.lines === 0 && workload.externalPrograms.length > 0 && (
+                          <span className="text-slate-400 dark:text-slate-500"> outside this workspace</span>
+                        )}
                       </div>
                     </td>
                     <td className="px-3 py-2.5">
@@ -3962,10 +4150,11 @@ function TeamMembersView({
         )}
 
         <div className="px-4 py-2.5 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 text-[10px] text-slate-500 dark:text-slate-400">
-          Workload is derived from the plan: the member's own open tasks plus the gate signatures still owed. An
-          amber product matches no program and contributes nothing — pick a real model in that member's row. A task
-          with no roster match belongs to nobody, and a member with no product is measured across the portfolio.
-          Click a count to see the records behind it.
+          Workload is derived from the plan: the member's own open tasks plus the gate signatures still owed. A
+          program or family covers its lines; a dashed program is outside this workspace, so it stays on file but
+          adds nothing here; an amber product matches no program (a typo) and also adds nothing; and a member with
+          nothing on file is measured across the portfolio. A task with no roster match counts for nobody — it is
+          listed under Unassigned work so someone can claim it. Click a count to see the records behind it.
         </div>
       </section>
 
@@ -4025,6 +4214,12 @@ function TeamWorkloadDrawer({ member, workload, focus, onClose, onOpenTask, onOp
               {member.role} · {workload.load} open item{workload.load === 1 ? '' : 's'} across{' '}
               {workload.lines} line{workload.lines === 1 ? '' : 's'}
             </p>
+            {workload.externalPrograms.length > 0 && (
+              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
+                Outside this workspace: {workload.externalPrograms.join(', ')} — kept on file, no lines or
+                signatures here.
+              </p>
+            )}
           </div>
           <button
             type="button"
@@ -4152,18 +4347,33 @@ function TeamWorkloadDrawer({ member, workload, focus, onClose, onOpenTask, onOp
 }
 
 function TeamMemberModal({ member, members, projects = [], onClose, onSubmit }) {
-  const [form, setForm] = useState(() => ({
-    name: member?.name || '',
-    role: member?.role || TEAM_ROLES[0],
-    reportsTo: member?.reportsTo || '',
-    email: member?.email || '',
-    products: (member?.products || []).map(String)
-  }));
+  // Only real assignments are offered — a program model, or a family that covers
+  // every program in it. Anything else on file stays visible instead of being
+  // dropped behind the user's back: a typo as a flagged product, a program this
+  // workspace does not run in the dashed list.
+  const models = programModels(projects);
+  const families = programFamilies(projects);
+  const programChoices = [...models, ...families];
+  const namesProgram = (product) =>
+    programChoices.some((choice) => normalizeProductKey(choice) === normalizeProductKey(product));
+
+  const [form, setForm] = useState(() => {
+    const products = (member?.products || []).map(String);
+    const external = (member?.externalProducts || []).map(String);
+    // An outside entry that names a live program is a program assignment;
+    // promoting it on open keeps one string from sitting in both states.
+    return {
+      name: member?.name || '',
+      role: member?.role || TEAM_ROLES[0],
+      reportsTo: member?.reportsTo || '',
+      email: member?.email || '',
+      products: Array.from(new Set([...products, ...external.filter(namesProgram)])),
+      externalProducts: external.filter((product) => !namesProgram(product))
+    };
+  });
+  const [externalDraft, setExternalDraft] = useState('');
   const [error, setError] = useState('');
 
-  // Only models that exist as a program are offered; anything else already on
-  // file is kept visible (and flagged) rather than dropped behind the user's back.
-  const programs = programModels(projects);
   const unmatched = unmatchedProducts(form.products, projects);
 
   const toggleProduct = (model) => {
@@ -4182,6 +4392,53 @@ function TeamMemberModal({ member, members, projects = [], onClose, onSubmit }) 
   const removeProduct = (product) => {
     const key = normalizeProductKey(product);
     setForm({ ...form, products: form.products.filter((entry) => normalizeProductKey(entry) !== key) });
+  };
+
+  const removeExternalProduct = (product) => {
+    const key = normalizeProductKey(product);
+    setForm({
+      ...form,
+      externalProducts: form.externalProducts.filter((entry) => normalizeProductKey(entry) !== key)
+    });
+  };
+
+  // A program outside this workspace is typed, not picked. If what was typed is
+  // actually a live model or family, it is selected as one instead of being filed
+  // as outside — the two lists can never hold the same program.
+  const addExternalProduct = () => {
+    const value = externalDraft.trim();
+    if (!value) return;
+    const key = normalizeProductKey(value);
+    const known = programChoices.find((choice) => normalizeProductKey(choice) === key);
+    if (known) {
+      if (!form.products.some((entry) => normalizeProductKey(entry) === key)) {
+        setForm({ ...form, products: [...form.products, known] });
+      }
+    } else if (!form.externalProducts.some((entry) => normalizeProductKey(entry) === key)) {
+      setForm({ ...form, externalProducts: [...form.externalProducts, value] });
+    }
+    setExternalDraft('');
+  };
+
+  const productChip = (product) => {
+    const selected = form.products.some(
+      (entry) => normalizeProductKey(entry) === normalizeProductKey(product)
+    );
+    return (
+      <button
+        key={product}
+        type="button"
+        aria-pressed={selected}
+        onClick={() => toggleProduct(product)}
+        className={`px-2 py-1 rounded-md border text-[11px] font-semibold transition-colors ${
+          selected
+            ? 'bg-blue-600 border-blue-600 text-white'
+            : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-blue-400 dark:hover:border-blue-700'
+        }`}
+      >
+        {product}
+      </button>
+    );
   };
 
   const handleSubmit = (event) => {
@@ -4203,16 +4460,13 @@ function TeamMemberModal({ member, members, projects = [], onClose, onSubmit }) 
       email,
       // A picked model keeps the program's own spelling; a leftover string is
       // kept as typed until someone removes it.
-      products: Array.from(
-        new Set(
-          form.products
-            .map((product) => {
-              const match = programs.find((model) => normalizeProductKey(model) === normalizeProductKey(product));
-              return match || product.trim();
-            })
-            .filter(Boolean)
-        )
-      )
+      products: distinctProductStrings(
+        form.products.map((product) => {
+          const match = programChoices.find((choice) => normalizeProductKey(choice) === normalizeProductKey(product));
+          return match || product;
+        })
+      ),
+      externalProducts: distinctProductStrings(form.externalProducts)
     });
   };
 
@@ -4304,37 +4558,83 @@ function TeamMemberModal({ member, members, projects = [], onClose, onSubmit }) 
             <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
               Product assignment
             </label>
-            <div className="flex flex-wrap gap-1.5 p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40">
-              {programs.length === 0 ? (
+            <div className="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 space-y-1.5">
+              {programChoices.length === 0 ? (
                 <span className="text-[10px] text-slate-500 dark:text-slate-400">
                   No NPI program exists yet — every member is portfolio-wide until one is created.
                 </span>
               ) : (
-                programs.map((model) => {
-                  const selected = form.products.some(
-                    (product) => normalizeProductKey(product) === normalizeProductKey(model)
-                  );
-                  return (
-                    <button
-                      key={model}
-                      type="button"
-                      aria-pressed={selected}
-                      onClick={() => toggleProduct(model)}
-                      className={`px-2 py-1 rounded-md border text-[11px] font-semibold transition-colors ${
-                        selected
-                          ? 'bg-blue-600 border-blue-600 text-white'
-                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-blue-400 dark:hover:border-blue-700'
-                      }`}
-                    >
-                      {model}
-                    </button>
-                  );
-                })
+                <>
+                  {models.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-[9px] uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                        Programs
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">{models.map(productChip)}</div>
+                    </div>
+                  )}
+                  {families.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-[9px] uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                        Families
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">{families.map(productChip)}</div>
+                    </div>
+                  )}
+                </>
               )}
+              <div className="space-y-1 border-t border-slate-200 dark:border-slate-800 pt-1.5">
+                <div className="text-[9px] uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                  Outside this workspace
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {form.externalProducts.length === 0 && (
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500">None</span>
+                  )}
+                  {form.externalProducts.map((product) => (
+                    <span
+                      key={`external-${product}`}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-dashed border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-[11px] font-semibold text-slate-500 dark:text-slate-400"
+                    >
+                      {product}
+                      <button
+                        type="button"
+                        onClick={() => removeExternalProduct(product)}
+                        aria-label={`Remove ${product}`}
+                        className="text-slate-400 hover:text-rose-600 dark:hover:text-rose-400"
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                  <input
+                    type="text"
+                    value={externalDraft}
+                    onChange={(e) => setExternalDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addExternalProduct();
+                      }
+                    }}
+                    placeholder="e.g. X3439"
+                    aria-label="Add a program outside this workspace"
+                    className="w-28 px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-[11px] focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={addExternalProduct}
+                    className="px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:border-blue-400 dark:hover:border-blue-700"
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
             </div>
             <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1">
-              Only models that exist as an NPI program are offered. Leave all unselected for a portfolio-wide role —
-              workload then counts every program.
+              A program model or a family covers its lines. A program this workspace does not run belongs in the
+              dashed list: it stays on file and covers nothing here. Leave both lists empty for a portfolio-wide
+              role — workload then counts every program.
             </p>
 
             {unmatched.length > 0 && (
@@ -4412,8 +4712,12 @@ function DeleteTeamMemberModal({ member, reports, workload, onClose, onConfirm }
               {member.name} · {member.role}
             </div>
             <div className="text-[11px] text-slate-500 dark:text-slate-400">
-              {(member.products || []).join(', ') || 'Portfolio-wide'} · workload {workload.load} (
-              {workload.openTasks.length} open tasks, {workload.signOffs.length} signatures owed)
+              {[
+                ...(member.products || []),
+                ...memberExternalPrograms(member).map((product) => `${product} (outside this workspace)`)
+              ].join(', ') || 'Portfolio-wide'}{' '}
+              · workload {workload.load} ({workload.openTasks.length} open tasks,{' '}
+              {workload.signOffs.length} signatures owed)
             </div>
             {reports.length > 0 && (
               <div className="text-[11px] text-amber-700 dark:text-amber-300">

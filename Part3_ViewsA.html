@@ -8,68 +8,20 @@ function OverviewView({
   records,
   tasks,
   gateRecords,
-  masterSpecs,
-  cpkRecords,
   costProjects,
   customerFeedback,
-  lastUploadBatch,
   globalSide,
   onOpenKpiDrilldown,
   onOpenGate,
-  onOpenCpkChart,
-  onOpenCpkImport,
   onSelectTask,
   onSwitchView
 }) {
-  const [cpkScopeMode, setCpkScopeMode] = useState('all'); // 'all' | 'uploaded'
-
   const blockedOrHighTasks = useMemo(
     () => tasks.filter((t) => t.status !== 'Done').slice(0, 5),
     [tasks]
   );
 
   const recentRecords = useMemo(() => records.slice(0, 5), [records]);
-
-  const effectiveCpkScope =
-    lastUploadBatch && cpkScopeMode === 'uploaded' ? 'uploaded' : 'all';
-
-  const visibleDashboardSpecs = useMemo(() => {
-    if (effectiveCpkScope === 'uploaded' && lastUploadBatch) {
-      const idSet = new Set(lastUploadBatch.matchedSpecIds);
-      return masterSpecs.filter((s) => idSet.has(s.id));
-    }
-    return masterSpecs;
-  }, [masterSpecs, effectiveCpkScope, lastUploadBatch]);
-
-  const cpkMatrixRows = useMemo(() => {
-    const sourceRecs =
-      effectiveCpkScope === 'uploaded' && lastUploadBatch
-        ? cpkRecords.filter((r) => r.uploadBatchId === lastUploadBatch.id)
-        : cpkRecords;
-
-    const map = new Map();
-    sourceRecs.forEach((r) => {
-      const key = `${r.model}-${r.phase}-${r.side}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          key,
-          model: r.model,
-          phase: r.phase,
-          side: r.side,
-          config: r.config,
-          sourceFile: r.sourceFile || null,
-          bySpec: {}
-        });
-      }
-      if (r.sourceFile) map.get(key).sourceFile = r.sourceFile;
-      map.get(key).bySpec[r.specId] = r;
-    });
-    return Array.from(map.values()).sort((a, b) => {
-      const m = a.model.localeCompare(b.model);
-      if (m !== 0) return m;
-      return SIDE_ORDER.indexOf(a.side) - SIDE_ORDER.indexOf(b.side);
-    });
-  }, [cpkRecords, effectiveCpkScope, lastUploadBatch]);
 
   // KPI results roll-up: weighted actuals from the in-scope production runs.
   const kpiResults = useMemo(() => {
@@ -105,25 +57,6 @@ function OverviewView({
       efficiency
     };
   }, [records]);
-
-  // Process capability roll-up across the visible (scoped) Cpk matrix.
-  const cpkRollup = useMemo(() => {
-    let green = 0;
-    let yellow = 0;
-    let orange = 0;
-    cpkMatrixRows.forEach((row) => {
-      visibleDashboardSpecs.forEach((spec) => {
-        const rec = row.bySpec[spec.id];
-        if (!rec) return;
-        const { cpk } = computeCapabilityStats(rec, effectiveSpecForRecord(spec, rec));
-        if (cpk > 1.33) green += 1;
-        else if (cpk >= 1.0) yellow += 1;
-        else orange += 1;
-      });
-    });
-    const total = green + yellow + orange;
-    return { green, yellow, orange, total, passRate: total > 0 ? (green / total) * 100 : 0 };
-  }, [cpkMatrixRows, visibleDashboardSpecs]);
 
   // FY2026 KPI scorecard: the six official targets measured against current data.
   const kpiTiles = useMemo(() => {
@@ -434,191 +367,6 @@ function OverviewView({
             ))}
           </div>
         )}
-      </section>
-
-      {/* Process Capability (Cpk) Matrix with Green / Yellow / Orange Coloration */}
-      <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">
-              Process Capability (Cpk) by Parameter &amp; Master Spec
-            </h2>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-              Click any Cpk value to open the interactive Process Capability Chart &amp; Master Specification
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-[11px]">
-            {lastUploadBatch && (
-              <div className="inline-flex rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/70 p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setCpkScopeMode('uploaded')}
-                  className={`px-2 py-0.5 rounded-md font-semibold transition-colors ${
-                    effectiveCpkScope === 'uploaded'
-                      ? 'bg-blue-600 text-white'
-                      : 'text-blue-800 dark:text-blue-200 hover:bg-blue-100 dark:hover:bg-blue-900'
-                  }`}
-                >
-                  Uploaded &amp; Matched ({lastUploadBatch.matchedSpecIds.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCpkScopeMode('all')}
-                  className={`px-2 py-0.5 rounded-md font-semibold transition-colors ${
-                    effectiveCpkScope === 'all'
-                      ? 'bg-slate-900 dark:bg-slate-700 text-white'
-                      : 'text-slate-600 dark:text-slate-400 hover:bg-white dark:hover:bg-slate-900 dark:dark:hover:bg-slate-700'
-                  }`}
-                >
-                  All ({masterSpecs.length})
-                </button>
-              </div>
-            )}
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 font-semibold tabular-nums">
-              Cpk &ge; 1.33 share: {cpkRollup.passRate.toFixed(0)}% ({cpkRollup.green}/{cpkRollup.total})
-            </span>
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 font-semibold">
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-              Cpk &gt; 1.33
-            </span>
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-yellow-50 dark:bg-yellow-950 text-yellow-800 dark:text-yellow-200 border border-yellow-300 dark:border-yellow-700 font-semibold">
-              <span className="w-2 h-2 rounded-full bg-yellow-500" />
-              1.0 ≤ Cpk ≤ 1.33
-            </span>
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-orange-50 dark:bg-orange-950 text-orange-800 dark:text-orange-200 border border-orange-300 dark:border-orange-700 font-semibold">
-              <span className="w-2 h-2 rounded-full bg-orange-500" />
-              Cpk &lt; 1.0
-            </span>
-            <button
-              type="button"
-              onClick={onOpenCpkImport}
-              className="px-2.5 py-1 rounded-lg bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 text-white text-[11px] font-semibold inline-flex items-center gap-1.5 transition-colors"
-            >
-              <Upload className="w-3 h-3" />
-              <span>Upload Excel / CSV</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onSwitchView('cpk')}
-              className="ml-1 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 inline-flex items-center gap-1"
-            >
-              <span>Master Specs</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-
-        {lastUploadBatch && (
-          <div className="px-5 py-2 bg-blue-50/70 dark:bg-blue-950/70 border-b border-blue-200/70 dark:border-blue-800/70 flex flex-wrap items-center justify-between gap-2 text-[11px] text-blue-900 dark:text-blue-100">
-            <div className="flex items-center gap-2">
-              <FileSpreadsheet className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-              <span>
-                Active Upload: <strong>{lastUploadBatch.fileName}</strong> ·{' '}
-                <strong>{lastUploadBatch.recordsUpdated}</strong> matched Cpk cells updated
-                {lastUploadBatch.generatedSpecCount > 0 && (
-                  <> · <strong>{lastUploadBatch.generatedSpecCount}</strong> new Master Specs generated</>
-                )}
-              </span>
-            </div>
-            <span className="text-blue-700/80 dark:text-blue-300/80 tabular-nums">{lastUploadBatch.time}</span>
-          </div>
-        )}
-
-        <div className="overflow-x-auto">
-          {cpkMatrixRows.length === 0 ? (
-            <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
-              No Cpk records match the current Global Scope.
-            </div>
-          ) : (
-            <table className="w-full text-left border-collapse text-xs">
-              <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                <tr>
-                  <th className="py-2.5 px-3.5 whitespace-nowrap border-r border-slate-200 dark:border-slate-800">
-                    Model · Phase · Side
-                  </th>
-                  {visibleDashboardSpecs.map((spec) => (
-                    <th
-                      key={spec.id}
-                      className="py-2 px-2 text-center whitespace-nowrap min-w-[92px]"
-                      title={`${spec.name} (${spec.docRef})`}
-                    >
-                      <div className="font-bold text-slate-800 dark:text-slate-200">{spec.code}</div>
-                      <div className="text-[9px] font-medium text-slate-400 dark:text-slate-400 normal-case truncate max-w-[96px] mx-auto">
-                        {spec.specType === 'upper'
-                          ? `≤ ${spec.usl} ${spec.unit}`
-                          : spec.specType === 'lower'
-                          ? `≥ ${spec.lsl} ${spec.unit}`
-                          : `${spec.lsl}–${spec.usl} ${spec.unit}`}
-                      </div>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
-                {cpkMatrixRows.map((row) => (
-                  <tr key={row.key} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/80">
-                    <td className="py-2 px-3.5 whitespace-nowrap border-r border-slate-200/80 dark:border-slate-800/80">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-slate-900 dark:text-slate-100">{row.model}</span>
-                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
-                          {row.phase}
-                        </span>
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
-                            row.side === 'RHS'
-                              ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800'
-                              : 'bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800'
-                          }`}
-                        >
-                          {row.side}
-                        </span>
-                        {row.sourceFile && (
-                          <span
-                            title={`Updated from ${row.sourceFile}`}
-                            className="w-2 h-2 rounded-full bg-blue-500 shrink-0"
-                          />
-                        )}
-                      </div>
-                    </td>
-                    {visibleDashboardSpecs.map((spec) => {
-                      const rec = row.bySpec[spec.id];
-                      if (!rec) {
-                        return (
-                          <td key={spec.id} className="py-2 px-1.5 text-center text-slate-300 dark:text-slate-300">
-                            —
-                          </td>
-                        );
-                      }
-                      const specInForce = effectiveSpecForRecord(spec, rec);
-                      const stats = computeCapabilityStats(rec, specInForce);
-                      const tone = getCpkTone(stats.cpk);
-                      const isFromLastUpload =
-                        lastUploadBatch && rec.uploadBatchId === lastUploadBatch.id;
-                      return (
-                        <td key={spec.id} className="py-1.5 px-1.5 text-center">
-                          <button
-                            type="button"
-                            onClick={() => onOpenCpkChart(rec)}
-                            title={`${row.model} ${row.side} · ${spec.name}: Cpk ${stats.cpk.toFixed(
-                              2
-                            )} · limits effective ${specInForce.effectiveFrom}${
-                              rec.sourceFile ? ` (Uploaded: ${rec.sourceFile})` : ''
-                            }`}
-                            className={`w-full py-1 px-2 rounded-md border font-bold text-xs transition-colors cursor-pointer ${
-                              tone.cellClass
-                            } ${isFromLastUpload ? 'ring-2 ring-blue-500/50' : ''}`}
-                          >
-                            {stats.cpk.toFixed(2)}
-                          </button>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
       </section>
 
       {/* Bottom Two-Column Split: Production Records Snapshot + Open Escalations */}
@@ -2946,9 +2694,12 @@ function GateSignOffView({
               {activeGateMeta.code} · {activeGateMeta.label}
             </span>
             {activeDossier.targetDate && (
-              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold tabular-nums">
+              <span
+                title={`Plan date ${activeDossier.targetDate}`}
+                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold tabular-nums"
+              >
                 <Calendar className="w-3.5 h-3.5" />
-                Target {activeDossier.targetDate}
+                Plan {formatMonthDay(activeDossier.targetDate)}
               </span>
             )}
           </div>
@@ -3194,7 +2945,15 @@ function GateSignOffView({
                     className="w-full text-left p-3.5 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-between gap-2 text-xs"
                   >
                     <span className="font-medium text-slate-800 dark:text-slate-200 truncate">{t.title}</span>
-                    <StatusBadge status={t.status} />
+                    <span className="shrink-0 flex items-center gap-2">
+                      <span
+                        title={t.dueDate ? `Due ${t.dueDate}` : 'No due date'}
+                        className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 tabular-nums"
+                      >
+                        {t.dueDate ? `Due ${formatMonthDay(t.dueDate)}` : 'No due date'}
+                      </span>
+                      <StatusBadge status={t.status} />
+                    </span>
                   </button>
                 ))
               )}
@@ -3947,6 +3706,46 @@ function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDelet
 // VIEW 6: PROCESS CAPABILITY (CPK) & MASTER SPECIFICATIONS
 // ============================================================================
 
+// Columns are model · config · side contexts, not averages: one latest reading
+// per spec stays visible for each context in the given record set.
+function buildCpkColumnModel(records) {
+  const columns = new Map();
+  (records || []).forEach((r) => {
+    const key = [r.model, r.phase, r.config, r.side].join('\u0000');
+    if (!columns.has(key)) {
+      columns.set(key, { key, model: r.model, phase: r.phase, config: r.config, side: r.side, bySpec: {} });
+    }
+    const col = columns.get(key);
+    const prev = col.bySpec[r.specId];
+    if (!prev || String(r.date || '') >= String(prev.date || '')) col.bySpec[r.specId] = r;
+  });
+
+  // Phase, then model, side and config; this also puts every phase's columns in
+  // one run so the header can span them with a single colSpan.
+  const sorted = Array.from(columns.values()).sort(
+    (a, b) =>
+      orderedRank(PHASE_ORDER, a.phase) - orderedRank(PHASE_ORDER, b.phase) ||
+      String(a.model || '').localeCompare(String(b.model || '')) ||
+      orderedRank(SIDE_ORDER, a.side) - orderedRank(SIDE_ORDER, b.side) ||
+      String(a.config || '').localeCompare(String(b.config || ''))
+  );
+  const phases = [];
+  sorted.forEach((col) => {
+    const last = phases[phases.length - 1];
+    if (last && last.phase === col.phase) last.count += 1;
+    else phases.push({ phase: col.phase, count: 1 });
+  });
+  return { columns: sorted, phases };
+}
+
+const CPK_FAMILY_ORDER = ['MB14"', 'MB16"', 'MacMini', 'iMac', 'Display'];
+
+function cpkFamilyRank(family) {
+  const index = CPK_FAMILY_ORDER.indexOf(family);
+  if (index >= 0) return index;
+  return family === 'Other' ? 99 : 50;
+}
+
 function CpkMasterSpecsView({
   masterSpecs,
   cpkRecords,
@@ -3959,9 +3758,10 @@ function CpkMasterSpecsView({
   onEditSpec,
   onDeleteSpec
 }) {
-  const [subTab, setSubTab] = useState('matrix'); // 'matrix' | 'specs'
-  const [cpkFilter, setCpkFilter] = useState('ALL'); // 'ALL' | 'green' | 'yellow' | 'orange'
+  const [subTab, setSubTab] = useState('transposed'); // 'transposed' | 'specs'
+  const [compareSpecId, setCompareSpecId] = useState(null);
   const [uploadedOnly, setUploadedOnly] = useState(false);
+  const [familyFilter, setFamilyFilter] = useState('ALL');
   const [search, setSearch] = useState('');
   const [specModel, setSpecModel] = useState('ALL');
 
@@ -3973,6 +3773,16 @@ function CpkMasterSpecsView({
     return m;
   }, [masterSpecs]);
 
+  const ctqSpecCount = useMemo(
+    () => masterSpecs.filter((spec) => spec.ctq !== false).length,
+    [masterSpecs]
+  );
+
+  const provisionalLimitSpecs = useMemo(
+    () => masterSpecs.filter((spec) => spec.ctq !== false && spec.limitsProvisional === true),
+    [masterSpecs]
+  );
+
   const activeCpkRecords = useMemo(() => {
     if (uploadedOnly && lastUploadBatch) {
       return cpkRecords.filter((r) => r.uploadBatchId === lastUploadBatch.id);
@@ -3981,52 +3791,160 @@ function CpkMasterSpecsView({
   }, [cpkRecords, uploadedOnly, lastUploadBatch]);
 
   const visibleSpecsForMatrix = useMemo(() => {
+    // Only parameters defined as CTQ belong in the capability matrix; rows saved
+    // before the flag existed are treated as CTQ so nothing silently disappears.
+    const ctqSpecs = masterSpecs.filter((spec) => spec.ctq !== false);
     if (uploadedOnly && lastUploadBatch) {
       const idSet = new Set(lastUploadBatch.matchedSpecIds);
-      return masterSpecs.filter((s) => idSet.has(s.id));
+      return ctqSpecs.filter((s) => idSet.has(s.id));
     }
-    return masterSpecs;
+    return ctqSpecs;
   }, [masterSpecs, uploadedOnly, lastUploadBatch]);
 
-  const kpiSummary = useMemo(() => {
-    let green = 0;
-    let yellow = 0;
-    let orange = 0;
-    activeCpkRecords.forEach((r) => {
-      const spec = specMap[r.specId];
-      if (!spec) return;
-      const { cpk } = computeCapabilityStats(r, effectiveSpecForRecord(spec, r));
-      if (cpk > 1.33) green += 1;
-      else if (cpk >= 1.0) yellow += 1;
-      else orange += 1;
-    });
-    return { total: green + yellow + orange, green, yellow, orange };
-  }, [activeCpkRecords, specMap]);
+  // Transposed matrix: one row per Station > Variable > Spec and one column per
+  // measurement context (stage · config · side, read within a model). A cell shows
+  // that context's latest reading for the spec, not an average of them.
+  const cpkMatrix = useMemo(() => buildCpkColumnModel(activeCpkRecords), [activeCpkRecords]);
+  const cpkColumns = cpkMatrix.columns;
 
-  const matrixRows = useMemo(() => {
-    const map = new Map();
-    activeCpkRecords.forEach((r) => {
-      const key = `${r.model}-${r.phase}-${r.side}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          key,
-          model: r.model,
-          phase: r.phase,
-          side: r.side,
-          config: r.config,
-          sourceFile: r.sourceFile || null,
-          bySpec: {}
+  // One section per product family. Each section keeps only that family's
+  // contexts, so MB14" and MB16" readings never share a column header; within a
+  // section only variables with a reading in that family get a row, grouped by
+  // station in process sequence.
+  const cpkFamilyMatrices = useMemo(() => {
+    const byFamily = new Map();
+    activeCpkRecords.forEach((record) => {
+      const family = record.familyGroup || inferFamilyFromModel(record.model) || 'Other';
+      if (!byFamily.has(family)) byFamily.set(family, []);
+      byFamily.get(family).push(record);
+    });
+
+    const stageRank = (station) => orderedRank(PROCESS_STEPS, PROCESS_STEP_BY_STATION[station] || '');
+    return Array.from(byFamily.entries())
+      .map(([family, familyRecords]) => {
+        const model = buildCpkColumnModel(familyRecords);
+        const covered = new Set();
+        model.columns.forEach((col) => Object.keys(col.bySpec).forEach((id) => covered.add(id)));
+
+        const groups = new Map();
+        visibleSpecsForMatrix.forEach((spec) => {
+          if (!covered.has(spec.id)) return;
+          const station = spec.station || 'Unassigned station';
+          if (!groups.has(station)) groups.set(station, []);
+          groups.get(station).push(spec);
         });
-      }
-      if (r.sourceFile) map.get(key).sourceFile = r.sourceFile;
-      map.get(key).bySpec[r.specId] = r;
+
+        return {
+          family,
+          columns: model.columns,
+          phases: model.phases,
+          groups: Array.from(groups.entries())
+            .map(([station, specs]) => ({ station, specs }))
+            .sort((a, b) => stageRank(a.station) - stageRank(b.station) || a.station.localeCompare(b.station))
+        };
+      })
+      .filter((section) => section.groups.length > 0)
+      .sort((a, b) => cpkFamilyRank(a.family) - cpkFamilyRank(b.family) || a.family.localeCompare(b.family));
+  }, [activeCpkRecords, visibleSpecsForMatrix]);
+
+  const cpkFamilyOptions = useMemo(
+    () => cpkFamilyMatrices.map((section) => section.family),
+    [cpkFamilyMatrices]
+  );
+
+  // A filter left pointing at a family that no longer has a section (scope or
+  // upload filter changed) falls back to All families instead of a blank matrix.
+  const activeCpkFamily =
+    familyFilter !== 'ALL' && !cpkFamilyOptions.includes(familyFilter) ? 'ALL' : familyFilter;
+  const visibleCpkFamilyMatrices =
+    activeCpkFamily === 'ALL'
+      ? cpkFamilyMatrices
+      : cpkFamilyMatrices.filter((section) => section.family === activeCpkFamily);
+
+  const cpkSectionRollup = (section) => {
+    let green = 0;
+    let total = 0;
+    let provisional = 0;
+    section.columns.forEach((col) => {
+      section.groups.forEach((group) => {
+        group.specs.forEach((spec) => {
+          const cell = cpkCells.get(`${col.key}\u0000${spec.id}`);
+          if (!cell) return;
+          if (cell.provisional) {
+            provisional += 1;
+            return;
+          }
+          total += 1;
+          if (cell.tone.key === 'green') green += 1;
+        });
+      });
     });
-    return Array.from(map.values()).sort((a, b) => {
-      const m = a.model.localeCompare(b.model);
-      if (m !== 0) return m;
-      return SIDE_ORDER.indexOf(a.side) - SIDE_ORDER.indexOf(b.side);
+    return { green, total, provisional, pct: total > 0 ? (green / total) * 100 : 0 };
+  };
+
+  // Every spec × context cell evaluated once: the latest reading, the limits frozen
+  // on it, its capability stats and tone. The table and the rollup both read these,
+  // so a reading is never judged twice through two copies of the same code.
+  const cpkCells = useMemo(() => {
+    const visibleIds = new Set(visibleSpecsForMatrix.map((spec) => spec.id));
+    const cells = new Map();
+    cpkColumns.forEach((col) => {
+      Object.keys(col.bySpec).forEach((specId) => {
+        if (!visibleIds.has(specId)) return;
+        const spec = specMap[specId];
+        if (!spec) return;
+        const rec = col.bySpec[specId];
+        const limits = effectiveSpecForRecord(spec, rec);
+        const stats = computeCapabilityStats(rec, limits);
+        const provisional = hasProvisionalLimits(limits);
+        cells.set(`${col.key}\u0000${specId}`, {
+          rec,
+          limits,
+          stats,
+          provisional,
+          tone: provisional ? getProvisionalLimitTone() : getCpkTone(stats.cpk)
+        });
+      });
     });
-  }, [activeCpkRecords]);
+    return cells;
+  }, [cpkColumns, visibleSpecsForMatrix, specMap]);
+
+  const compareSpec = compareSpecId
+    ? visibleSpecsForMatrix.find((spec) => spec.id === compareSpecId) || null
+    : null;
+  const compareGroups = useMemo(
+    () =>
+      !compareSpec
+        ? []
+        : cpkColumns
+            .filter((col) => col.bySpec[compareSpec.id])
+            .map(({ key, model, phase, config, side, bySpec }) => ({
+              key,
+              model,
+              phase,
+              config,
+              side,
+              record: bySpec[compareSpec.id]
+            })),
+    [compareSpec, cpkColumns]
+  );
+
+  const cpkRollup = useMemo(() => {
+    const counts = { green: 0, yellow: 0, orange: 0, provisional: 0 };
+    cpkCells.forEach(({ tone, provisional }) => {
+      if (provisional) counts.provisional += 1;
+      else counts[tone.key] += 1;
+    });
+    const total = counts.green + counts.yellow + counts.orange;
+    return { ...counts, total, passRate: total > 0 ? (counts.green / total) * 100 : 0 };
+  }, [cpkCells]);
+
+  const specLimitText = (spec) =>
+    spec.specType === 'upper'
+      ? `≤ ${spec.usl}`
+      : spec.specType === 'lower'
+      ? `≥ ${spec.lsl}`
+      : `${spec.lsl}–${spec.usl}`;
 
   const specModelOptions = useMemo(
     () => Array.from(new Set(masterSpecs.map((s) => s.model).filter(Boolean))).sort(),
@@ -4052,29 +3970,60 @@ function CpkMasterSpecsView({
 
   return (
     <div className="space-y-6">
+      {provisionalLimitSpecs.length > 0 && (
+        <div className="rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 px-4 py-3 text-xs text-amber-900 dark:text-amber-100 space-y-1.5">
+          <div className="font-bold flex flex-wrap items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            {provisionalLimitSpecs.length} CTQ{provisionalLimitSpecs.length === 1 ? '' : 's'} use provisional
+            limits — capability is not valid yet
+          </div>
+          <p className="text-[11px] leading-relaxed">
+            These limits are placeholders, not the released specification. Their Cpk is shown for reference
+            only and excluded from the Cpk ≥ 1.33 share and family rollups until the real LSL / nominal / USL
+            is entered and confirmed.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {provisionalLimitSpecs.map((spec) => (
+              <button
+                key={spec.id}
+                type="button"
+                onClick={() => onEditSpec(spec)}
+                className="px-2 py-1 rounded-md border border-amber-300 dark:border-amber-700 bg-white/70 dark:bg-amber-900/40 hover:bg-white dark:hover:bg-amber-900 text-[10px] font-semibold text-amber-900 dark:text-amber-100"
+                title={`Enter the confirmed limits for ${spec.name}`}
+              >
+                {spec.code} · {spec.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Cpk Summary Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-1">
-          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">Master Parameters</div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums">{masterSpecs.length}</div>
-          <div className="text-[11px] text-slate-500 dark:text-slate-400">Controlled CTQ specifications</div>
+          <div className="text-xs font-medium text-slate-500 dark:text-slate-400">CTQ Parameters</div>
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 tabular-nums">
+            {ctqSpecCount}
+            <span className="text-sm font-semibold text-slate-400 dark:text-slate-500"> / {masterSpecs.length}</span>
+          </div>
+          <div className="text-[11px] text-slate-500 dark:text-slate-400">Defined CTQ · shown in the Cpk matrix</div>
         </div>
 
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-emerald-200 dark:border-emerald-800 p-4 space-y-1">
           <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">Capable (Cpk &gt; 1.33)</div>
-          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-300 tabular-nums">{kpiSummary.green}</div>
+          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-300 tabular-nums">{cpkRollup.green}</div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400">Green · Meets FFM ramp floor</div>
         </div>
 
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-yellow-300 dark:border-yellow-700 p-4 space-y-1">
           <div className="text-xs font-semibold text-yellow-800 dark:text-yellow-200">Marginal (1.0 ≤ Cpk ≤ 1.33)</div>
-          <div className="text-2xl font-bold text-yellow-700 dark:text-yellow-300 tabular-nums">{kpiSummary.yellow}</div>
+          <div className="text-2xl font-bold text-yellow-700 dark:text-yellow-300 tabular-nums">{cpkRollup.yellow}</div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400">Yellow · Tight monitoring / centering</div>
         </div>
 
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-orange-300 dark:border-orange-700 p-4 space-y-1">
           <div className="text-xs font-semibold text-orange-800 dark:text-orange-200">Incapable (Cpk &lt; 1.0)</div>
-          <div className="text-2xl font-bold text-orange-700 dark:text-orange-300 tabular-nums">{kpiSummary.orange}</div>
+          <div className="text-2xl font-bold text-orange-700 dark:text-orange-300 tabular-nums">{cpkRollup.orange}</div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400">Orange · FACA / 100% screening required</div>
         </div>
       </div>
@@ -4082,17 +4031,17 @@ function CpkMasterSpecsView({
       {/* Sub-Navigation & Controls */}
       <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
-          <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-800 p-0.5 bg-slate-50 dark:bg-slate-800 text-xs">
+          <div className="inline-flex flex-wrap rounded-lg border border-slate-200 dark:border-slate-800 p-0.5 bg-slate-50 dark:bg-slate-800 text-xs">
             <button
               type="button"
-              onClick={() => setSubTab('matrix')}
+              onClick={() => setSubTab('transposed')}
               className={`px-3 py-1.5 rounded-md font-semibold transition-colors ${
-                subTab === 'matrix'
+                subTab === 'transposed'
                   ? 'bg-slate-900 dark:bg-slate-700 text-white shadow-2xs'
                   : 'text-slate-600 dark:text-slate-400 hover:bg-white dark:hover:bg-slate-900 dark:dark:hover:bg-slate-700'
               }`}
             >
-              Process Capability (Cpk) Matrix
+              Station × Variable
             </button>
             <button
               type="button"
@@ -4108,7 +4057,7 @@ function CpkMasterSpecsView({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {subTab === 'matrix' ? (
+            {subTab !== 'specs' ? (
               <>
                 {lastUploadBatch && (
                   <button
@@ -4123,27 +4072,6 @@ function CpkMasterSpecsView({
                     {uploadedOnly ? '✓ Uploaded & Matched Only' : 'Filter: Uploaded & Matched'}
                   </button>
                 )}
-                <div className="inline-flex items-center gap-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-800 rounded-lg p-0.5 text-[11px]">
-                  {[
-                    { id: 'ALL', label: 'All' },
-                    { id: 'green', label: '> 1.33 (Green)' },
-                    { id: 'yellow', label: '1.0–1.33 (Yellow)' },
-                    { id: 'orange', label: '< 1.0 (Orange)' }
-                  ].map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setCpkFilter(opt.id)}
-                      className={`px-2 py-1 rounded-md font-semibold transition-colors ${
-                        cpkFilter === opt.id
-                          ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
-                          : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
                 <button
                   type="button"
                   onClick={onOpenCpkImport}
@@ -4208,7 +4136,7 @@ function CpkMasterSpecsView({
         </div>
 
         {/* Recent Data Pipeline Ingestion Strip */}
-        {uploadHistory.length > 0 && subTab === 'matrix' && (
+        {uploadHistory.length > 0 && subTab !== 'specs' && (
           <div className="px-5 py-2 bg-blue-50/70 dark:bg-blue-950/70 border-b border-blue-200/80 dark:border-blue-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
             <div className="flex items-center gap-2 text-blue-900 dark:text-blue-100">
               <FileSpreadsheet className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
@@ -4224,121 +4152,243 @@ function CpkMasterSpecsView({
           </div>
         )}
 
-        {/* TAB 1: Process Capability (Cpk) Matrix */}
-        {subTab === 'matrix' ? (
-          <div className="overflow-x-auto">
-            {matrixRows.length === 0 ? (
-              <div className="p-8 text-center text-xs text-slate-500 dark:text-slate-400">
-                No Cpk measurements match the current scope. Upload an Excel / CSV file to populate Cpk data.
+        {/* Station × Variable × Spec tab */}
+        {subTab === 'transposed' ? (
+          <>
+            <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                  Process Capability (Cpk) Matrix · Station × Variable × Spec
+                </h2>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Split into one section per product family; within a family, one row per CTQ by station and one
+                  column per model · config · side. Click a variable to compare its distribution, or a Cpk value
+                  for that single reading.
+                </p>
               </div>
-            ) : (
-              <table className="w-full text-left border-collapse text-xs">
-                <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                  <tr>
-                    <th className="py-2.5 px-4 whitespace-nowrap border-r border-slate-200 dark:border-slate-800">
-                      Model · Phase · Side · Config
-                    </th>
-                    {visibleSpecsForMatrix.map((spec) => {
-                      const limits = describeSpecLimits(spec);
-                      return (
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <label className="inline-flex items-center gap-1.5 font-semibold text-slate-600 dark:text-slate-300">
+                  <span>Family</span>
+                  <select
+                    aria-label="Filter Cpk matrix by product family"
+                    value={activeCpkFamily}
+                    onChange={(e) => setFamilyFilter(e.target.value)}
+                    className="px-2.5 py-1.5 text-xs font-semibold border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300"
+                  >
+                    <option value="ALL">All families</option>
+                    {cpkFamilyOptions.map((family) => (
+                      <option key={family} value={family}>
+                        {family}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 font-semibold tabular-nums">
+                  Cpk &ge; 1.33 share: {cpkRollup.passRate.toFixed(0)}% ({cpkRollup.green}/{cpkRollup.total}
+                  {' '}valid)
+                  {cpkRollup.provisional > 0 && (
+                    <span className="font-medium text-slate-500 dark:text-slate-400">
+                      · {cpkRollup.provisional} provisional excluded
+                    </span>
+                  )}
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 font-semibold">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                  Cpk &gt; 1.33
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-yellow-50 dark:bg-yellow-950 text-yellow-800 dark:text-yellow-200 border border-yellow-300 dark:border-yellow-700 font-semibold">
+                  <span className="w-2 h-2 rounded-full bg-yellow-500" />
+                  1.0 ≤ Cpk ≤ 1.33
+                </span>
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-orange-50 dark:bg-orange-950 text-orange-800 dark:text-orange-200 border border-orange-300 dark:border-orange-700 font-semibold">
+                  <span className="w-2 h-2 rounded-full bg-orange-500" />
+                  Cpk &lt; 1.0
+                </span>
+              </div>
+            </div>
+
+            <div className="divide-y divide-slate-200 dark:divide-slate-800">
+              {cpkFamilyMatrices.length === 0 ? (
+                <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                  No Cpk records match the current scope.
+                </div>
+              ) : (
+                visibleCpkFamilyMatrices.map((section) => {
+                  const cpkColumns = section.columns;
+                  const cpkSpecGroups = section.groups;
+                  const cpkPhases = section.phases;
+                  const rollup = cpkSectionRollup(section);
+                  const ctqCount = section.groups.reduce((sum, group) => sum + group.specs.length, 0);
+                  return (
+                    <div key={section.family}>
+                      <div className="px-5 py-2.5 bg-slate-50 dark:bg-slate-800/60 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-sm bg-blue-500" aria-hidden="true" />
+                          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-200">
+                            Family · {section.family}
+                          </h3>
+                          <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 tabular-nums">
+                            {ctqCount} CTQ{ctqCount === 1 ? '' : 's'} · {section.columns.length} context
+                            {section.columns.length === 1 ? '' : 's'}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-semibold text-slate-600 dark:text-slate-300 tabular-nums">
+                          Cpk ≥ 1.33: {rollup.pct.toFixed(0)}% ({rollup.green}/{rollup.total})
+                          {rollup.provisional > 0 && (
+                            <span className="font-medium text-slate-500 dark:text-slate-400">
+                              {' '}
+                              · {rollup.provisional} provisional
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-xs">
+                  <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                    <tr>
+                      <th
+                        rowSpan={2}
+                        scope="col"
+                        className="py-2.5 px-3.5 whitespace-nowrap border-r border-slate-200 dark:border-slate-800 align-bottom"
+                      >
+                        Station · Variable · Spec
+                      </th>
+                      {cpkPhases.map((group) => (
                         <th
-                          key={spec.id}
-                          className="py-2 px-2 text-center whitespace-nowrap min-w-[94px]"
-                          title={`${spec.name} (${spec.docRef}) · limits effective ${limits.effectiveFrom} · ${limits.count} revision(s)`}
+                          key={group.phase}
+                          colSpan={group.count}
+                          scope="colgroup"
+                          className="py-2 px-2 text-center whitespace-nowrap min-w-[92px] border-r border-b border-slate-200 dark:border-slate-800"
                         >
-                          <div className="font-bold text-slate-800 dark:text-slate-200">{spec.code}</div>
-                          <div className="text-[9px] font-medium text-slate-400 dark:text-slate-400 normal-case truncate max-w-[96px] mx-auto">
-                            {spec.specType === 'upper'
-                              ? `≤ ${spec.usl} ${spec.unit}`
-                              : spec.specType === 'lower'
-                              ? `≥ ${spec.lsl} ${spec.unit}`
-                              : `${spec.lsl}–${spec.usl} ${spec.unit}`}
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold">
+                            {group.phase}
+                          </span>
+                        </th>
+                      ))}
+                    </tr>
+                    <tr>
+                      {cpkColumns.map((col) => (
+                        <th
+                          key={col.key}
+                          scope="col"
+                          className="py-1.5 px-1.5 text-center whitespace-nowrap border-r border-b border-slate-200 dark:border-slate-800 text-[10px]"
+                          title={`${col.model} ${col.phase} · ${col.config} · ${col.side}`}
+                        >
+                          <div className="font-bold text-slate-800 dark:text-slate-200 normal-case">
+                            {col.model}
+                          </div>
+                          <div className="text-[9px] font-semibold text-slate-500 dark:text-slate-400 normal-case tabular-nums">
+                            {col.config} · {col.side}
                           </div>
                         </th>
-                      );
-                    })}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
-                  {matrixRows.map((row) => (
-                    <tr key={row.key} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/80">
-                      <td className="py-2.5 px-4 whitespace-nowrap border-r border-slate-200/80 dark:border-slate-800/80">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-slate-900 dark:text-slate-100">{row.model}</span>
-                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
-                            {row.phase}
-                          </span>
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
-                              row.side === 'RHS'
-                                ? 'bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800'
-                                : 'bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800'
-                            }`}
-                          >
-                            {row.side}
-                          </span>
-                          <span className="text-[11px] text-slate-400 dark:text-slate-400">{row.config}</span>
-                        </div>
-                        {row.sourceFile && (
-                          <div className="text-[10px] text-blue-600 dark:text-blue-400 font-medium mt-0.5 truncate max-w-[200px]">
-                            ↑ {row.sourceFile}
-                          </div>
-                        )}
-                      </td>
-                      {visibleSpecsForMatrix.map((spec) => {
-                        const rec = row.bySpec[spec.id];
-                        if (!rec) {
-                          return (
-                            <td key={spec.id} className="py-2 px-1.5 text-center text-slate-300 dark:text-slate-300">
-                              —
-                            </td>
-                          );
-                        }
-                        const specInForce = effectiveSpecForRecord(spec, rec);
-                        const stats = computeCapabilityStats(rec, specInForce);
-                        const tone = getCpkTone(stats.cpk);
-                        if (cpkFilter !== 'ALL' && tone.key !== cpkFilter) {
-                          return (
-                            <td key={spec.id} className="py-2 px-1.5 text-center text-slate-200 dark:text-slate-200">
-                              ·
-                            </td>
-                          );
-                        }
-                        const isFromLastUpload =
-                          lastUploadBatch && rec.uploadBatchId === lastUploadBatch.id;
-                        return (
-                          <td key={spec.id} className="py-1.5 px-1.5 text-center">
-                            <button
-                              type="button"
-                              onClick={() => onOpenCpkChart(rec)}
-                              title={`${row.model} ${row.side} · ${spec.name}: Cpk ${stats.cpk.toFixed(
-                                2
-                              )} (n=${rec.sampleSize}) · limits effective ${specInForce.effectiveFrom}`}
-                              className={`w-full py-1.5 px-2 rounded-md border font-bold text-xs transition-colors cursor-pointer ${
-                                tone.cellClass
-                              } ${isFromLastUpload ? 'ring-2 ring-blue-500/50' : ''}`}
-                            >
-                              <div>{stats.cpk.toFixed(2)}</div>
-                              <div className="text-[9px] font-medium opacity-75">
-                                n={rec.sampleSize}
-                              </div>
-                            </button>
-                          </td>
-                        );
-                      })}
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+                  </thead>
+                  <tbody className="tabular-nums">
+                    {cpkSpecGroups.map((group) => (
+                      <React.Fragment key={group.station}>
+                        <tr>
+                          <td
+                            colSpan={1 + cpkColumns.length}
+                            className="py-1.5 px-3.5 bg-slate-100/80 dark:bg-slate-800/80 text-[10px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 border-y border-slate-200 dark:border-slate-800"
+                          >
+                            {group.station}
+                          </td>
+                        </tr>
+                        {group.specs.map((spec) => (
+                          <tr
+                            key={spec.id}
+                            className="border-b border-slate-100 dark:border-slate-800 last:border-b-0 hover:bg-slate-50/80 dark:hover:bg-slate-800/80"
+                          >
+                            <td className="py-1.5 px-3.5 border-r border-slate-200/80 dark:border-slate-800/80">
+                              <button
+                                type="button"
+                                onClick={() => setCompareSpecId(spec.id)}
+                                title={`Compare ${spec.name} across every stage, config and side`}
+                                className="text-left cursor-pointer group"
+                              >
+                                <div className="font-bold text-slate-900 dark:text-slate-100 group-hover:text-blue-700 dark:group-hover:text-blue-300">
+                                  {spec.name}
+                                </div>
+                                <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                  {spec.code} · {specLimitText(spec)} {spec.unit} · target ≥{' '}
+                                  {Number(spec.cpkTarget || 1.33).toFixed(2)}
+                                  {(spec.limitsProvisional === true ||
+                                    cpkColumns.some(
+                                      (col) => cpkCells.get(`${col.key}\u0000${spec.id}`)?.provisional
+                                    )) && (
+                                    <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded border border-dashed border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 text-[9px] font-bold">
+                                      Provisional limits
+                                    </span>
+                                  )}
+                                </div>
+                              </button>
+                            </td>
+                            {cpkColumns.map((col) => {
+                              const cell = cpkCells.get(`${col.key}\u0000${spec.id}`);
+                              if (!cell) {
+                                return (
+                                  <td
+                                    key={col.key}
+                                    className="py-1.5 px-1.5 text-center text-slate-300 dark:text-slate-300"
+                                  >
+                                    —
+                                  </td>
+                                );
+                              }
+                              const { rec, limits, stats, tone, provisional } = cell;
+                              const isFromLastUpload =
+                                lastUploadBatch && rec.uploadBatchId === lastUploadBatch.id;
+                              return (
+                                <td key={col.key} className="py-1.5 px-1.5 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenCpkChart(rec)}
+                                    title={`${col.model} ${col.phase} ${col.side} · ${col.config} · ${spec.name}: ${
+                                      provisional
+                                        ? 'PROVISIONAL LIMITS — capability not valid'
+                                        : `Cpk ${stats.cpk.toFixed(2)}`
+                                    } · limits effective ${limits.effectiveFrom}${
+                                      rec.sourceFile ? ` (Uploaded: ${rec.sourceFile})` : ''
+                                    }`}
+                                    className={`w-full py-1 px-2 rounded-md border font-bold text-xs transition-colors cursor-pointer ${
+                                      tone.cellClass
+                                    } ${isFromLastUpload ? 'ring-2 ring-blue-500/50' : ''}`}
+                                  >
+                                    {stats.cpk.toFixed(2)}
+                                    {provisional && <span className="align-super text-[8px]">*</span>}
+                                  </button>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              {cpkRollup.provisional > 0 && (
+                <p className="px-5 py-2.5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400 border-t border-slate-200 dark:border-slate-800">
+                  * Provisional limits — Cpk is calculated against placeholder values and shown for reference
+                  only. It is excluded from the Cpk ≥ 1.33 share and family rollups, and does not count as valid
+                  capability until the released limits are entered and confirmed.
+                </p>
+              )}
+            </div>
+          </>
         ) : (
-          /* TAB 2: Master Specifications Repository Table */
+          /* Master Specifications repository table */
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-xs">
               <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
                   <th className="py-2.5 px-4 whitespace-nowrap">Param Code</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">CTQ</th>
                   <th className="py-2.5 px-3 whitespace-nowrap">Parameter Name</th>
                   <th className="py-2.5 px-3 whitespace-nowrap">Model</th>
                   <th className="py-2.5 px-3 whitespace-nowrap">Station / Process</th>
@@ -4361,8 +4411,24 @@ function CpkMasterSpecsView({
                     <td className="py-2.5 px-4 font-mono font-bold text-blue-700 dark:text-blue-300 whitespace-nowrap">
                       {spec.code}
                     </td>
+                    <td className="py-2.5 px-2.5 whitespace-nowrap">
+                      {spec.ctq === false ? (
+                        <span className="px-1.5 py-0.5 rounded border bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 font-semibold">
+                          No
+                        </span>
+                      ) : (
+                        <span className="px-1.5 py-0.5 rounded border bg-emerald-50 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700 font-semibold">
+                          Yes
+                        </span>
+                      )}
+                    </td>
                     <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                      {spec.name}
+                      <div>{spec.name}</div>
+                      {spec.limitsProvisional === true && (
+                        <div className="mt-0.5 inline-flex items-center px-1.5 py-0.5 rounded border border-dashed border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 text-[9px] font-bold">
+                          Provisional limits
+                        </div>
+                      )}
                     </td>
                     <td className="py-2.5 px-3 whitespace-nowrap">
                       {spec.model ? (
@@ -4428,6 +4494,14 @@ function CpkMasterSpecsView({
           </div>
         )}
       </section>
+
+      {compareSpec && (
+        <CpkDistributionCompareModal
+          spec={compareSpec}
+          groups={compareGroups}
+          onClose={() => setCompareSpecId(null)}
+        />
+      )}
     </div>
   );
 }

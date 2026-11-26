@@ -262,6 +262,7 @@ function App() {
     if (!data || typeof data !== 'object') return null;
     let frozenLimits = 0;
     let purgedEvidence = 0;
+    let removedFabricated = 0;
     isHydratingRef.current = true;
     try {
       if (Array.isArray(data.projects)) setProjects(data.projects);
@@ -274,9 +275,12 @@ function App() {
         setGateRecords(purged.records);
       }
       if (Array.isArray(data.productionRecords)) setProductionRecords(data.productionRecords);
-      if (Array.isArray(data.masterSpecs)) setMasterSpecs(data.masterSpecs);
+      const loadedSpecs = Array.isArray(data.masterSpecs)
+        ? applyProvisionalLimitDefaults(data.masterSpecs)
+        : null;
+      if (loadedSpecs) setMasterSpecs(loadedSpecs);
       if (Array.isArray(data.cpkRecords)) {
-        const specsForCpk = Array.isArray(data.masterSpecs) ? data.masterSpecs : masterSpecs;
+        const specsForCpk = loadedSpecs || masterSpecs;
         const frozen = migrateCpkRecords(data.cpkRecords, specsForCpk);
         // Rows saved before limits were frozen stay judged by their own date; the
         // count lets the loader persist this backfill without waiting for an edit.
@@ -284,7 +288,9 @@ function App() {
           (count, rec, idx) => count + (rec !== data.cpkRecords[idx] ? 1 : 0),
           0
         );
-        setCpkRecords(frozen);
+        const cleanedCpk = stripLegacyFabricatedCpkRows(frozen);
+        removedFabricated = frozen.length - cleanedCpk.length;
+        setCpkRecords(backfillSeedCpkSamples(cleanedCpk));
       }
       if (Array.isArray(data.costProjects)) setCostProjects(data.costProjects);
       if (Array.isArray(data.customerFeedback)) setCustomerFeedback(data.customerFeedback);
@@ -299,7 +305,7 @@ function App() {
     setTimeout(() => {
       isHydratingRef.current = false;
     }, 150);
-    return { frozenLimits, purgedEvidence };
+    return { frozenLimits, purgedEvidence, removedFabricated };
   };
 
   // ---------------------------------------------------------------------------
@@ -538,7 +544,7 @@ function App() {
           return;
         }
         if (res && res.initialized && res.data) {
-          let backfill = { frozenLimits: 0, purgedEvidence: 0 };
+          let backfill = { frozenLimits: 0, purgedEvidence: 0, removedFabricated: 0 };
           try {
             backfill = hydrateFromPayload(res.data) || backfill;
           } catch (err) {
@@ -565,6 +571,9 @@ function App() {
           }
           if (backfill.purgedEvidence > 0) {
             backfillNotes.push(`Removed ${backfill.purgedEvidence} placeholder Drive link(s)`);
+          }
+          if (backfill.removedFabricated > 0) {
+            backfillNotes.push(`Removed ${backfill.removedFabricated} fabricated Cpk seed row(s)`);
           }
           if (backfillNotes.length > 0) saveSchedulerRef.current.schedule(backfillNotes);
           if (showNotice) showToast(`Reloaded workspace from Google Sheet (Rev #${res.revision || 1})`, 'success');
@@ -1482,7 +1491,10 @@ function App() {
       lsl: form.specType === 'upper' ? 0 : Number(form.lsl),
       nominal: Number(form.nominal),
       usl: form.specType === 'lower' ? null : Number(form.usl),
-      cpkTarget: Number(form.cpkTarget) || 1.33
+      cpkTarget: Number(form.cpkTarget) || 1.33,
+      // Confirming or un-confirming limits is a limit-status change: it is
+      // revisioned like any other limit edit, so old readings keep their status.
+      limitsProvisional: form.limitsConfirmed === false
     };
     const identity = {
       code: form.code.toUpperCase().trim(),
@@ -1492,7 +1504,9 @@ function App() {
       unit: form.unit.trim() || 'mm',
       metrology: form.metrology.trim() || 'OMM Optical',
       docRef: form.docRef.trim() || 'SPC-FFM-00',
-      samplingPlan: form.samplingPlan.trim() || '32 pcs / Lot'
+      samplingPlan: form.samplingPlan.trim() || '32 pcs / Lot',
+      // Only CTQ parameters are plotted in the Station × Variable matrix.
+      ctq: form.ctq !== false
     };
     const stamp = new Date().toISOString();
     const actor = cloudSync.userEmail || '';
@@ -1711,6 +1725,19 @@ function App() {
   const handleUpdateTaskCategory = (taskId, category) => {
     setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, category } : t)));
     showToast(`Set ${taskId} category to ${category}`);
+  };
+
+  // Claiming unassigned work: store the roster link and the readable name, so the
+  // task stays owned through a rename and the next free-text edit cannot lose it.
+  const handleAssignTaskOwner = (taskId, memberId) => {
+    const member = teamMembers.find((entry) => entry.id === memberId);
+    if (!member) return;
+    setTasks((prev) =>
+      prev.map((task) =>
+        task.id === taskId ? { ...task, ownerId: member.id, owner: member.name } : task
+      )
+    );
+    showToast(`Assigned ${taskId} to ${member.name}`);
   };
 
   const handleAddTaskNote = (taskId, text) => {
@@ -2617,7 +2644,8 @@ function App() {
       ).length
     },
     { id: 'production', label: 'Production Records', icon: Database },
-    { id: 'team', label: 'Team & Workload', icon: Users }
+    { id: 'team', label: 'Team & Workload', icon: Users },
+    { id: 'reports', label: 'Reports & Snapshots', icon: ClipboardCheck }
   ];
 
   const viewTitles = {
@@ -2630,7 +2658,8 @@ function App() {
     costs: 'FFM Projects & Cost Saving Portfolio (VA/VE · Yield · HC)',
     feedback: 'FFM Customer Feedback, FA & 8D FACA Tracker (Y2026)',
     production: 'Production Records (Yield, UPH & Efficiency)',
-    team: 'Team Members, Product Assignment & Workload'
+    team: 'Team Members, Product Assignment & Workload',
+    reports: 'Executive KPI Report & Snapshot Analysis'
   };
 
   return (
@@ -3025,16 +3054,11 @@ function App() {
                     records={scopedProductionRecords}
                     tasks={scopedTasks}
                     gateRecords={gateRecords}
-                    masterSpecs={masterSpecs}
-                    cpkRecords={scopedCpkRecords}
                     costProjects={costProjects}
                     customerFeedback={customerFeedback}
-                    lastUploadBatch={lastUploadBatch}
                     globalSide={globalSide}
                     onOpenKpiDrilldown={setKpiDrilldown}
                     onOpenGate={navigateToGate}
-                    onOpenCpkChart={(rec) => setActiveCpkChartRecord(rec)}
-                    onOpenCpkImport={() => setCpkImportModalOpen(true)}
                     onSelectTask={(id) => setActiveTaskDrawerId(id)}
                     onSwitchView={setActiveView}
                   />
@@ -3192,7 +3216,28 @@ function App() {
                     onEdit={(member) => setEditingTeamMember(member)}
                     onDelete={(member) => setDeletingTeamMember(member)}
                     onOpenTask={(taskId) => setActiveTaskDrawerId(taskId)}
+                    onAssignTaskOwner={handleAssignTaskOwner}
                     onOpenGate={(projectId, lineKey, gateId) => navigateToGate(projectId, gateId, lineKey)}
+                  />
+                );
+              case 'reports':
+                return (
+                  <ReportsView
+                    projects={scopedProjects}
+                    records={scopedProductionRecords}
+                    costProjects={scopedCostProjects}
+                    customerFeedback={scopedCustomerFeedback}
+                    gateRecords={gateRecords}
+                    scopeLabel={
+                      [
+                        globalFamily !== 'ALL' ? globalFamily : '',
+                        globalModel !== 'ALL' ? globalModel : '',
+                        globalPhase !== 'ALL' ? globalPhase : '',
+                        globalSide !== 'ALL' ? globalSide : ''
+                      ]
+                        .filter(Boolean)
+                        .join(' · ') || 'All programs'
+                    }
                   />
                 );
               default:
