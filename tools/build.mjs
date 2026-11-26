@@ -68,9 +68,14 @@ async function buildScript() {
 
   // A literal </script> would close the inline tag early; `<?` is an Apps
   // Script template scriptlet and must stay escaped in the emitted HTML.
+  // HtmlService also strips `//...` from inline script as a line comment, so
+  // unescaped double slashes in strings delete the rest of that line. Encode
+  // them as \x2f (same runtime value, but no comment marker in served HTML);
+  // `\//` is an escaped slash in a regex literal and must be left alone.
   const js = result.outputFiles[0].text
     .replace(/<\/script/gi, "<\\/script")
-    .replace(/<\?/g, "\\u003c?");
+    .replace(/<\?/g, "\\u003c?")
+    .replace(/(?<!\\)\/\//g, "\\x2f\\x2f");
   writeFileSync(
     BUNDLE,
     `<!-- Built by tools/build.mjs from Icons.html + Part*.html. Do not edit. -->\n<script>\n${js}\n</script>\n`

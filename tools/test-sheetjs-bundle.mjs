@@ -42,6 +42,13 @@ check("Bundle.html has no template scriptlets", () => {
   assert.ok(!read("Bundle.html").includes("<?"));
 });
 
+// HtmlService strips `//...` from inline script as if it were a line comment.
+// SheetJS XML/URL strings must be encoded by the build or Apps Script silently
+// deletes the rest of that line, leaving a half-written JavaScript statement.
+check("Bundle.html has no unescaped double slash", () => {
+  assert.ok(!/(?<!\\)\/\//.test(read("Bundle.html")));
+});
+
 for (const r of results) {
   console.log(`  ${r.ok ? "pass" : "FAIL"}  ${r.label}${r.ok ? "" : `  (${r.message})`}`);
 }
