@@ -48,7 +48,7 @@ The app answers those, and refuses to answer the rest with invented numbers.
 
 | Module | What it does | Key interactions |
 | --- | --- | --- |
-| **Program Overview** | Portfolio header, KPI tiles, gate matrix, scope summary | Open a KPI deep dive; jump into a program |
+| **Program Overview** | Portfolio header, KPI tiles, inline KPI deep dive (trend · by variant worst first · Pareto of loss), gate matrix, scope summary | Open a KPI deep dive, switch the deep dive KPI or range; jump into a program |
 | **NPI Projects & Matrix** | Program records, split build across vendors/configs, product assignment | Create / edit / delete program, assign products |
 | **Build Timeline (Gantt)** | Stage sequence per line, gate-coloured bars, drag to reschedule | Drag a bar (refused when it breaks the sequence), open a dossier |
 | **Tasks & AIL** | Action items with owner, due date, status, linked program/gate | New task, claim unassigned work, open drawer |

@@ -3288,6 +3288,75 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun }) {
   );
 }
 
+/**
+ * The three derived inputs every KPI family builder reads, computed once for both
+ * the modal and the inline deep-dive section on the Overview.
+ */
+function kpiDeepDiveSources({ projects, gateRecords, globalSide, customerFeedback, costProjects }) {
+  const scopedLines = (projects || []).flatMap((project) =>
+    getLineVariantsForProject(project)
+      .filter((v) => globalSide === 'ALL' || v.side === globalSide)
+      .map((v) => ({
+        project,
+        line: v,
+        approved: gateRecords[project.id]?.[v.key]?.mih?.status === 'Approved'
+      }))
+  );
+  const claims = (customerFeedback || []).filter((f) => f.category === 'Claim');
+  const savingItems = (costProjects || []).map((item) => ({ item, metrics: computeCostSavingMetrics(item) }));
+  return { scopedLines, claims, savingItems };
+}
+
+/**
+ * The whole deep-dive view — headline, scope line, trend, variant histogram and
+ * Pareto — for one KPI, range and variant scope. The modal and the Overview
+ * section render the same model, so the two can never tell different stories.
+ */
+function buildKpiDeepDiveView({
+  meta,
+  kpiKey,
+  records,
+  claims,
+  savingItems,
+  scopedLines,
+  gateRecords,
+  rangeDays,
+  rangeLabel,
+  cutoffIso,
+  variantFilter
+}) {
+  const rangedRecords = (records || [])
+    .filter((r) => r.date && kpiInRange(r.date, cutoffIso))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const build = (variantKey) =>
+    KPI_FAMILY_BUILDERS[meta.family]({
+      records: records || [],
+      rangedRecords,
+      claims,
+      savingItems,
+      scopedLines,
+      gateRecords,
+      kpiKey,
+      meta,
+      cutoffIso,
+      rangeDays,
+      rangeLabel,
+      variantKey
+    });
+  const all = build(null);
+  const variants = all.variant.slice();
+  // Keep a chosen variant as the scope even when the current range has no rows for
+  // it — switching 90D → 7D should widen the data, not silently drop the filter.
+  if (variantFilter !== 'ALL' && !variants.some((v) => v.key === variantFilter)) {
+    variants.push({ key: variantFilter, label: variantFilter, value: 0, pct: 0, valueText: '—' });
+  }
+  return {
+    view: variantFilter === 'ALL' ? all : build(variantFilter),
+    variants,
+    activeVariant: variantFilter
+  };
+}
+
 function KpiDeepDiveModal({
   kpiKey,
   projects,
@@ -3318,64 +3387,30 @@ function KpiDeepDiveModal({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const scopedLines = useMemo(
-    () =>
-      projects.flatMap((project) =>
-        getLineVariantsForProject(project)
-          .filter((v) => globalSide === 'ALL' || v.side === globalSide)
-          .map((v) => ({
-            project,
-            line: v,
-            approved: gateRecords[project.id]?.[v.key]?.mih?.status === 'Approved'
-          }))
-      ),
-    [projects, gateRecords, globalSide]
-  );
-
-  const claims = useMemo(
-    () => (customerFeedback || []).filter((f) => f.category === 'Claim'),
-    [customerFeedback]
-  );
-
-  const savingItems = useMemo(
-    () => (costProjects || []).map((item) => ({ item, metrics: computeCostSavingMetrics(item) })),
-    [costProjects]
+  const { scopedLines, claims, savingItems } = useMemo(
+    () => kpiDeepDiveSources({ projects, gateRecords, globalSide, customerFeedback, costProjects }),
+    [projects, gateRecords, globalSide, customerFeedback, costProjects]
   );
 
   // Variant scope: build once unfiltered (that also yields the option list), then
   // rebuild for the chosen variant so the headline, trend and Pareto all narrow.
-  const { view, variants, activeVariant } = useMemo(() => {
-    const rangedRecords = (records || [])
-      .filter((r) => r.date && kpiInRange(r.date, cutoffIso))
-      .sort((a, b) => a.date.localeCompare(b.date));
-    const build = (variantKey) =>
-      KPI_FAMILY_BUILDERS[meta.family]({
-        records: records || [],
-        rangedRecords,
+  const { view, variants, activeVariant } = useMemo(
+    () =>
+      buildKpiDeepDiveView({
+        meta,
+        kpiKey,
+        records,
         claims,
         savingItems,
         scopedLines,
         gateRecords,
-        kpiKey,
-        meta,
-        cutoffIso,
         rangeDays: range.days,
         rangeLabel: range.label,
-        variantKey
-      });
-    const all = build(null);
-    const variants = all.variant.slice();
-    // Keep a chosen variant as the scope even when the current range has no rows for
-    // it — switching 90D → 7D should widen the data, not silently drop the filter.
-    if (variantFilter !== 'ALL' && !variants.some((v) => v.key === variantFilter)) {
-      variants.push({ key: variantFilter, label: variantFilter, value: 0, pct: 0, valueText: '—' });
-    }
-    return {
-      view: variantFilter === 'ALL' ? all : build(variantFilter),
-      variants,
-      activeVariant: variantFilter
-    };
-  }, [meta, records, claims, savingItems, scopedLines, gateRecords, cutoffIso, range.days, kpiKey, variantFilter]);
+        cutoffIso,
+        variantFilter
+      }),
+    [meta, kpiKey, records, claims, savingItems, scopedLines, gateRecords, cutoffIso, range.days, range.label, variantFilter]
+  );
 
   const variantLabel = variants.find((v) => v.key === activeVariant)?.label;
   const scopeLabel = activeVariant === 'ALL' ? view.scopeLabel : `${view.scopeLabel} · ${variantLabel}`;
@@ -3663,6 +3698,174 @@ function KpiDeepDiveModal({
         </div>
       </div>
     </div>
+  );
+}
+
+// ============================================================================
+// INLINE KPI DEEP DIVE (Overview) — trend · by variant · Pareto of loss
+// ============================================================================
+
+const KPI_DEEP_DIVE_TABS = [
+  { key: 'fpy', label: 'FPY' },
+  { key: 'fy', label: 'Final yield' },
+  { key: 'eff', label: 'Efficiency' },
+  { key: 'claims', label: 'Claims' },
+  { key: 'saving', label: 'Cost saving' },
+  { key: 'mih', label: 'MIH' }
+];
+
+/**
+ * The three charts that answer "is this KPI improving, where is it worst, and what
+ * is behind the loss" without leaving the Overview. It renders the same model the
+ * full deep-dive modal does, so a figure here and there can never disagree.
+ */
+function KpiDeepDiveSection({
+  projects,
+  records,
+  gateRecords,
+  globalSide,
+  costProjects,
+  customerFeedback,
+  onOpenDeepDive
+}) {
+  const [kpiKey, setKpiKey] = useState('fpy');
+  const [rangeId, setRangeId] = useState('90D');
+  const meta = KPI_DEEP_DIVE_META[kpiKey] || KPI_DEEP_DIVE_META.fpy;
+  const range = KPI_RANGE_OPTIONS.find((r) => r.id === rangeId) || KPI_RANGE_OPTIONS[1];
+  const cutoffIso = range.days ? addDaysIso(todayIso(), -(range.days - 1)) : null;
+
+  const { scopedLines, claims, savingItems } = useMemo(
+    () => kpiDeepDiveSources({ projects, gateRecords, globalSide, customerFeedback, costProjects }),
+    [projects, gateRecords, globalSide, customerFeedback, costProjects]
+  );
+
+  const { view } = useMemo(
+    () =>
+      buildKpiDeepDiveView({
+        meta,
+        kpiKey,
+        records,
+        claims,
+        savingItems,
+        scopedLines,
+        gateRecords,
+        rangeDays: range.days,
+        rangeLabel: range.label,
+        cutoffIso,
+        variantFilter: 'ALL'
+      }),
+    [meta, kpiKey, records, claims, savingItems, scopedLines, gateRecords, cutoffIso, range.days, range.label]
+  );
+
+  const emptyRange = range.days
+    ? `No dated points in the last ${range.days} days — widen the range or wait for the next run.`
+    : 'No dated points in this period — widen the range or wait for the next run.';
+
+  const chartHeading = 'text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300';
+
+  return (
+    <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">KPI Deep dive</h2>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+            {meta.title} · trend, the worst variants, and the drivers behind the loss in the active Global Scope
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="text-right">
+            <div className="text-xl font-bold tabular-nums text-slate-900 dark:text-slate-100">{view.headline.text}</div>
+            <div className="text-[10px] text-slate-500 dark:text-slate-400">Target {meta.targetText}</div>
+          </div>
+          {typeof onOpenDeepDive === 'function' && (
+            <button
+              type="button"
+              onClick={() => onOpenDeepDive(kpiKey)}
+              className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              Full deep dive
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="px-5 py-2.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+        <div className="inline-flex flex-wrap rounded-lg border border-slate-200 dark:border-slate-800 p-0.5 bg-slate-50 dark:bg-slate-800 text-[11px]">
+          {KPI_DEEP_DIVE_TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setKpiKey(tab.key)}
+              aria-pressed={kpiKey === tab.key}
+              className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                kpiKey === tab.key
+                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        {meta.hasTrend !== false && (
+          <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-800 p-0.5 bg-slate-50 dark:bg-slate-800">
+            {KPI_RANGE_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => setRangeId(option.id)}
+                aria-pressed={rangeId === option.id}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                  rangeId === option.id
+                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="p-5 space-y-5">
+        <section>
+          <h3 className={`${chartHeading} mb-2`}>{meta.trendHeading || 'Trend'}</h3>
+          {meta.hasTrend === false ? (
+            <div className="p-4 rounded-lg border border-dashed border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+              {meta.trendNotice}
+            </div>
+          ) : view.trend.length >= 2 ? (
+            <KpiTrendChart
+              points={view.trend}
+              target={meta.targetLine ? meta.target : null}
+              unit={meta.trendUnit || meta.unit}
+              digits={meta.trendDigits !== undefined ? meta.trendDigits : meta.digits}
+              colorClass={meta.lineClass}
+              fillClass={meta.fillClass}
+              thinNote={meta.thinNote}
+            />
+          ) : (
+            <div className="p-4 rounded-lg border border-dashed border-slate-200 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
+              {view.trend.length === 1
+                ? 'Only one dated point in this range — widen the range to see a trend.'
+                : meta.emptyTrend || emptyRange}
+            </div>
+          )}
+        </section>
+
+        <div className="grid gap-5 xl:grid-cols-2">
+          <section>
+            <h3 className={`${chartHeading} mb-2`}>{meta.variantHeading}</h3>
+            <KpiBarRows rows={view.variant} emptyText="No records in this range." />
+          </section>
+          <section>
+            <h3 className={`${chartHeading} mb-2`}>{meta.paretoHeading}</h3>
+            <KpiParetoRows rows={view.pareto} unit={meta.paretoUnit} groupNoun={meta.groupNoun} />
+          </section>
+        </div>
+      </div>
+    </section>
   );
 }
 
