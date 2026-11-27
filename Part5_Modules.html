@@ -3710,6 +3710,7 @@ function buildKpiDeepDiveView({
 
 function KpiDeepDiveModal({
   kpiKey,
+  initialVariant = 'ALL',
   projects,
   records,
   gateRecords,
@@ -3720,7 +3721,7 @@ function KpiDeepDiveModal({
   onClose
 }) {
   const [rangeId, setRangeId] = useState('90D');
-  const [variantFilter, setVariantFilter] = useState('ALL');
+  const [variantFilter, setVariantFilter] = useState(initialVariant || 'ALL');
   const [drill, setDrill] = useState(null);
   const meta = KPI_DEEP_DIVE_META[kpiKey] || KPI_DEEP_DIVE_META.fpy;
   // The process filter is the one dimension claims and cost-saving records cannot
@@ -4147,13 +4148,17 @@ function KpiDeepDiveSection({
 }) {
   const [kpiKey, setKpiKey] = useState('fpy');
   const [rangeId, setRangeId] = useState('90D');
+  const [variantFilter, setVariantFilter] = useState('ALL');
   const [drill, setDrill] = useState(null);
 
   // The KPI tiles above the card drive this state. The token makes a repeated
-  // click on the same tile reset any drill-down and re-select its tab.
+  // click on the same tile reset any drill-down and re-select its tab. A variant
+  // key belongs to one family (a line, model, family or program), so it cannot
+  // carry across tabs; clear it with the KPI.
   useEffect(() => {
     if (!focusKpiKey || !focusToken) return;
     setKpiKey(focusKpiKey);
+    setVariantFilter('ALL');
     setDrill(null);
   }, [focusKpiKey, focusToken]);
   const meta = KPI_DEEP_DIVE_META[kpiKey] || KPI_DEEP_DIVE_META.fpy;
@@ -4165,7 +4170,9 @@ function KpiDeepDiveSection({
     [projects, gateRecords, globalSide, customerFeedback, costProjects]
   );
 
-  const { view } = useMemo(
+  // Build once unfiltered for the option list, then rebuild for the chosen
+  // variant so the headline, trend and Pareto all narrow with the record list.
+  const { view, variants, activeVariant } = useMemo(
     () =>
       buildKpiDeepDiveView({
         meta,
@@ -4178,9 +4185,9 @@ function KpiDeepDiveSection({
         rangeDays: range.days,
         rangeLabel: range.label,
         cutoffIso,
-        variantFilter: 'ALL'
+        variantFilter
       }),
-    [meta, kpiKey, records, claims, savingItems, scopedLines, gateRecords, cutoffIso, range.days, range.label]
+    [meta, kpiKey, records, claims, savingItems, scopedLines, gateRecords, cutoffIso, range.days, range.label, variantFilter]
   );
 
   const quality = meta.family === 'quality';
@@ -4189,13 +4196,17 @@ function KpiDeepDiveSection({
     [records, cutoffIso, kpiKey, drill]
   );
 
+  // Same interaction as the modal: clicking the active variant clears the
+  // scope; selecting a different one narrows the whole view. For quality KPIs
+  // the variant also opens the record list behind that line.
   const handleVariantSelect = (key) => {
-    if (!quality) return;
-    setDrill((prev) =>
-      prev && prev.kind === 'variant' && prev.key === key
-        ? null
-        : { kind: 'variant', key, label: view.variant.find((v) => v.key === key)?.label || key }
-    );
+    const next = activeVariant === key ? 'ALL' : key;
+    setVariantFilter(next);
+    if (!quality || next === 'ALL') {
+      setDrill(null);
+      return;
+    }
+    setDrill({ kind: 'variant', key, label: variants.find((v) => v.key === key)?.label || key });
   };
 
   const handleParetoSelect = (row) => {
@@ -4209,14 +4220,16 @@ function KpiDeepDiveSection({
             key,
             keys: row.keys && row.keys.length ? row.keys : [row.key],
             label: row.label,
-            variantKey: null
+            variantKey: activeVariant === 'ALL' ? null : activeVariant
           }
     );
   };
 
+  const variantLabel = variants.find((v) => v.key === activeVariant)?.label;
+  const scopePhrase = activeVariant === 'ALL' ? '' : ' for this variant';
   const emptyRange = range.days
-    ? `No dated points in the last ${range.days} days — widen the range or wait for the next run.`
-    : 'No dated points in this period — widen the range or wait for the next run.';
+    ? `No dated points${scopePhrase} in the last ${range.days} days — widen the range or wait for the next run.`
+    : `No dated points${scopePhrase} in this period — widen the range or wait for the next run.`;
 
   const chartHeading = 'text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300';
 
@@ -4236,12 +4249,14 @@ function KpiDeepDiveSection({
         <div className="flex flex-wrap items-center gap-2">
           <div className="text-right">
             <div className="text-xl font-bold tabular-nums text-slate-900 dark:text-slate-100">{view.headline.text}</div>
-            <div className="text-[10px] text-slate-500 dark:text-slate-400">Target {meta.targetText}</div>
+            <div className="text-[10px] text-slate-500 dark:text-slate-400">
+              {activeVariant === 'ALL' ? `Target ${meta.targetText}` : `${variantLabel} · Target ${meta.targetText}`}
+            </div>
           </div>
           {typeof onOpenDeepDive === 'function' && (
             <button
               type="button"
-              onClick={() => onOpenDeepDive(kpiKey)}
+              onClick={() => onOpenDeepDive(kpiKey, activeVariant)}
               className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
             >
               Full deep dive
@@ -4258,6 +4273,7 @@ function KpiDeepDiveSection({
               type="button"
               onClick={() => {
                 setKpiKey(tab.key);
+                setVariantFilter('ALL');
                 setDrill(null);
               }}
               aria-pressed={kpiKey === tab.key}
@@ -4271,28 +4287,53 @@ function KpiDeepDiveSection({
             </button>
           ))}
         </div>
-        {meta.hasTrend !== false && (
-          <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-800 p-0.5 bg-slate-50 dark:bg-slate-800">
-            {KPI_RANGE_OPTIONS.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                onClick={() => {
-                  setRangeId(option.id);
+        <div className="flex flex-wrap items-center gap-2">
+          {(variants.length > 1 || activeVariant !== 'ALL') && (
+            <label className="flex items-center gap-1.5">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Variant
+              </span>
+              <select
+                value={activeVariant}
+                onChange={(e) => {
+                  setVariantFilter(e.target.value);
                   setDrill(null);
                 }}
-                aria-pressed={rangeId === option.id}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
-                  rangeId === option.id
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
-                }`}
+                aria-label="Scope the inline KPI deep dive to a variant"
+                className="px-2.5 py-1.5 text-[11px] font-semibold border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 max-w-[210px]"
               >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        )}
+                <option value="ALL">All variants ({variants.length})</option>
+                {variants.map((v) => (
+                  <option key={v.key} value={v.key}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {meta.hasTrend !== false && (
+            <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-800 p-0.5 bg-slate-50 dark:bg-slate-800">
+              {KPI_RANGE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => {
+                    setRangeId(option.id);
+                    setDrill(null);
+                  }}
+                  aria-pressed={rangeId === option.id}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                    rangeId === option.id
+                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
+                      : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="p-5 space-y-5">
@@ -4327,17 +4368,15 @@ function KpiDeepDiveSection({
           <section>
             <h3 className={`${chartHeading} mb-2`}>
               {meta.variantHeading}
-              {quality && (
-                <span className="ml-2 text-[10px] font-normal normal-case tracking-normal text-slate-400 dark:text-slate-500">
-                  click a row for the records behind it
-                </span>
-              )}
+              <span className="ml-2 text-[10px] font-normal normal-case tracking-normal text-slate-400 dark:text-slate-500">
+                {quality ? 'click a row to scope the deep dive and list its records' : 'click a row to scope the deep dive'}
+              </span>
             </h3>
             <KpiBarRows
               rows={view.variant}
               emptyText="No records in this range."
-              activeKey={drill?.kind === 'variant' ? drill.key : undefined}
-              onSelect={quality ? handleVariantSelect : undefined}
+              activeKey={activeVariant === 'ALL' ? undefined : activeVariant}
+              onSelect={handleVariantSelect}
             />
           </section>
           <section>

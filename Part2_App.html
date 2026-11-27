@@ -3410,7 +3410,9 @@ function App() {
                     costProjects={costProjects}
                     customerFeedback={customerFeedback}
                     globalSide={globalSide}
-                    onOpenKpiDrilldown={setKpiDrilldown}
+                    onOpenKpiDrilldown={(key, variant) =>
+                      setKpiDrilldown({ key, variant: variant || 'ALL' })
+                    }
                     onOpenGate={navigateToGate}
                     onSelectTask={(id) => setActiveTaskDrawerId(id)}
                     onSwitchView={setActiveView}
@@ -3631,7 +3633,8 @@ function App() {
       {/* New NPI Program Modal */}
       {kpiDrilldown && (
         <KpiDeepDiveModal
-          kpiKey={kpiDrilldown}
+          kpiKey={kpiDrilldown.key}
+          initialVariant={kpiDrilldown.variant}
           projects={scopedProjects}
           records={scopedProductionRecords}
           gateRecords={gateRecords}
