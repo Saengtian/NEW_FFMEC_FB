@@ -66,3 +66,72 @@
     break-after: avoid;
   }
 }
+
+/* Freeze the column that identifies a row while the rest of a wide table
+   scrolls horizontally. The row background is inherited by the pinned cell so
+   hover, selected and expanded states stay continuous across the freeze. */
+.table-freeze-first,
+.table-freeze-first-two {
+  --freeze-bg: #fff;
+  --freeze-head-bg: #f8fafc;
+  --freeze-border: #e2e8f0;
+  --freeze-first-width: 2rem;
+}
+
+.dark .table-freeze-first,
+.dark .table-freeze-first-two {
+  --freeze-bg: #0f172a;
+  --freeze-head-bg: #1e293b;
+  --freeze-border: #334155;
+}
+
+/* Default rows need an opaque surface for the inherited first cell; a row's own
+   bg-* utility still wins because this rule has zero specificity. */
+:where(.table-freeze-first tbody tr),
+:where(.table-freeze-first-two tbody tr) {
+  background-color: var(--freeze-bg);
+}
+
+:where(.table-freeze-first thead th:first-child:not([colspan])),
+:where(.table-freeze-first-two thead th:first-child:not([colspan])),
+:where(.table-freeze-first-two thead th:nth-child(2):not([colspan])),
+:where(.table-freeze-first tbody td:first-child:not([colspan])),
+:where(.table-freeze-first-two tbody td:first-child:not([colspan])),
+:where(.table-freeze-first-two tbody td:nth-child(2):not([colspan])) {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background-color: inherit;
+  box-shadow: 1px 0 0 var(--freeze-border);
+}
+
+:where(.table-freeze-first-two thead th:nth-child(2):not([colspan])),
+:where(.table-freeze-first-two tbody td:nth-child(2):not([colspan])) {
+  left: var(--freeze-first-width);
+}
+
+.table-freeze-first thead th:first-child:not([colspan]),
+.table-freeze-first-two thead th:first-child:not([colspan]),
+.table-freeze-first-two thead th:nth-child(2):not([colspan]) {
+  z-index: 3;
+  background-color: var(--freeze-head-bg);
+}
+
+:where(.table-freeze-first tfoot td:first-child:not([colspan])),
+:where(.table-freeze-first-two tfoot td:first-child:not([colspan])) {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background-color: var(--freeze-head-bg);
+  box-shadow: 1px 0 0 var(--freeze-border);
+}
+
+@media print {
+  .table-freeze-first :is(th, td):first-child,
+  .table-freeze-first-two :is(th, td):first-child,
+  .table-freeze-first-two :is(th, td):nth-child(2) {
+    position: static !important;
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+}

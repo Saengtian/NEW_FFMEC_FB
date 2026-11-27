@@ -524,7 +524,7 @@ function OverviewView({
                 No production records match the current scope.
               </div>
             ) : (
-              <table className="w-full text-left border-collapse text-xs">
+              <table className="table-freeze-first w-full text-left border-collapse text-xs">
                 <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                   <tr>
                     <th className="py-2.5 px-4">Product / Phase</th>
@@ -789,7 +789,7 @@ function GateWorkstreamMatrix({ projects, gateRecords, globalSide, scheduleOverr
             No NPI programs match the active scope filter.
           </div>
         ) : (
-          <table className="w-full text-left border-collapse text-xs">
+          <table className="table-freeze-first w-full text-left border-collapse text-xs">
             <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
               <tr>
                 <th className="py-2.5 px-3 whitespace-nowrap">Model</th>
@@ -1230,7 +1230,7 @@ function SignOffLedgerView({ gateRecords, projects }) {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
+            <table className="table-freeze-first w-full text-left border-collapse text-xs">
               <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
                   <th className="py-2.5 px-3 whitespace-nowrap">When</th>
@@ -1457,7 +1457,7 @@ function ProjectsMatrixView({
                     No Config × Side lines match the current filter. Click <strong>Add Config / Side</strong> to create one.
                   </div>
                 ) : (
-                  <table className="w-full text-left border-collapse text-xs">
+                  <table className="table-freeze-first w-full text-left border-collapse text-xs">
                     <thead>
                       <tr className="bg-slate-100/90 dark:bg-slate-800/90 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-600 dark:text-slate-400">
                         <th colSpan={5} className="py-1.5 px-3 border-r border-slate-200 dark:border-slate-800">
@@ -2883,7 +2883,7 @@ function TasksManagerView({ tasks, onSelectTask, onUpdateTaskStatus, onOpenNewTa
       {viewMode === 'list' ? (
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
+            <table className="table-freeze-first w-full text-left border-collapse text-xs">
               <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[11px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
                   <th className="py-3 px-4">ID / Program</th>
@@ -3599,7 +3599,7 @@ function GateSignOffView({
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
+              <table className="table-freeze-first w-full text-left border-collapse text-xs">
                 <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400">
                   <tr>
                     <th className="py-2.5 px-4">Functional Role</th>
@@ -4030,7 +4030,7 @@ function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDelet
               No production records match the current scope, station, or search filter.
             </div>
           ) : (
-            <table className="w-full text-left border-collapse text-xs">
+            <table className="table-freeze-first-two w-full text-left border-collapse text-xs">
               <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[11px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
                   <th className="py-3 pl-3 pr-1 w-8" />
@@ -4194,7 +4194,7 @@ function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDelet
                                 {defectList.length === 0 ? (
                                   <div className="p-3 text-xs text-slate-400 dark:text-slate-400">No defects recorded.</div>
                                 ) : (
-                                  <table className="w-full text-left border-collapse text-xs">
+                                  <table className="table-freeze-first w-full text-left border-collapse text-xs">
                                     <thead className="bg-slate-50/70 dark:bg-slate-800/70 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                                       <tr>
                                         <th className="py-2 px-3.5">Defect Mode</th>
@@ -4985,7 +4985,7 @@ function CpkMasterSpecsView({
                         </span>
                       </div>
                       <div className="overflow-x-auto">
-                        <table className="w-full text-left border-collapse text-xs">
+                        <table className="table-freeze-first w-full text-left border-collapse text-xs">
                   <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                     <tr>
                       <th
@@ -5126,7 +5126,7 @@ function CpkMasterSpecsView({
         ) : (
           /* Master Specifications repository table */
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
+            <table className="table-freeze-first w-full text-left border-collapse text-xs">
               <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 <tr>
                   <th className="py-2.5 px-4 whitespace-nowrap">Param Code</th>
