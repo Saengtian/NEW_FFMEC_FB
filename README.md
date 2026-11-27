@@ -79,7 +79,9 @@ and the backing spreadsheet.
 3. **Provisional limits stay provisional** until a planner enters the real limit. The six CTQs in
    `PROVISIONAL_LIMIT_SPEC_IDS` render neutral, and `hasProvisionalLimits` keeps every capability figure —
    the Overview line, the Cpk matrix share, the report — off a limit nobody confirmed. Confirming one
-   happens in Cpk & Master Specs: enter the real LSL / nominal / USL and clear *limits provisional*.
+   happens in Cpk & Master Specs: enter the real LSL / nominal / USL and clear *limits provisional*. The
+   *N provisional* chip on that view filters the matrix and the spec list down to those CTQs — including
+   the ones without a capability reading, so a placeholder cannot drop out of sight.
 4. **Do not commit** machine-specific files: `.clasprc.json`, `.env*`, `.preview/`, `.gemini/`,
    `.github/hooks/` are already ignored.
 

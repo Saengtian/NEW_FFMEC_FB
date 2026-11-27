@@ -4437,6 +4437,10 @@ function CpkMasterSpecsView({
   const [subTab, setSubTab] = useState('transposed'); // 'transposed' | 'specs'
   const [compareSpecId, setCompareSpecId] = useState(null);
   const [uploadedOnly, setUploadedOnly] = useState(false);
+  // The six placeholder CTQs have no readings yet, so the matrix — which only
+  // starts a row once a reading covers the spec — would drop them entirely now
+  // that the Overview panel no longer repeats them.
+  const [provisionalOnly, setProvisionalOnly] = useState(false);
   const [familyFilter, setFamilyFilter] = useState('ALL');
   const [search, setSearch] = useState('');
   const [specModel, setSpecModel] = useState('ALL');
@@ -4470,12 +4474,13 @@ function CpkMasterSpecsView({
     // Only parameters defined as CTQ belong in the capability matrix; rows saved
     // before the flag existed are treated as CTQ so nothing silently disappears.
     const ctqSpecs = masterSpecs.filter((spec) => spec.ctq !== false);
+    if (provisionalOnly) return ctqSpecs.filter((spec) => spec.limitsProvisional === true);
     if (uploadedOnly && lastUploadBatch) {
       const idSet = new Set(lastUploadBatch.matchedSpecIds);
       return ctqSpecs.filter((s) => idSet.has(s.id));
     }
     return ctqSpecs;
-  }, [masterSpecs, uploadedOnly, lastUploadBatch]);
+  }, [masterSpecs, uploadedOnly, lastUploadBatch, provisionalOnly]);
 
   // Transposed matrix: one row per Station > Variable > Spec and one column per
   // measurement context (stage · config · side, read within a model). A cell shows
@@ -4488,12 +4493,22 @@ function CpkMasterSpecsView({
   // section only variables with a reading in that family get a row, grouped by
   // station in process sequence.
   const cpkFamilyMatrices = useMemo(() => {
+    const familyOf = (model) => inferFamilyFromModel(model) || 'Other';
     const byFamily = new Map();
     activeCpkRecords.forEach((record) => {
-      const family = record.familyGroup || inferFamilyFromModel(record.model) || 'Other';
+      const family = record.familyGroup || familyOf(record.model);
       if (!byFamily.has(family)) byFamily.set(family, []);
       byFamily.get(family).push(record);
     });
+    // Under the provisional filter every placeholder CTQ is in scope, including
+    // the ones no upload has reached yet, so their families need a section even
+    // when the family carries no reading at all.
+    if (provisionalOnly) {
+      provisionalLimitSpecs.forEach((spec) => {
+        const family = familyOf(spec.model);
+        if (!byFamily.has(family)) byFamily.set(family, []);
+      });
+    }
 
     const stageRank = (station) => orderedRank(PROCESS_STEPS, PROCESS_STEP_BY_STATION[station] || '');
     return Array.from(byFamily.entries())
@@ -4503,12 +4518,24 @@ function CpkMasterSpecsView({
         model.columns.forEach((col) => Object.keys(col.bySpec).forEach((id) => covered.add(id)));
 
         const groups = new Map();
-        visibleSpecsForMatrix.forEach((spec) => {
-          if (!covered.has(spec.id)) return;
+        const addRow = (spec) => {
           const station = spec.station || 'Unassigned station';
           if (!groups.has(station)) groups.set(station, []);
           groups.get(station).push(spec);
+        };
+        visibleSpecsForMatrix.forEach((spec) => {
+          if (!covered.has(spec.id)) return;
+          addRow(spec);
         });
+        // A provisional CTQ with no reading is the reason this filter exists: it
+        // stays listed, with every context showing "—", until a real measurement
+        // arrives.
+        if (provisionalOnly) {
+          visibleSpecsForMatrix.forEach((spec) => {
+            if (covered.has(spec.id) || familyOf(spec.model) !== family) return;
+            addRow(spec);
+          });
+        }
 
         return {
           family,
@@ -4521,7 +4548,7 @@ function CpkMasterSpecsView({
       })
       .filter((section) => section.groups.length > 0)
       .sort((a, b) => cpkFamilyRank(a.family) - cpkFamilyRank(b.family) || a.family.localeCompare(b.family));
-  }, [activeCpkRecords, visibleSpecsForMatrix]);
+  }, [activeCpkRecords, visibleSpecsForMatrix, provisionalOnly, provisionalLimitSpecs]);
 
   const cpkFamilyOptions = useMemo(
     () => cpkFamilyMatrices.map((section) => section.family),
@@ -4635,6 +4662,7 @@ function CpkMasterSpecsView({
   const filteredSpecs = useMemo(() => {
     const q = search.trim().toLowerCase();
     return masterSpecs.filter((s) => {
+      if (provisionalOnly && s.limitsProvisional !== true) return false;
       // Specs without a model apply to every model, so they stay visible.
       if (activeSpecModel !== 'ALL' && s.model && s.model !== activeSpecModel) return false;
       if (!q) return true;
@@ -4642,7 +4670,32 @@ function CpkMasterSpecsView({
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q));
     });
-  }, [masterSpecs, search, activeSpecModel]);
+  }, [masterSpecs, search, activeSpecModel, provisionalOnly]);
+
+  // One filter for both tabs: the placeholder CTQs are the few rows that must not
+  // fall out of sight while their limits are still unconfirmed. `false` (not null)
+  // keeps the slot empty when nothing is provisional.
+  const provisionalChip = provisionalLimitSpecs.length > 0 && (
+    <button
+      type="button"
+      onClick={() => setProvisionalOnly((prev) => !prev)}
+      aria-pressed={provisionalOnly}
+      title={
+        provisionalOnly
+          ? 'Show every CTQ again'
+          : 'Show only the CTQs whose limits are still placeholders'
+      }
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-colors ${
+        provisionalOnly
+          ? 'bg-amber-500 text-white border-amber-500'
+          : 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900'
+      }`}
+    >
+      <AlertTriangle className="w-3.5 h-3.5" />
+      {provisionalLimitSpecs.length} provisional
+      <span className="font-semibold opacity-80">{provisionalOnly ? '· shown' : '· filter'}</span>
+    </button>
+  );
 
   return (
     <div className="space-y-6">
@@ -4735,6 +4788,7 @@ function CpkMasterSpecsView({
           <div className="flex flex-wrap items-center gap-2">
             {subTab !== 'specs' ? (
               <>
+                {provisionalChip}
                 {lastUploadBatch && (
                   <button
                     type="button"
@@ -4759,6 +4813,7 @@ function CpkMasterSpecsView({
               </>
             ) : (
               <>
+                {provisionalChip}
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-slate-400 dark:text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                   <input
@@ -4930,7 +4985,11 @@ function CpkMasterSpecsView({
                           </span>
                         </div>
                         <span className="text-[10px] font-semibold text-slate-600 dark:text-slate-300 tabular-nums">
-                          Cpk ≥ 1.33: {rollup.pct.toFixed(0)}% ({rollup.green}/{rollup.total})
+                          {rollup.total > 0 ? (
+                            <>Cpk ≥ 1.33: {rollup.pct.toFixed(0)}% ({rollup.green}/{rollup.total})</>
+                          ) : (
+                            <>No valid capability reading yet</>
+                          )}
                           {rollup.provisional > 0 && (
                             <span className="font-medium text-slate-500 dark:text-slate-400">
                               {' '}

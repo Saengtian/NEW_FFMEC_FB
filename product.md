@@ -53,7 +53,7 @@ The app answers those, and refuses to answer the rest with invented numbers.
 | **Build Timeline (Gantt)** | Stage sequence per line, gate-coloured bars, drag to reschedule | Drag a bar (refused when it breaks the sequence), open a dossier |
 | **Tasks & AIL** | Action items with owner, due date, status, linked program/gate | New task, claim unassigned work, open drawer |
 | **NPI Gate Sign-Off** | Nine gates (PEN-81-0002 Rev B) per configuration × side, exit criteria, cross-functional signatures, evidence links, audit trail | Tick criteria, sign, attach evidence, open matrix cell |
-| **Cpk & Master Specs** | Spec library, capability roll-up, distribution compare, spec correction, import pipeline | Upload Cpk data, correct a spec, compare distributions |
+| **Cpk & Master Specs** | Spec library, capability roll-up, distribution compare, spec correction, import pipeline; a *N provisional* chip narrows both tabs to the CTQs still on placeholder limits, including those no upload has reached | Upload Cpk data, correct a spec, compare distributions, filter to provisional CTQs |
 | **Projects & Cost Saving** | VA/VE, yield and HC saving ideas with computed annual saving | Edit item, compare against the 10M THB target |
 | **Customer Feedback** | Claims and FA/8D cases with severity, stage and closure status | Open case, update 8D stage |
 | **Production Records** | Yield, UPH, efficiency and loss per station per day | Add / edit / delete a record, filter by station |
