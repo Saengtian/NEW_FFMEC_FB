@@ -24,6 +24,26 @@ function OverviewView({
   );
 
   const recentRecords = useMemo(() => records.slice(0, 5), [records]);
+  // A tile opens the inline deep dive, not the modal. The key and token let the
+  // inline card select the matching tab even when the same tile is clicked twice.
+  const [deepDiveFocus, setDeepDiveFocus] = useState({ key: null, token: 0 });
+  const deepDiveRef = useRef(null);
+
+  useEffect(() => {
+    if (!deepDiveFocus.key || !deepDiveFocus.token) return;
+    const node = deepDiveRef.current;
+    if (!node) return;
+    // The top action bar is sticky, so offset the card by its real height instead
+    // of a fixed guess that breaks when the scope filters wrap.
+    const header = document.querySelector('header');
+    const offset = (header ? header.getBoundingClientRect().height : 0) + 16;
+    const top = node.getBoundingClientRect().top + window.scrollY - offset;
+    window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  }, [deepDiveFocus]);
+
+  const showKpiInInlineDeepDive = (key) => {
+    setDeepDiveFocus((previous) => ({ key, token: previous.token + 1 }));
+  };
 
   // One line of capability on the landing page: counts and the Cpk ≥ 1.33 share,
   // rolled up by the same rule the Cpk matrix uses. The matrix itself stays on its
@@ -272,9 +292,10 @@ function OverviewView({
             <button
               key={tile.key}
               type="button"
-              onClick={() => onOpenKpiDrilldown(tile.key)}
-              title={`Open ${tile.label} deep dive`}
-              aria-label={`Open ${tile.label} deep dive`}
+              onClick={() => showKpiInInlineDeepDive(tile.key)}
+              title={`Show ${tile.label} in the KPI deep dive`}
+              aria-label={`Show ${tile.label} in the KPI deep dive`}
+              aria-controls="overview-kpi-deep-dive"
               className="text-left rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 p-3 hover:border-blue-300 dark:hover:border-blue-700 hover:bg-white dark:hover:bg-slate-800/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 transition-colors"
             >
               <div className="flex items-start justify-between gap-1.5">
@@ -339,6 +360,9 @@ function OverviewView({
         costProjects={costProjects}
         customerFeedback={customerFeedback}
         onOpenDeepDive={onOpenKpiDrilldown}
+        focusKpiKey={deepDiveFocus.key}
+        focusToken={deepDiveFocus.token}
+        sectionRef={deepDiveRef}
       />
 
       {/* Capability in one line, and the way through to the full matrix. */}

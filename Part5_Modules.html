@@ -4139,11 +4139,22 @@ function KpiDeepDiveSection({
   globalSide,
   costProjects,
   customerFeedback,
-  onOpenDeepDive
+  onOpenDeepDive,
+  focusKpiKey,
+  focusToken,
+  sectionRef
 }) {
   const [kpiKey, setKpiKey] = useState('fpy');
   const [rangeId, setRangeId] = useState('90D');
   const [drill, setDrill] = useState(null);
+
+  // The KPI tiles above the card drive this state. The token makes a repeated
+  // click on the same tile reset any drill-down and re-select its tab.
+  useEffect(() => {
+    if (!focusKpiKey || !focusToken) return;
+    setKpiKey(focusKpiKey);
+    setDrill(null);
+  }, [focusKpiKey, focusToken]);
   const meta = KPI_DEEP_DIVE_META[kpiKey] || KPI_DEEP_DIVE_META.fpy;
   const range = KPI_RANGE_OPTIONS.find((r) => r.id === rangeId) || KPI_RANGE_OPTIONS[1];
   const cutoffIso = range.days ? addDaysIso(todayIso(), -(range.days - 1)) : null;
@@ -4209,7 +4220,11 @@ function KpiDeepDiveSection({
   const chartHeading = 'text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300';
 
   return (
-    <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+    <section
+      id="overview-kpi-deep-dive"
+      ref={sectionRef}
+      className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden"
+    >
       <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">KPI Deep dive</h2>
