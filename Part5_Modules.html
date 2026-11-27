@@ -3469,12 +3469,18 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun, activeKey, onSelect }
         ])
       : shown;
 
+  // Bars read as a decline: the largest single mode fills the track. The
+  // percentage columns below still use the whole-range total, so the shape and
+  // the share-of-loss reading stay separate. Others is an aggregate, so its bar
+  // is capped at the same width and explained on hover.
+  const barMax = rows.reduce((max, row) => Math.max(max, row.value), 0);
   let cumulative = 0;
 
   return (
     <div className="space-y-1.5">
       {displayRows.map((row) => {
         const share = total > 0 ? (row.value / total) * 100 : 0;
+        const barShare = barMax > 0 ? (row.value / barMax) * 100 : 0;
         const before = cumulative;
         cumulative += share;
         const vital = !row.isOthers && before < 80;
@@ -3505,10 +3511,13 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun, activeKey, onSelect }
               {row.label}
             </span>
             <span className="flex w-full min-w-0 items-center gap-2 sm:flex-1">
-              <span className="block flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+              <span
+                className="block flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden"
+                title={row.isOthers ? 'Others is a group of smaller contributors; its bar is capped at the largest mode' : undefined}
+              >
                 <span
                   className={`block h-full ${row.isOthers ? 'bg-slate-400 dark:bg-slate-600' : vital ? 'bg-rose-500' : 'bg-rose-300 dark:bg-rose-800'}`}
-                  style={{ width: `${Math.max(1, Math.min(100, share))}%` }}
+                  style={{ width: `${Math.max(1, Math.min(100, barShare))}%` }}
                 />
               </span>
               <span className={`w-14 sm:w-20 shrink-0 text-right font-semibold tabular-nums ${row.isOthers ? 'text-slate-500 dark:text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
@@ -3529,9 +3538,9 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun, activeKey, onSelect }
       })}
       <div className="text-[10px] text-slate-400 dark:text-slate-400 pt-1">
         {tail.length > 0
-          ? `Showing the top ${shown.length} of ${rows.length} contributors — solid bars cover the vital few (first 80% of loss)`
-          : 'Solid bars are the vital few — the modes/categories making up the first 80% of total loss'}
-        <span className="hidden sm:inline">; the last column is the cumulative share</span>
+          ? `Showing the top ${shown.length} of ${rows.length} contributors — bars are scaled to the largest mode; solid bars cover the vital few (first 80% of loss)`
+          : 'Bars are scaled to the largest mode; solid bars are the vital few — the modes/categories making up the first 80% of total loss'}
+        <span className="hidden sm:inline">; percentages are share of total and the last column is cumulative</span>
         {tail.length > 0 ? `; the remaining ${tail.length} are grouped as Others.` : '.'}
       </div>
     </div>
