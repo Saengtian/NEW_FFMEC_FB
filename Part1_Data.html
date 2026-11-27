@@ -2210,13 +2210,6 @@ function productionLineKey(record) {
   return [date, field('model'), field('config'), field('side'), field('station')].join('\u0000');
 }
 
-/** "X4151 · ME11 RHS · Fan Assembly · 2026-11-20" — the row a duplicate clashes with. */
-function productionRecordLabel(record) {
-  const rec = record || {};
-  const line = [rec.config, rec.side].filter(Boolean).join(' ');
-  return [rec.model, line, rec.station, rec.date].filter(Boolean).join(' · ') || 'this record';
-}
-
 /**
  * The good quantity a row claims. Records store fallout and salvage, so good
  * units are normally derived (input − net reject); a row imported from a CSV that
@@ -2346,7 +2339,9 @@ function productionRecordIssues(record, peers, ignoreId) {
           field: 'date',
           code: PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE,
           severity: 'block',
-          message: `${productionRecordLabel(rec)} already has a record — edit that row instead of logging a second one.`
+          // The toast already prints "row N · day · line · station" in front of
+          // this, so the reason only says what went wrong with the row.
+          message: 'Repeats a record already loaded — the later copy is dropped.'
         });
       }
     }
@@ -2402,7 +2397,7 @@ function sanitizeProductionRecords(records) {
           field: 'date',
           code: PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE,
           severity: 'block',
-          message: `${productionRecordLabel(record)} repeats a row already loaded; the later copy was dropped so the run is not counted twice.`
+          message: 'Repeats a record already loaded — the later copy is dropped.'
         });
       }
       if (blocking.length === 0) {

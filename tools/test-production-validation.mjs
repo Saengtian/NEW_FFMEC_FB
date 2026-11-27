@@ -35,7 +35,6 @@ const DECLARATIONS = [
   /const PRODUCTION_RECORD_ISSUES = \{[\s\S]*?\n\};/,
   /function computeProductionMetrics\([\s\S]*?\n}/,
   /function productionLineKey\([\s\S]*?\n}/,
-  /function productionRecordLabel\([\s\S]*?\n}/,
   /function productionRecordGoodUnits\([\s\S]*?\n}/,
   /function productionRecordIssues\([\s\S]*?\n}/,
   /function productionRecordBlockingIssues\([\s\S]*?\n}/,
@@ -65,7 +64,7 @@ const pieces = DECLARATIONS.map((pattern) => {
 
 const api = new Function(
   `"use strict";\n${pieces.join("\n")}\n` +
-    "return { PRODUCTION_RECORD_ISSUES, computeProductionMetrics, productionLineKey, productionRecordLabel, " +
+    "return { PRODUCTION_RECORD_ISSUES, computeProductionMetrics, productionLineKey, " +
     "productionRecordGoodUnits, productionRecordIssues, productionRecordBlockingIssues, clampProductionDowntime, " +
     "sanitizeProductionRecords, productionDropReport, productionDropRowLines, productionDropMessage, " +
     "productionDropSummary, productionRecordImportPlan, normalizeProductionDate, INITIAL_PRODUCTION_RECORDS };"
@@ -75,7 +74,6 @@ const {
   PRODUCTION_RECORD_ISSUES,
   computeProductionMetrics,
   productionLineKey,
-  productionRecordLabel,
   productionRecordGoodUnits,
   productionRecordIssues,
   productionRecordBlockingIssues,
@@ -215,7 +213,10 @@ check("the same date × line × station cannot be logged twice", () => {
   const second = record({ id: "REC-TEST-2" });
   const issues = productionRecordIssues(second, [first], null);
   assert.deepEqual(codes(issues), [PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE]);
-  assert.match(issues[0].message, /X4151 · ME11 RHS · Fan Assembly · 2026-11-20/);
+  // The toast prints the row's day, line and station in front of the reason, so
+  // the reason must not repeat them.
+  assert.equal(issues[0].message, "Repeats a record already loaded — the later copy is dropped.");
+  assert.doesNotMatch(issues[0].message, /X4151|ME11|Fan Assembly|2026-11-20/);
 
   // A different side, station, date or model is a different measurement.
   assert.deepEqual(codes(productionRecordIssues(record({ side: "LHS" }), [first], null)), []);
@@ -236,7 +237,7 @@ check("the same date × line × station cannot be logged twice", () => {
     productionLineKey(record({ config: " me11 ", side: "rhs" })),
     productionLineKey(record())
   );
-  assert.equal(productionRecordLabel(first), "X4151 · ME11 RHS · Fan Assembly · 2026-11-20");
+
 });
 
 check("a row with no line identity at all does not collide with another", () => {
@@ -424,6 +425,11 @@ check("a CSV import plans the rows that pass and names the ones it refuses", () 
   const message = productionDropMessage(productionDropReport(plan.rejected), 4);
   assert.match(message, /^3 production rows rejected on load/);
   assert.match(message, /row 3 · 11\/21 · X4152 · ME12 LHS · Fan Test & Accessory: Input quantity/);
+  assert.match(
+    message,
+    /row 4 · [^:]+: Repeats a record already loaded — the later copy is dropped\./,
+    "the duplicate's reason does not restate the row the toast line names"
+  );
 
   // A file that repeats a row already on file is refused the same way.
   const againstExisting = productionRecordImportPlan(headers, [rows[0]], { existing: [record({ date: "2026-11-20" })] });
