@@ -3018,7 +3018,9 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
     if (!el || typeof ResizeObserver === 'undefined') return undefined;
     const measure = () => {
       const width = Math.round(el.getBoundingClientRect().width);
-      if (width > 0) setChartW(Math.max(280, Math.min(960, width)));
+      // The floor follows the narrowest panel the chart can sit in: the modal's
+      // 320px viewport leaves ~250px of content, and a 280 floor overflowed it.
+      if (width > 0) setChartW(Math.max(240, Math.min(960, width)));
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -3181,7 +3183,7 @@ function KpiBarRows({ rows, emptyText, activeKey, onSelect }) {
             onClick={interactive ? () => onSelect(row.key) : undefined}
             aria-pressed={interactive ? active : undefined}
             title={interactive ? (active ? 'Clear variant scope' : `Scope the deep dive to ${row.label}`) : undefined}
-            className={`w-full flex items-center gap-2 text-[11px] text-left rounded-md break-inside-avoid ${
+            className={`w-full flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2 text-[11px] text-left rounded-md break-inside-avoid ${
               active
                 ? 'bg-blue-50 dark:bg-blue-950/60 ring-1 ring-blue-300 dark:ring-blue-800 px-1.5 py-1 -mx-1.5'
                 : interactive
@@ -3189,21 +3191,23 @@ function KpiBarRows({ rows, emptyText, activeKey, onSelect }) {
                 : ''
             }`}
           >
-            {/* The three fixed columns shrink and the sample count drops out below
-                sm: at 375px the old 176+80+128 left the bar at 0 width and the row
-                clipped 58px past the card. */}
-            <span className={`w-44 max-w-[11rem] min-w-0 shrink truncate ${active ? 'font-semibold text-blue-800 dark:text-blue-200' : 'text-slate-600 dark:text-slate-400'}`} title={row.label}>
+            {/* Below sm the label gets its own line and the bar shares the second
+                with the numbers: in the 310px-wide deep-dive dialog the side-by-side
+                row squeezed the label to 105px and cut the bar to nothing. */}
+            <span className={`min-w-0 sm:w-44 sm:max-w-[11rem] truncate ${active ? 'font-semibold text-blue-800 dark:text-blue-200' : 'text-slate-600 dark:text-slate-400'}`} title={row.label}>
               {row.label}
             </span>
-            <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-              <div className={`h-full ${row.barClass}`} style={{ width: `${Math.max(1, Math.min(100, row.pct))}%` }} />
-            </div>
-            <span className="w-16 sm:w-20 shrink-0 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{row.valueText}</span>
-            {row.meta && (
-              <span className="hidden sm:inline w-20 sm:w-32 shrink-0 text-right text-[10px] text-slate-400 dark:text-slate-400 truncate" title={row.meta}>
-                {row.meta}
-              </span>
-            )}
+            <span className="flex w-full min-w-0 items-center gap-2 sm:flex-1">
+              <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                <div className={`h-full ${row.barClass}`} style={{ width: `${Math.max(1, Math.min(100, row.pct))}%` }} />
+              </div>
+              <span className="w-14 sm:w-20 shrink-0 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{row.valueText}</span>
+              {row.meta && (
+                <span className="hidden sm:inline w-20 sm:w-32 shrink-0 text-right text-[10px] text-slate-400 dark:text-slate-400 truncate" title={row.meta}>
+                  {row.meta}
+                </span>
+              )}
+            </span>
           </Row>
         );
       })}
@@ -3256,33 +3260,35 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun }) {
         cumulative += share;
         const vital = !row.isOthers && before < 80;
         return (
-          <div key={row.key} className="flex items-center gap-2 text-[11px] break-inside-avoid">
-            {/* The label takes its share of the row instead of a fixed 112px below
-                sm: at 600px the card is 551px wide and was cutting names at 112px
-                with 400px of free space next to the bar. */}
+          <div key={row.key} className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2 text-[11px] break-inside-avoid">
+            {/* The label gets the full width on its own line below sm: the modal is
+                310px wide at a 375px viewport, and side-by-side every failure mode
+                was cut at 105px while the bar kept a 48px floor. */}
             <span
-              className={`w-44 max-w-[11rem] min-w-0 shrink truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
+              className={`min-w-0 sm:w-44 sm:max-w-[11rem] truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
               title={row.label}
             >
               {row.label}
             </span>
-            <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-              <div
-                className={`h-full ${row.isOthers ? 'bg-slate-400 dark:bg-slate-600' : vital ? 'bg-rose-500' : 'bg-rose-300 dark:bg-rose-800'}`}
-                style={{ width: `${Math.max(1, Math.min(100, share))}%` }}
-              />
-            </div>
-            <span className={`w-14 sm:w-20 shrink-0 text-right font-semibold tabular-nums ${row.isOthers ? 'text-slate-500 dark:text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
-              {Math.round(row.value).toLocaleString()} {unit}
-            </span>
-            <span className="w-9 sm:w-12 shrink-0 text-right tabular-nums text-slate-500 dark:text-slate-400">{share.toFixed(0)}%</span>
-            {/* Below sm the cumulative column is dropped so the name and the bar
-                keep half the row each; the footer stops promising it there. */}
-            <span
-              className={`hidden sm:inline-block w-12 sm:w-16 shrink-0 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}
-              title="cumulative share"
-            >
-              {cumulative.toFixed(0)}%
+            <span className="flex w-full min-w-0 items-center gap-2 sm:flex-1">
+              <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                <div
+                  className={`h-full ${row.isOthers ? 'bg-slate-400 dark:bg-slate-600' : vital ? 'bg-rose-500' : 'bg-rose-300 dark:bg-rose-800'}`}
+                  style={{ width: `${Math.max(1, Math.min(100, share))}%` }}
+                />
+              </div>
+              <span className={`w-14 sm:w-20 shrink-0 text-right font-semibold tabular-nums ${row.isOthers ? 'text-slate-500 dark:text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
+                {Math.round(row.value).toLocaleString()} {unit}
+              </span>
+              <span className="w-9 sm:w-12 shrink-0 text-right tabular-nums text-slate-500 dark:text-slate-400">{share.toFixed(0)}%</span>
+              {/* Below sm the cumulative column is dropped so the bar keeps its
+                  width; the footer stops promising it there. */}
+              <span
+                className={`hidden sm:inline-block w-12 sm:w-16 shrink-0 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}
+                title="cumulative share"
+              >
+                {cumulative.toFixed(0)}%
+              </span>
             </span>
           </div>
         );
@@ -3463,7 +3469,7 @@ function KpiDeepDiveModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center p-4 bg-slate-950/60 backdrop-blur-[1px] overflow-y-auto"
+      className="kpi-print-overlay fixed inset-0 z-50 flex items-start justify-center p-2 sm:p-4 bg-slate-950/60 backdrop-blur-[1px] overflow-y-auto"
       role="dialog"
       aria-modal="true"
       aria-label={`${meta.title} deep dive`}
@@ -3471,8 +3477,8 @@ function KpiDeepDiveModal({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="kpi-print-area w-full max-w-4xl my-8 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-3">
+      <div className="kpi-print-area w-full max-w-4xl my-4 sm:my-8 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+        <div className="px-4 py-3 sm:px-5 sm:py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">{meta.title} · Deep Dive</h3>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">{scopeLabel}</p>
@@ -3514,7 +3520,7 @@ function KpiDeepDiveModal({
           </div>
         </div>
 
-        <div className="p-5 space-y-5">
+        <div className="p-4 space-y-4 sm:p-5 sm:space-y-5">
           {Array.isArray(scopeFilters) && scopeFilters.length > 0 && (
             <div className="no-print flex flex-wrap items-center gap-2">
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
@@ -3663,22 +3669,25 @@ function KpiDeepDiveModal({
                   const bottleneck = line.key === view.effAnalysis.bottleneckKey;
                   return (
                     <div key={line.key} className="flex items-center gap-2 text-[11px]">
+                      {/* 160+0+24+24+29 at 375px: the bar had collapsed and the
+                          numbers wrapped into slivers. Label and columns shrink
+                          below sm and the two trailing figures wait for room. */}
                       <span
-                        className={`w-40 shrink-0 truncate ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-400'}`}
+                        className={`w-28 sm:w-40 shrink-0 truncate ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-400'}`}
                         title={line.label}
                       >
                         {line.label}
                       </span>
-                      <div className="flex-1 h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                      <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
                         <div
                           className={`h-full ${bottleneck ? 'bg-rose-500' : 'bg-blue-500 dark:bg-blue-600'}`}
                           style={{ width: `${Math.max(1, (line.ctSec / view.effAnalysis.maxCt) * 100)}%` }}
                         />
                       </div>
-                      <span className="w-16 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{line.ctSec.toFixed(1)} s</span>
-                      <span className="w-16 text-right tabular-nums text-slate-500 dark:text-slate-400">{line.uph.toFixed(0)} UPH</span>
+                      <span className="w-14 sm:w-16 shrink-0 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{line.ctSec.toFixed(1)} s</span>
+                      <span className="hidden sm:inline-block w-16 shrink-0 text-right tabular-nums text-slate-500 dark:text-slate-400">{line.uph.toFixed(0)} UPH</span>
                       <span
-                        className={`w-14 text-right tabular-nums ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-500'}`}
+                        className={`hidden sm:inline-block w-14 shrink-0 text-right tabular-nums ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-500'}`}
                       >
                         {line.vsFastestPct <= 0.05 ? 'best' : `+${line.vsFastestPct.toFixed(0)}%`}
                       </span>

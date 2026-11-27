@@ -33,6 +33,17 @@
     print-color-adjust: exact;
   }
 
+  /* The dialog is fixed and scrolls on screen; on paper that scroll box clips
+     everything past the first viewport, so the panel must escape it. */
+  .kpi-print-overlay {
+    position: static !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    background: transparent !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+
   .kpi-print-area .no-print {
     display: none !important;
   }
