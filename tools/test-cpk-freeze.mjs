@@ -34,12 +34,15 @@ function slice(from, to) {
 // Limit-revision helpers (through effectiveSpecForRecord) and the statistics.
 const limitsBlock = slice("const SPEC_LIMIT_FIELDS", "function specLimitsDiffer");
 const statsBlock = slice("function normalCdf", "function getCpkTone");
+// Tones, the provisional check and the Overview's one-line roll-up.
+const toneBlock = slice("function getCpkTone", "function formatSpecNum");
 
 const api = new Function(
-  `"use strict";\n${limitsBlock}\n${statsBlock}\n` +
+  `"use strict";\n${limitsBlock}\n${statsBlock}\n${toneBlock}\n` +
     "return { effectiveSpecForRecord, computeCapabilityStats, withFrozenSpecLimits, " +
     "hasFrozenSpecLimits, migrateCpkRecords, recordsFrozenToRevision, " +
-    "refreezeCpkRecordsToRevision, correctSpecRevision };"
+    "refreezeCpkRecordsToRevision, correctSpecRevision, getCpkTone, " +
+    "hasProvisionalLimits, summarizeCpkCapability };"
 )();
 
 const results = [];
@@ -327,6 +330,127 @@ check("records frozen to another revision are left out of a re-freeze", () => {
   const corrected = api.correctSpecRevision(spec, CORRECTED_LIMITS, "SPEC-T-R1", "now", "qa@x");
   const next = api.refreezeCpkRecordsToRevision([r2], corrected, "SPEC-T-R1");
   eq(next[0], r2);
+});
+
+// --- the Overview's capability line -----------------------------------------
+
+// SPEC-T's R2 limits are 9.9–10.1, so these σ values land one reading in each tone.
+const reading = (over = {}) => ({
+  id: "CPK-T",
+  specId: "SPEC-T",
+  model: "X4151",
+  phase: "EVT",
+  config: "ME11",
+  side: "RHS",
+  mean: 10,
+  stdDev: 0.02,
+  date: "2026-07-02",
+  ...over
+});
+
+check("the line splits readings into capable, marginal and incapable", () => {
+  const specs = [{ ...makeSpec(), id: "SPEC-T" }];
+  const summary = api.summarizeCpkCapability(
+    [
+      reading({ config: "ME11", stdDev: 0.02 }),
+      reading({ config: "ME12", stdDev: 0.03 }),
+      reading({ config: "ME13", stdDev: 0.05 })
+    ],
+    specs
+  );
+  eq(summary.green, 1);
+  eq(summary.yellow, 1);
+  eq(summary.orange, 1);
+  eq(summary.total, 3);
+  eq(Math.round(summary.passRate), 33);
+});
+
+check("one context counts once, and its latest reading decides the tone", () => {
+  const specs = [{ ...makeSpec(), id: "SPEC-T" }];
+  const summary = api.summarizeCpkCapability(
+    [reading({ stdDev: 0.05, date: "2026-07-01" }), reading({ stdDev: 0.02, date: "2026-07-02" })],
+    specs
+  );
+  eq(summary.total, 1);
+  eq(summary.green, 1);
+  eq(summary.orange, 0);
+  eq(summary.passRate, 100);
+});
+
+check("a CTQ on provisional limits is excluded and counted apart", () => {
+  const specs = [{ ...makeSpec(), id: "SPEC-T", limitsProvisional: true }];
+  const summary = api.summarizeCpkCapability([reading()], specs);
+  eq(summary.provisional, 1);
+  eq(summary.total, 0);
+  eq(summary.passRate, 0);
+});
+
+check("non-CTQ specs and readings with no spec are not capability", () => {
+  const specs = [{ ...makeSpec(), id: "SPEC-T", ctq: false }];
+  eq(api.summarizeCpkCapability([reading()], specs).total, 0);
+  const realSpecs = [{ ...makeSpec(), id: "SPEC-T" }];
+  eq(api.summarizeCpkCapability([reading({ specId: "SPEC-MISSING" })], realSpecs).total, 0);
+});
+
+check("no readings means no share, not a broken one", () => {
+  const summary = api.summarizeCpkCapability([], [makeSpec()]);
+  eq(summary.total, 0);
+  eq(summary.passRate, 0);
+  eq(api.summarizeCpkCapability(null, null).total, 0);
+});
+
+// --- the demo rows a fresh workspace used to carry --------------------------
+
+const seedStart = source.indexOf("const INITIAL_CPK_RECORDS");
+const stripStart = source.indexOf("function stripLegacyFabricatedCpkRows");
+const stripEnd = source.indexOf("\n}", stripStart) + 2;
+if (seedStart < 0 || stripStart < 0 || stripEnd < 2) {
+  console.error("Part1_Data.html no longer declares the Cpk seed and its strip list — update this test.");
+  process.exit(1);
+}
+const seedApi = new Function(
+  `"use strict";\n${source.slice(seedStart, stripEnd)}\n` +
+    "return { INITIAL_CPK_RECORDS, LEGACY_FABRICATED_CPK_IDS, stripLegacyFabricatedCpkRows };"
+)();
+
+const DEMO_IDS = [
+  "CPK-4151R-TIR", "CPK-4151R-ZMAX", "CPK-4151R-ZPARA", "CPK-4151R-GAP",
+  "CPK-4151L-TIR", "CPK-4151L-ZMAX", "CPK-4151L-ZPARA", "CPK-4151L-GAP",
+  "CPK-4152R-TIR", "CPK-4152R-ZMAX", "CPK-4152R-ZPARA", "CPK-4152R-GAP",
+  "CPK-4026L-TIR", "CPK-4026L-ZMAX", "CPK-4026L-ZPARA", "CPK-4026L-GAP"
+];
+
+check("a fresh workspace starts with no Cpk readings", () => {
+  eq(seedApi.INITIAL_CPK_RECORDS, []);
+});
+
+check("the sixteen demo rows are on the strip list", () => {
+  const missing = DEMO_IDS.filter((id) => !seedApi.LEGACY_FABRICATED_CPK_IDS.has(id));
+  eq(missing, []);
+  eq(DEMO_IDS.length, 16);
+});
+
+check("a saved workspace drops all sixteen demo rows on load", () => {
+  const saved = DEMO_IDS.map((id) => ({ id, model: "X4151", specId: "SPEC-TIR-W", mean: 0.005, stdDev: 0.002 }));
+  eq(seedApi.stripLegacyFabricatedCpkRows(saved), []);
+});
+
+check("the older re-pointed rows are still dropped", () => {
+  eq(seedApi.stripLegacyFabricatedCpkRows([{ id: "CPK-4151R-IMB" }]), []);
+});
+
+check("a real upload that reuses a demo id survives", () => {
+  const uploaded = { id: "CPK-4151R-TIR", uploadBatchId: "BATCH-9", mean: 0.005, stdDev: 0.002 };
+  eq(seedApi.stripLegacyFabricatedCpkRows([uploaded]), [uploaded]);
+  const filed = { id: "CPK-4151R-TIR", sourceFile: "Cpk_Nov.xlsx" };
+  eq(seedApi.stripLegacyFabricatedCpkRows([filed]), [filed]);
+});
+
+check("readings this list has never heard of are kept, and bad input is passed through", () => {
+  const real = { id: "CPK-REAL-0001" };
+  eq(seedApi.stripLegacyFabricatedCpkRows([real]), [real]);
+  eq(seedApi.stripLegacyFabricatedCpkRows(null), null);
+  eq(seedApi.stripLegacyFabricatedCpkRows([null, real]).length, 2);
 });
 
 for (const r of results) {

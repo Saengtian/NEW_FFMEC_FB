@@ -32,8 +32,9 @@ The app answers those, and refuses to answer the rest with invented numbers.
 
 ## 3. Product principles
 
-1. **Stored data is evidence.** Nothing fabricated is seeded into the store; known invented Cpk rows
-   are stripped on load, and placeholder Drive links are purged.
+1. **Stored data is evidence.** Nothing fabricated is seeded into the store: a fresh workspace has no
+   Cpk rows at all (import is the only source), the invented demo rows are stripped by id on load,
+   and placeholder Drive links are purged.
 2. **A limit that is not real capability.** Six CTQs still carry placeholder limits. They are
    flagged provisional, render neutral, and never count as capable.
 3. **Every gate decision is attributable.** Approvals record who, when, role, decision, remark and

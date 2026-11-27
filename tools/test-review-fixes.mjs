@@ -110,6 +110,10 @@ const api = new Function(
 const SERVER_DECLARATIONS = [
   /const SIGN_OFF_LEDGER_HEADERS = \[[\s\S]*?\n\];/,
   /const GATE_LEDGER_LABELS = \{[\s\S]*?\n\};/,
+  // The row builder now shares its diff with the signature guard, so the diff
+  // and the identity key it compares names with come along.
+  /function identityKey_\([\s\S]*?\n}/,
+  /function signOffSignatureEdits_\([\s\S]*?\n}/,
   /function signOffLedgerRows\([\s\S]*?\n}/
 ];
 

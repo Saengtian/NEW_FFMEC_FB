@@ -269,18 +269,22 @@ function reportBarChartSvg(bars, reference, formatter) {
   const height = 190;
   const values = bars.map((bar) => Math.max(0, Number(bar.value) || 0));
   const referenceValue = reference === null || reference === undefined ? null : Number(reference);
+  const hasReference = referenceValue !== null;
   const padL = 8;
-  // Reserve a right-hand gutter for the target label so it cannot print over
-  // the last bar's value when actual and target are close together.
-  const padR = referenceValue === null ? 8 : 78;
+  // The target label is the same two-line block KpiTrendChart draws — see the
+  // TARGET_LABEL_* block in Part5: 9px lines TARGET_LABEL_GAP apart, anchored
+  // TARGET_LABEL_INSET inside the right edge, gutter sized from the widest line
+  // this chart can print ("98.0%" at 26.5 units), which resolves to 44 here.
+  const referenceText = hasReference ? format(referenceValue) : '';
+  const padR = hasReference ? targetLabelGutter(TARGET_LABEL_WIDEST.deck) : 8;
   const padT = 22;
   const padB = 30;
   const labelFont = 10.5;
   const valueFont = 10.5;
   const plotW = width - padL - padR;
   const plotH = height - padT - padB;
-  const low = Math.min.apply(null, referenceValue === null ? values : values.concat([referenceValue]));
-  const high = Math.max.apply(null, referenceValue === null ? values : values.concat([referenceValue]));
+  const low = Math.min.apply(null, hasReference ? values.concat([referenceValue]) : values);
+  const high = Math.max.apply(null, hasReference ? values.concat([referenceValue]) : values);
   const span = Math.max(high - low, Math.abs(high) * 0.02, 0.5);
   const floor = Math.max(0, low - span * 0.3);
   const ceiling = Math.max(high + span * 0.2, floor + span * 0.5);
@@ -317,11 +321,15 @@ function reportBarChartSvg(bars, reference, formatter) {
     }
   });
 
-  if (referenceValue !== null) {
+  if (hasReference) {
     const y = yOf(referenceValue);
+    // Centre the two 9-unit lines on the target line, then keep the block on the
+    // canvas when the target sits on the top or bottom edge.
+    const labelTop = Math.min(Math.max(y - 5, 10), height - padB - (TARGET_LABEL_GAP + 3));
     parts.push(
       `<line x1="${padL}" x2="${width - padR}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" stroke="#e11d48" stroke-width="1.4" stroke-dasharray="5 4"/>`,
-      `<text x="${width - 3}" y="${(y + 3).toFixed(1)}" text-anchor="end" font-size="9" font-weight="700" fill="#e11d48">Target ${reportEsc(format(referenceValue))}</text>`
+      `<text x="${width - TARGET_LABEL_INSET}" y="${labelTop.toFixed(1)}" text-anchor="end" font-size="9" fill="#e11d48">target</text>`,
+      `<text x="${width - TARGET_LABEL_INSET}" y="${(labelTop + TARGET_LABEL_GAP).toFixed(1)}" text-anchor="end" font-size="9" font-weight="700" fill="#e11d48">${reportEsc(referenceText)}</text>`
     );
   }
 

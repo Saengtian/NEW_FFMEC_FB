@@ -1045,6 +1045,8 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
           usl: initialSpec.usl ?? 1,
           ctq: initialSpec.ctq !== false,
           limitsConfirmed: initialSpec.limitsProvisional !== true,
+          limitsOwner: initialSpec.limitsOwner || '',
+          limitsDueDate: initialSpec.limitsDueDate || '',
           cpkTarget: initialSpec.cpkTarget ?? 1.33,
           metrology: initialSpec.metrology || '',
           docRef: initialSpec.docRef || '',
@@ -1062,6 +1064,8 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
           usl: 10.36,
           ctq: true,
           limitsConfirmed: true,
+          limitsOwner: '',
+          limitsDueDate: '',
           cpkTarget: 1.33,
           metrology: 'Height Gauge / OMM',
           docRef: 'SPC-OQC-02 Rev.A',
@@ -1327,6 +1331,27 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
                 onChange={(e) => setForm({ ...form, docRef: e.target.value })}
                 className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg font-mono"
               />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Limit owner</label>
+              <input
+                value={form.limitsOwner}
+                onChange={(e) => setForm({ ...form, limitsOwner: e.target.value })}
+                placeholder="Who is confirming this limit"
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              />
+            </div>
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Confirm by</label>
+              <input
+                type="date"
+                value={form.limitsDueDate}
+                onChange={(e) => setForm({ ...form, limitsDueDate: e.target.value })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 tabular-nums"
+              />
+              <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">
+                Recorded on the spec so the confirmation carries an owner and a date until the limit is released.
+              </p>
             </div>
           </div>
         </div>

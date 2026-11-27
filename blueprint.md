@@ -88,7 +88,9 @@ App
 - Seeded from `INITIAL_*` constants in `Part1_Data.html`.
 - Replaced wholesale by `hydrateFromPayload()` after a load or restore.
 - Hydration is a migration point: `applyProvisionalLimitDefaults`, `purgePlaceholderEvidence`,
-  `stripLegacyFabricatedCpkRows`, `backfillSeedCpkSamples` clean old rows as they arrive.
+  `stripLegacyFabricatedCpkRows` clean old rows as they arrive. `INITIAL_CPK_RECORDS` is empty: a
+  fresh workspace has no capability readings, and the 16 demo rows it used to seed are on the strip
+  list by id, so a saved workspace that still carries them drops them on load.
 
 ### 3.3 Derived state
 
@@ -108,6 +110,9 @@ edit → setState → debounce → buildWorkspacePayload() → JSON
   conflict dialog and offers reload.
 - `LockService.getScriptLock()` serialises concurrent saves for 15 s.
 - Saves are attributed: the email must be present or the save is refused server-side.
+- Saves are authorised before anything is written: a program the roster does not assign to the actor,
+  a roster edit by anyone but the file owner, or a signature recorded (or erased) under another
+  person's name throws `Save refused: …`, and the store is untouched.
 - Backup/Restore exchanges the same payload as a JSON file.
 
 ## 4. Server architecture (`Code.js`)
@@ -117,10 +122,16 @@ edit → setState → debounce → buildWorkspacePayload() → JSON
 | `doGet(e)` | Fail-closed entry: no email → sign-in page; otherwise evaluate the `Index` template with `serverConfigJson` |
 | `include(name)` | `HtmlService.createHtmlOutputFromFile(name).getContent()` |
 | `loadWorkspaceState()` | Reads chunks, parses `__META__`, returns `{data, revision, lastSavedAt, lastSavedBy}` |
-| `saveWorkspaceState(json, summary, expectedRevision, refreshMirrors)` | Revision check, archive old copy, write new chunks, audit row, sign-off ledger rows, optional mirror refresh |
+| `saveWorkspaceState(json, summary, expectedRevision, refreshMirrors)` | Revision check, permission check, archive old copy, write new chunks, audit row, sign-off ledger rows, optional mirror refresh |
+| `authorizeWorkspaceSave_(previous, payload, email, isOwner)` | Program ownership, roster protection and signature identity, judged against the stored state |
 | `listStateRevisions()` / `loadStateRevision(rev)` | History sheet access (last `HISTORY_LIMIT = 5`) |
 | `refreshMirrorSheets()` / `readMirrorStatus_()` | Rebuild the human-readable tabs from the store |
 | `getServerInfo()` | Spreadsheet id/URL, web app URL, user email |
+| `getSignOffLedger()` | Read-only `SignOffLog` rows + tab URL, for the ledger view and its reconciliation |
+| `exportStateBackup()` | Trigger handler and *Back up now*: writes the store to a dated JSON file in Drive, then prunes |
+| `installDailyBackupTrigger()` | Idempotent daily 01:30 trigger on `exportStateBackup` (replaces any earlier one) |
+| `backupFileName_` / `backupFilesToDelete_` / `buildStateBackup_` | Pure naming, retention and file-shape rules the trigger is made of |
+| `previousSlice_(rows, key)` | One slice of the store already on file, or null when it was never written |
 | `ensureAllTabs_()` | Creates/repairs the state, history, audit, ledger and mirror tabs |
 | `onOpen()` | Sheet menu: open app, refresh mirrors, verify tabs, protect tabs |
 | `initializeDatabase(json)` | One-shot bootstrap with a seed payload |
@@ -149,9 +160,35 @@ and `AuditLog` gets a `SIGN_OFF_LEDGER_ERROR` row naming the decisions missing f
 
 Mirror tabs are for humans reading the sheet; the app never reads them back.
 
+**Drive backups** — the third ring, outside the sheet: `exportStateBackup()` writes the whole store to
+`FFM NPI Ops State Backups/FFM_NPI_Ops_state_<yyyy-MM-dd>_<HHmm>.json` (script time zone, so names sort
+chronologically) and trashes everything past the newest `CONFIG.BACKUP_KEEP = 30`. The file is the
+same shape as the sidebar's export — `{app, version, exportedAt, revision, lastSavedAt, lastSavedBy,
+data}` — so Restore accepts it with no conversion. Pruning only touches names carrying the job's own
+prefix and `.json` suffix; a hand-saved backup in that folder survives. The trigger runs as the script
+owner, reads the store and never writes to it, so a backup run cannot change a revision.
+
 ### 4.2 Access and safety
 
 - Domain-restricted web app; identity is always the signed-in Workspace account.
+- Scopes stay minimal: Sheets, the user's email, container UI, `drive.file` (only files this script
+  creates — the backup folder and its JSON) and `script.scriptapp` (install its own daily trigger).
+  Adding them re-prompts for consent on the next run.
+- **Permissions are server-side and judged on the stored state**, never on the payload: two rules,
+  both checked before the first row is written (`authorizeWorkspaceSave_`, `foreignSignOffEdits_`).
+  1. **Programs.** A program may only be added, rewritten or removed by a roster member whose
+     `products` / `externalProducts` name its model (the `teamMembers` slice *is* the roster). Renaming
+     a model needs both the old and the new one. A save that carries programs forward unchanged needs
+     no program permission, so task and production work is unaffected.
+  2. **Signatures.** A gate decision this save records or erases must carry the signed-in user's own
+     roster name; the ledger's `Role` is the signer's roster role. Unchanged signatures are history,
+     not a violation. The quality team signs across programs it does not own — that split is deliberate:
+     ownership governs the program record, identity governs the signature.
+- The roster is owner data: only the spreadsheet owner (who is also exempt from rule 1) may change who
+  is on it, their role, their email or their owned programs. Without that, rule 1 could be undone in a
+  single save by granting yourself every product. A refused save leaves the store, the history and the
+  ledger exactly as they were. If the file's owner cannot be read (a shared drive, no access), no
+  account is admin and the roster becomes read-only from the app — failing closed on purpose.
 - App-owned tabs get a warning-only protection so hand-editing is deliberate, not accidental
   (blocking protection would also block the app, which writes as the accessing user).
 - No secrets in the repo: `SPREADSHEET_ID` is configuration, not a credential; OAuth is the
@@ -187,13 +224,20 @@ DOM test yet, so "the page renders" is only proven by the preview or a deploy.
 
 ```
 bun run build → clasp push -f (12 files) → clasp version "deploy <sha>"
-              → clasp update-deployment <prod-id> -V <n> -d "deploy <sha>"
+              → clasp update-deployment <staging-id> -V <n>
+              → bun tools/verify-deployment.mjs <staging-url>   (real Chrome: parses? #root renders?)
+              → clasp update-deployment <prod-id> -V <n> -d "deploy <sha>"   (only on a pass)
 ```
 
 - `.claspignore` keeps tooling, docs and local agent folders out of the pushed project; only
   `appsscript.json`, `Code.js`, `Index.html`, `Icons.html`, `Part1…Part6`, `Bundle.html`,
   `Styles.html` are tracked.
-- Deployments are named by version; the production deployment id is pinned in `package.json`.
+- Deployments are named by version; the staging and production deployment ids are pinned in
+  `deploy.config.json`. The staging gate is not skippable: the production id is only updated after
+  `tools/verify-deployment.mjs` reports that the staging URL parsed and mounted React.
+- The gate fails closed. It runs on a dedicated Chrome profile (`.preview/staging-browser`) because the
+  web app is domain-only and `executeAs: USER_ACCESSING`; a signed-out browser exits `2` rather than
+  passing, so an untested version can never reach production.
 - Rollback is `clasp update-deployment <id> -V <last-good> -d "rollback"`; versions are immutable.
 - A deploy is only "done" when the deployment URL loads and the app renders; `clasp push` succeeding
   proves nothing about the served page.

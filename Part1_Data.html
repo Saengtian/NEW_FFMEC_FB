@@ -1684,7 +1684,7 @@ function applyProvisionalLimitDefaults(specs) {
   const defaults = new Set(PROVISIONAL_LIMIT_SPEC_IDS);
   return specs.map((spec) =>
     spec && spec.limitsProvisional === undefined && defaults.has(spec.id)
-      ? Object.assign({}, spec, { limitsProvisional: true })
+      ? Object.assign({}, spec, { limitsProvisional: true, limitsOwner: spec.limitsOwner || '', limitsDueDate: spec.limitsDueDate || '' })
       : spec
   );
 }
@@ -2980,41 +2980,26 @@ const INITIAL_PROJECTS = [
 // INITIAL PROCESS CAPABILITY (CPK) RECORDS & STATISTICAL PIPELINE ENGINE
 // ============================================================================
 
-const INITIAL_CPK_RECORDS = [
-  // X4151 EVT RHS
-  { id: 'CPK-4151R-TIR', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-TIR-W', mean: 0.0052, stdDev: 0.00202, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151R-ZMAX', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.89, stdDev: 0.049, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151R-ZPARA', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.095, stdDev: 0.041, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151R-GAP', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-COV-PIL-GAP', mean: 0.36, stdDev: 0.035, sampleSize: 32, date: '2026-11-20' },
+// A fresh workspace starts with no capability readings: every row is evidence,
+// and evidence comes from an upload. The 16 demo rows this array used to hold
+// were invented numbers for measurements nobody took.
+const INITIAL_CPK_RECORDS = [];
 
-  // X4151 EVT LHS
-  { id: 'CPK-4151L-TIR', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-TIR-W', mean: 0.0055, stdDev: 0.00201, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151L-ZMAX', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.86, stdDev: 0.041, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151L-ZPARA', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.088, stdDev: 0.036, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151L-GAP', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-COV-PIL-GAP', mean: 0.35, stdDev: 0.032, sampleSize: 32, date: '2026-11-20' },
-
-  // X4152 EVT RHS
-  { id: 'CPK-4152R-TIR', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-TIR-W', mean: 0.0049, stdDev: 0.0020, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4152R-ZMAX', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.85, stdDev: 0.038, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4152R-ZPARA', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.082, stdDev: 0.034, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4152R-GAP', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-COV-PIL-GAP', mean: 0.34, stdDev: 0.033, sampleSize: 32, date: '2026-11-20' },
-
-  // X4026 EVT LHS
-  { id: 'CPK-4026L-TIR', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-TIR-W', mean: 0.0051, stdDev: 0.00205, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4026L-ZMAX', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.86, stdDev: 0.042, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4026L-ZPARA', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.085, stdDev: 0.036, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4026L-GAP', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-COV-PIL-GAP', mean: 0.35, stdDev: 0.031, sampleSize: 32, date: '2026-11-20' },
-];
-
-// These seed rows were re-pointed from older imbalance / tape / foam / solder
-// parameters, so they claimed capability for CTQs that were never measured.
-// Identify them by row id (and only when no upload produced them) so a saved
-// workspace drops the invented demo rows without touching a real reading.
+// Rows that claimed capability for a measurement nobody took: the first group was
+// re-pointed at other CTQs, the second was the 16-row demo matrix a fresh
+// workspace used to carry. Identify them by row id — and only when no upload
+// produced them — so a saved workspace drops the invented rows without touching a
+// real reading that happens to reuse an id.
 const LEGACY_FABRICATED_CPK_IDS = new Set([
   'CPK-4151R-IMB', 'CPK-4151L-IMB', 'CPK-4152R-IMB', 'CPK-4026L-IMB',
   'CPK-4151R-SLD', 'CPK-4151L-SLD', 'CPK-4152R-SLD', 'CPK-4026L-SLD',
   'CPK-4151R-TAPE', 'CPK-4151L-TAPE', 'CPK-4152R-TAPE', 'CPK-4026L-TAPE',
-  'CPK-4151R-FOAM', 'CPK-4151L-FOAM', 'CPK-4152R-FOAM', 'CPK-4026L-FOAM'
+  'CPK-4151R-FOAM', 'CPK-4151L-FOAM', 'CPK-4152R-FOAM', 'CPK-4026L-FOAM',
+  // The former demo seed: four parameters on four model · side combinations.
+  'CPK-4151R-TIR', 'CPK-4151R-ZMAX', 'CPK-4151R-ZPARA', 'CPK-4151R-GAP',
+  'CPK-4151L-TIR', 'CPK-4151L-ZMAX', 'CPK-4151L-ZPARA', 'CPK-4151L-GAP',
+  'CPK-4152R-TIR', 'CPK-4152R-ZMAX', 'CPK-4152R-ZPARA', 'CPK-4152R-GAP',
+  'CPK-4026L-TIR', 'CPK-4026L-ZMAX', 'CPK-4026L-ZPARA', 'CPK-4026L-GAP'
 ]);
 
 function stripLegacyFabricatedCpkRows(records) {
@@ -3026,54 +3011,6 @@ function stripLegacyFabricatedCpkRows(records) {
       Boolean(record.uploadBatchId) ||
       Boolean(record.sourceFile)
   );
-}
-
-/**
- * Raw readings for a seeded Cpk row, so the box plot can show the individual
- * measurements (and their real quartiles) before anyone uploads a file. Values
- * are drawn from a deterministic normal-ish stream seeded by the record id — the
- * same row always produces the same samples — and scaled to the row's own mean
- * and σ. The absolute value keeps thickness-type parameters non-negative.
- */
-function seededSampleValues(seedText, mean, stdDev, count) {
-  let hash = 2166136261;
-  const text = String(seedText || 'cpk');
-  for (let i = 0; i < text.length; i += 1) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
-  const nextRandom = () => {
-    hash = (hash + 0x6d2b79f5) | 0;
-    let t = Math.imul(hash ^ (hash >>> 15), 1 | hash);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-  const values = [];
-  for (let i = 0; i < count; i += 1) {
-    // Sum of three uniforms is roughly normal; recentre to mean 0, scale to 1σ.
-    const z = (nextRandom() + nextRandom() + nextRandom() - 1.5) * 2;
-    values.push(Number(Math.abs(mean + z * stdDev).toPrecision(4)));
-  }
-  return values.sort((a, b) => a - b);
-}
-
-INITIAL_CPK_RECORDS.forEach((record) => {
-  record.rawValues = seededSampleValues(record.id, record.mean, record.stdDev, record.sampleSize || 32);
-});
-
-const SEED_CPK_SAMPLES = new Map(INITIAL_CPK_RECORDS.map((record) => [record.id, record.rawValues]));
-
-/**
- * Workspaces saved before the individual plot existed hold the seeded rows
- * without samples. Give them the seed's readings so the points appear without an
- * upload, while leaving rows that already carry real uploaded samples alone.
- */
-function backfillSeedCpkSamples(records) {
-  if (!Array.isArray(records)) return records;
-  let changed = false;
-  const next = records.map((record) => {
-    if (!record || Array.isArray(record.rawValues) || !SEED_CPK_SAMPLES.has(record.id)) return record;
-    changed = true;
-    return Object.assign({}, record, { rawValues: SEED_CPK_SAMPLES.get(record.id).slice() });
-  });
-  return changed ? next : records;
 }
 
 function normalCdf(z) {
@@ -3155,6 +3092,47 @@ function getProvisionalLimitTone() {
     cellClass: 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-300 dark:border-slate-600 border-dashed hover:bg-slate-200 dark:hover:bg-slate-700',
     badgeClass: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-600'
   };
+}
+
+/**
+ * One number set for the landing page: how many readings are capable, marginal
+ * and incapable, and what share clears Cpk 1.33. It counts the same cells the Cpk
+ * matrix does — the latest reading per model · phase · config · side · CTQ — and
+ * judges each with the limits frozen on that reading, so the Overview's one line
+ * and the matrix's roll-up cannot drift apart. Provisional limits are counted
+ * apart: an unconfirmed limit is not a capability claim in either place.
+ */
+function summarizeCpkCapability(records, specs) {
+  const specMap = {};
+  (Array.isArray(specs) ? specs : []).forEach((spec) => {
+    if (spec && spec.id && spec.ctq !== false) specMap[spec.id] = spec;
+  });
+
+  // Latest reading wins inside one context, exactly as the matrix column does.
+  const latest = {};
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    if (!record || !record.specId) return;
+    const key = [record.model, record.phase, record.config, record.side, record.specId].join("\u0000");
+    const previous = latest[key];
+    if (!previous || String(record.date || '') >= String(previous.date || '')) latest[key] = record;
+  });
+
+  const counts = { green: 0, yellow: 0, orange: 0, provisional: 0 };
+  Object.keys(latest).forEach((key) => {
+    const record = latest[key];
+    const spec = specMap[record.specId];
+    if (!spec) return;
+    const limits = effectiveSpecForRecord(spec, record);
+    if (hasProvisionalLimits(limits)) {
+      counts.provisional += 1;
+      return;
+    }
+    const tone = getCpkTone(computeCapabilityStats(record, limits).cpk);
+    if (counts[tone.key] !== undefined) counts[tone.key] += 1;
+  });
+
+  const total = counts.green + counts.yellow + counts.orange;
+  return { ...counts, total, passRate: total > 0 ? (counts.green / total) * 100 : 0 };
 }
 
 function formatSpecNum(val, spec) {
@@ -4081,6 +4059,180 @@ function buildSampleCpkCsv(mode = 'wide') {
     }
   });
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------- sign-off ledger
+//
+// `SignOffLog` is the append-only gate decision ledger. A save appends to it
+// after the state store has committed, so a failed append leaves the saved state
+// ahead of the ledger and the only trace was a toast that disappears. These
+// helpers read it back, export it, and name where it disagrees with the state.
+
+const SIGN_OFF_LEDGER_DECISIONS = ['Approved', 'Conditional', 'Rejected'];
+
+/** Ledger gate label for a gate id; the server writes `${code} ${short}`. */
+function signOffGateLabel(gateId) {
+  const gate = NPI_GATES.find((item) => item.id === gateId);
+  return gate ? `${gate.code} ${gate.short}` : String(gateId || '');
+}
+
+/** Identity of one approver's decision: program, line, gate and approver. */
+function signOffLedgerKey(entry) {
+  return [entry.programId, entry.line, entry.gate, entry.approver]
+    .map((value) => String(value === null || value === undefined ? '' : value).trim())
+    .join('\u0000');
+}
+
+/** Every decision the saved gate records currently hold, with its identity. */
+function signOffStateDecisions(gateRecords, projects) {
+  const models = {};
+  (projects || []).forEach((project) => {
+    if (project && project.id) models[project.id] = String(project.model || '');
+  });
+
+  const decisions = [];
+  Object.keys(gateRecords || {}).forEach((projectId) => {
+    const lines = gateRecords[projectId] || {};
+    Object.keys(lines).forEach((lineKey) => {
+      const gates = lines[lineKey] || {};
+      Object.keys(gates).forEach((gateId) => {
+        const dossier = gates[gateId];
+        if (!dossier || typeof dossier !== 'object') return;
+        (Array.isArray(dossier.approvers) ? dossier.approvers : []).forEach((approver) => {
+          if (!approver) return;
+          const decision = String(approver.decision || '');
+          if (SIGN_OFF_LEDGER_DECISIONS.indexOf(decision) === -1) return;
+          decisions.push({
+            programId: projectId,
+            program: models[projectId] || '',
+            line: lineKey,
+            gate: signOffGateLabel(gateId),
+            approver: String(approver.name || ''),
+            role: String(approver.role || ''),
+            decision: decision,
+            at: String(approver.updatedAt || '')
+          });
+        });
+      });
+    });
+  });
+  return decisions;
+}
+
+/**
+ * Compares the ledger with the saved gate records.
+ *
+ * Two disagreements, and they mean different things:
+ *  - missingFromLedger: the saved state holds a decision the ledger never got.
+ *    A save appends every changed decision, so this is the failed append.
+ *  - missingFromState: the ledger holds a decision whose approver has no decision
+ *    in the saved state at all — the gate was signed and later reopened, or the
+ *    program / line / approver was removed.
+ *
+ * `baselineGateRecords` — the seed the app starts from — is not an approval: the
+ * server skips dossiers that did not exist before a save, so a decision still
+ * equal to its seeded value was never meant to reach the ledger. Passing the seed
+ * keeps those out of the report; without it every seeded approval would look like
+ * a missing row. Decisions that merely changed are history, not divergence: the
+ * key counts as present when the ledger has any row recording it.
+ */
+function reconcileSignOffLedger(gateRecords, projects, ledgerRows, baselineGateRecords) {
+  const stateDecisions = signOffStateDecisions(gateRecords, projects);
+  const seeded = new Set(
+    signOffStateDecisions(baselineGateRecords || {}, projects).map(
+      (entry) => `${signOffLedgerKey(entry)}\u0000${entry.decision}`
+    )
+  );
+
+  const ledgerDecisions = (ledgerRows || []).filter(
+    (row) => row && SIGN_OFF_LEDGER_DECISIONS.indexOf(String(row.decision || '')) !== -1
+  );
+  const ledgerByKey = new Map();
+  ledgerDecisions.forEach((row) => {
+    const key = signOffLedgerKey(row);
+    if (!ledgerByKey.has(key)) ledgerByKey.set(key, []);
+    ledgerByKey.get(key).push(row);
+  });
+
+  // `matched` counts decisions the ledger actually records, so an empty ledger
+  // cannot report a tab full of matches just because its decisions are all seed
+  // values that were never meant to be logged.
+  let matched = 0;
+  const missingFromLedger = [];
+  stateDecisions.forEach((entry) => {
+    const key = signOffLedgerKey(entry);
+    const rows = ledgerByKey.get(key) || [];
+    const present = rows.some((row) => String(row.decision || '') === entry.decision);
+    if (present) {
+      matched += 1;
+      return;
+    }
+    if (seeded.has(`${key}\u0000${entry.decision}`)) return;
+    missingFromLedger.push(entry);
+  });
+
+  const stateKeys = new Set(stateDecisions.map(signOffLedgerKey));
+  const missingFromState = [];
+  ledgerByKey.forEach((rows, key) => {
+    if (stateKeys.has(key)) return;
+    const latest = rows[rows.length - 1];
+    missingFromState.push({
+      programId: latest.programId,
+      program: latest.program,
+      line: latest.line,
+      gate: latest.gate,
+      approver: latest.approver,
+      role: latest.role,
+      decision: latest.decision,
+      at: latest.timestamp,
+      revision: latest.revision
+    });
+  });
+
+  return {
+    stateDecisionCount: stateDecisions.length,
+    ledgerDecisionCount: ledgerDecisions.length,
+    matched: matched,
+    missingFromLedger: missingFromLedger,
+    missingFromState: missingFromState,
+    // Either direction is a disagreement: a ledger that holds a decision the
+    // saved state has dropped is not "in sync" just because nothing is missing
+    // from the tab.
+    inSync: missingFromLedger.length === 0 && missingFromState.length === 0
+  };
+}
+
+/** CSV for the ledger table, in the tab's own column order. */
+function signOffLedgerCsv(rows) {
+  const header = [
+    'Timestamp',
+    'Revision',
+    'ProgramID',
+    'Program',
+    'Line',
+    'Gate',
+    'Approver',
+    'Role',
+    'Decision',
+    'Remark',
+    'SignedInEmail'
+  ].join(',');
+  const lines = (rows || []).map((row) =>
+    [
+      csvText(row.timestamp),
+      csvText(row.revision),
+      csvText(row.programId),
+      csvText(row.program),
+      csvText(row.line),
+      csvText(row.gate),
+      csvText(row.approver),
+      csvText(row.role),
+      csvText(row.decision),
+      csvText(row.remark),
+      csvText(row.signedInEmail)
+    ].join(',')
+  );
+  return [header].concat(lines).join('\n');
 }
 
 function exportMasterSpecsCsv(masterSpecs) {

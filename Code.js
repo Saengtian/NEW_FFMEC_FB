@@ -39,8 +39,18 @@ const CONFIG = {
   // How many replaced copies of the state store to keep, oldest dropped first.
   HISTORY_LIMIT: 5,
   MIRROR_REVISION_PROP: 'FFM_MIRROR_REVISION',
-  MIRROR_REFRESHED_PROP: 'FFM_MIRROR_REFRESHED_AT'
+  MIRROR_REFRESHED_PROP: 'FFM_MIRROR_REFRESHED_AT',
+  // Daily state backup: one dated JSON file per run in this Drive folder, and
+  // only the newest BACKUP_KEEP survive, so the folder cannot grow without limit.
+  BACKUP_FOLDER_NAME: 'FFM NPI Ops State Backups',
+  BACKUP_PREFIX: 'FFM_NPI_Ops_state_',
+  BACKUP_KEEP: 30,
+  BACKUP_HOUR: 1,
+  BACKUP_MINUTE: 30
 };
+
+/** Handler name the daily trigger calls. Must stay a top-level function name. */
+const BACKUP_HANDLER = 'exportStateBackup';
 
 const SIGN_OFF_LEDGER_HEADERS = [
   'Timestamp', 'Revision', 'ProgramID', 'Program', 'Line', 'Gate',
@@ -131,6 +141,13 @@ function onOpen() {
       .addItem('Refresh Mirror Tabs…', 'refreshMirrorSheetsFromMenu_')
       .addItem('Verify / Setup Database Tabs', 'ensureAllTabs_')
       .addItem('Protect Managed Tabs (owner)', 'protectManagedTabsFromMenu_')
+      .addSubMenu(
+        SpreadsheetApp.getUi()
+          .createMenu('Daily State Backup')
+          .addItem('Install / repair the daily trigger', 'installDailyBackupTriggerFromMenu_')
+          .addItem('Back up now', 'exportStateBackupFromMenu_')
+          .addItem('Backup status', 'showBackupStatusFromMenu_')
+      )
       .addToUi();
   } catch (err) {
     // Ignore when triggered outside Sheet UI context
@@ -304,6 +321,68 @@ function protectManagedTabsFromMenu_() {
 }
 
 /**
+ * Read-only view of the gate decision ledger (`SignOffLog`).
+ *
+ * Nothing in the app read that tab before: a save appends to it after the state
+ * store commits, so when the append failed the saved state was already ahead of
+ * the ledger and the only trace was a toast plus an AuditLog row. Once the toast
+ * was gone the divergence was invisible. This returns the tab as plain objects so
+ * the app can show it and reconcile it against the saved gate records. It never
+ * writes: no locks, no sheet creation, no repairs.
+ */
+function getSignOffLedger() {
+  const userEmail = getActiveUserEmail_();
+  if (!userEmail) {
+    return { ok: false, error: 'Sign-in required: the ledger is only readable by the accessing domain account.' };
+  }
+
+  let ss;
+  let sheet;
+  try {
+    ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+    sheet = ss.getSheetByName(CONFIG.SIGN_OFF_SHEET);
+  } catch (err) {
+    return { ok: false, error: 'SignOffLog could not be opened: ' + errorMessage_(err) };
+  }
+
+  const readAt = new Date().toISOString();
+  const sheetUrl = ss.getUrl() + (sheet ? '#gid=' + sheet.getSheetId() : '');
+  if (!sheet || sheet.getLastRow() < 2) {
+    return { ok: true, rows: [], sheetUrl: sheetUrl, readAt: readAt, userEmail: userEmail };
+  }
+
+  const values = sheet
+    .getRange(2, 1, sheet.getLastRow() - 1, SIGN_OFF_LEDGER_HEADERS.length)
+    .getValues();
+  const rows = [];
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+    const cell = function(index) {
+      const value = row[index];
+      if (value instanceof Date) return value.toISOString();
+      return String(value === null || value === undefined ? '' : value);
+    };
+    // A cleared or trailing blank row is not a decision.
+    if (!cell(0).trim() && !cell(6).trim()) continue;
+    rows.push({
+      timestamp: cell(0),
+      revision: cell(1),
+      programId: cell(2),
+      program: cell(3),
+      line: cell(4),
+      gate: cell(5),
+      approver: cell(6),
+      role: cell(7),
+      decision: cell(8),
+      remark: cell(9),
+      signedInEmail: cell(10)
+    });
+  }
+
+  return { ok: true, rows: rows, sheetUrl: sheetUrl, readAt: readAt, userEmail: userEmail };
+}
+
+/**
  * Returns basic server & user metadata
  */
 function getServerInfo() {
@@ -313,6 +392,261 @@ function getServerInfo() {
     webAppUrl: CONFIG.WEB_APP_URL,
     userEmail: getActiveUserEmail_()
   };
+}
+
+// ---------------------------------------------------------------------------
+// Daily state backup
+//
+// `_FFM_STATE_HISTORY` keeps five replaced revisions inside the sheet: enough to
+// undo a bad save, useless against a deleted sheet, a broken chunk, or a mistake
+// nobody noticed for a month. This is the outer ring. A time-driven trigger
+// writes the whole store to a dated JSON file in Drive and prunes the oldest, so
+// the folder holds a rolling month of daily copies and nothing else.
+//
+// The file has the same shape as Sidebar → Backup, so restoring one is:
+// open the Drive folder, download the file, Sidebar → Restore. See docs/SOP.md §9.
+// ---------------------------------------------------------------------------
+
+/** `2026-11-27_0130` in the script's time zone: names sort chronologically. */
+function backupStamp_(date, timeZone) {
+  return Utilities.formatDate(date, timeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd_HHmm');
+}
+
+function backupFileName_(date, timeZone) {
+  return CONFIG.BACKUP_PREFIX + backupStamp_(date, timeZone) + '.json';
+}
+
+/**
+ * The backup file names to drop, oldest first, keeping the newest `keep`.
+ * Anything this job did not create is left alone — a hand-downloaded JSON backup,
+ * a notes file, or a folder someone else is using.
+ */
+function backupFilesToDelete_(fileNames, keep) {
+  // A keep of zero or nonsense is not "delete everything": fall back to the
+  // configured limit rather than leaving the folder with one lonely file.
+  const asked = Number(keep);
+  const limit = asked > 0 ? Math.floor(asked) : CONFIG.BACKUP_KEEP;
+  const mine = (fileNames || [])
+    .map(function(name) { return String(name || ''); })
+    .filter(function(name) {
+      return name.indexOf(CONFIG.BACKUP_PREFIX) === 0 && /\.json$/.test(name);
+    })
+    .sort();
+  return mine.slice(0, Math.max(0, mine.length - limit));
+}
+
+/**
+ * The file the trigger writes. Same keys as the sidebar's export, so Restore
+ * accepts it unchanged; `revision` says which state it holds.
+ */
+function buildStateBackup_(snapshot, exportedAt) {
+  const meta = (snapshot && snapshot.meta) || {};
+  return {
+    app: 'FFM NPI Ops',
+    version: 'v2.1.0-GAS',
+    exportedAt: exportedAt || new Date().toISOString(),
+    revision: Number(meta.revision) || 0,
+    lastSavedAt: meta.lastSavedAt || null,
+    lastSavedBy: meta.lastSavedBy || null,
+    data: (snapshot && snapshot.data) || {}
+  };
+}
+
+/** The backup triggers already installed, so installing twice leaves exactly one. */
+function backupTriggers_(triggers) {
+  return (triggers || []).filter(function(trigger) {
+    try {
+      return trigger.getHandlerFunction() === BACKUP_HANDLER;
+    } catch (err) {
+      return false;
+    }
+  });
+}
+
+function backupFolder_() {
+  const folders = DriveApp.getFoldersByName(CONFIG.BACKUP_FOLDER_NAME);
+  return folders.hasNext() ? folders.next() : DriveApp.createFolder(CONFIG.BACKUP_FOLDER_NAME);
+}
+
+/** Trashes every backup beyond the newest CONFIG.BACKUP_KEEP. Returns how many went. */
+function pruneStateBackups_(folder) {
+  const byName = {};
+  const iterator = folder.getFiles();
+  while (iterator.hasNext()) {
+    const file = iterator.next();
+    const name = String(file.getName() || '');
+    if (name && !byName[name]) byName[name] = file;
+  }
+  const doomed = backupFilesToDelete_(Object.keys(byName), CONFIG.BACKUP_KEEP);
+  doomed.forEach(function(name) {
+    try {
+      byName[name].setTrashed(true);
+    } catch (err) {
+      // One stubborn file must not lose the batch it is part of: the next run
+      // tries again, and the folder simply holds one extra copy meanwhile.
+      console.error('Could not prune backup ' + name + ': ' + errorMessage_(err));
+    }
+  });
+  return doomed.length;
+}
+
+/** Reads the store without the sidebar's consent to be signed in: the trigger runs as the owner. */
+function stateSnapshot_() {
+  const state = loadWorkspaceState();
+  if (!state || state.initialized !== true) {
+    return {
+      ok: false,
+      error: (state && state.error) || 'The state store has not been seeded yet, so there is nothing to back up.'
+    };
+  }
+  return {
+    ok: true,
+    meta: {
+      revision: state.revision,
+      lastSavedAt: state.lastSavedAt,
+      lastSavedBy: state.lastSavedBy
+    },
+    data: state.data
+  };
+}
+
+/**
+ * Writes today's backup file and prunes the oldest. This is the trigger handler
+ * and the "Back up now" menu action; it never throws, so a failed run is reported
+ * instead of leaving a silent gap in the folder.
+ */
+function exportStateBackup() {
+  try {
+    const snapshot = stateSnapshot_();
+    if (!snapshot.ok) {
+      // A trigger's return value is discarded, so an unseeded or unreadable store
+      // has to reach the execution log to be noticed at all.
+      console.error('Daily state backup skipped: ' + snapshot.error);
+      return { ok: false, error: snapshot.error };
+    }
+
+    const now = new Date();
+    const payload = buildStateBackup_(snapshot, now.toISOString());
+    const json = JSON.stringify(payload, null, 2);
+    const folder = backupFolder_();
+    const fileName = backupFileName_(now);
+    const file = folder.createFile(fileName, json, MimeType.PLAIN_TEXT);
+
+    const deleted = pruneStateBackups_(folder);
+    return {
+      ok: true,
+      fileId: file.getId(),
+      fileName: fileName,
+      folderName: folder.getName(),
+      folderUrl: folder.getUrl(),
+      bytes: json.length,
+      revision: payload.revision,
+      deleted: deleted,
+      kept: CONFIG.BACKUP_KEEP
+    };
+  } catch (err) {
+    console.error('Daily state backup failed: ' + errorMessage_(err));
+    return { ok: false, error: errorMessage_(err) };
+  }
+}
+
+/** Installs (or repairs) the daily trigger. Idempotent: a second call replaces the first. */
+function installDailyBackupTrigger() {
+  try {
+    const existing = backupTriggers_(ScriptApp.getProjectTriggers());
+    existing.forEach(function(trigger) { ScriptApp.deleteTrigger(trigger); });
+    ScriptApp.newTrigger(BACKUP_HANDLER)
+      .timeBased()
+      .everyDays(1)
+      .atHour(CONFIG.BACKUP_HOUR)
+      .nearMinute(CONFIG.BACKUP_MINUTE)
+      .create();
+    return {
+      ok: true,
+      replaced: existing.length,
+      hour: CONFIG.BACKUP_HOUR,
+      minute: CONFIG.BACKUP_MINUTE,
+      timeZone: Session.getScriptTimeZone(),
+      folderName: CONFIG.BACKUP_FOLDER_NAME,
+      keep: CONFIG.BACKUP_KEEP
+    };
+  } catch (err) {
+    return { ok: false, error: errorMessage_(err) };
+  }
+}
+
+function pad2_(value) {
+  return (Number(value) < 10 ? '0' : '') + Number(value);
+}
+
+function installDailyBackupTriggerFromMenu_() {
+  const ui = SpreadsheetApp.getUi();
+  const result = installDailyBackupTrigger();
+  if (!result.ok) {
+    ui.alert('Daily State Backup', 'Could not install the trigger: ' + result.error, ui.ButtonSet.OK);
+    return;
+  }
+  ui.alert(
+    'Daily State Backup',
+    'Backs up every day at ' + pad2_(result.hour) + ':' + pad2_(result.minute) +
+      ' (' + result.timeZone + ')' +
+      (result.replaced ? ', replacing ' + result.replaced + ' earlier trigger(s)' : '') + '.\n\n' +
+      'Files go to the Drive folder "' + result.folderName + '"; the newest ' + result.keep +
+      ' are kept and older ones are moved to the trash.',
+    ui.ButtonSet.OK
+  );
+}
+
+function exportStateBackupFromMenu_() {
+  const ui = SpreadsheetApp.getUi();
+  const result = exportStateBackup();
+  if (!result.ok) {
+    ui.alert('Daily State Backup', 'Backup failed: ' + result.error, ui.ButtonSet.OK);
+    return;
+  }
+  ui.alert(
+    'Daily State Backup',
+    'Wrote ' + result.fileName + ' (Rev #' + result.revision + ', ' +
+      Math.max(1, Math.round(result.bytes / 1024)) + ' KB)' +
+      (result.deleted ? ' and pruned ' + result.deleted + ' old cop' + (result.deleted === 1 ? 'y' : 'ies') : '') +
+      '.\n\nTo restore one: open the folder, download the file, then Sidebar → Restore in the app.',
+    ui.ButtonSet.OK
+  );
+}
+
+function showBackupStatusFromMenu_() {
+  const ui = SpreadsheetApp.getUi();
+  try {
+    const triggers = backupTriggers_(ScriptApp.getProjectTriggers());
+    const folders = DriveApp.getFoldersByName(CONFIG.BACKUP_FOLDER_NAME);
+    let lines = [
+      triggers.length
+        ? 'Daily trigger installed (' + triggers.length + ').'
+        : 'No daily trigger yet — use "Install / repair the daily trigger".',
+      'Keeps the newest ' + CONFIG.BACKUP_KEEP + ' backups.'
+    ];
+    if (folders.hasNext()) {
+      const folder = folders.next();
+      const names = [];
+      const iterator = folder.getFiles();
+      while (iterator.hasNext()) {
+        const name = String(iterator.next().getName() || '');
+        if (name.indexOf(CONFIG.BACKUP_PREFIX) === 0 && /\.json$/.test(name)) names.push(name);
+      }
+      // Folder iteration order is not a promise; the names carry the date, so the
+      // newest five are the last five once sorted.
+      const newest = names.sort().slice(-5).reverse();
+      lines.push('');
+      lines.push('Folder: ' + folder.getUrl());
+      lines.push(newest.length ? 'Newest files:\n' + newest.join('\n') : 'No backup files yet.');
+    } else {
+      lines.push('');
+      lines.push('Folder "' + CONFIG.BACKUP_FOLDER_NAME + '" does not exist yet — the first backup creates it.');
+    }
+    ui.alert('Daily State Backup', lines.join('\n'), ui.ButtonSet.OK);
+  } catch (err) {
+    ui.alert('Daily State Backup', 'Status failed: ' + errorMessage_(err), ui.ButtonSet.OK);
+  }
 }
 
 /**
@@ -439,6 +773,330 @@ function initializeDatabase(payloadJson) {
   return saveWorkspaceState(payloadJson, 'Initial database seed from FFM NPI Ops', undefined, true);
 }
 
+// ---------------------------------------------------------------------------
+// Server-side permissions
+//
+// A save carries the whole workspace, so "may this person change that program?"
+// can only be answered by comparing the payload with the store as it stands.
+// Two rules are enforced here, before a single row is written:
+//
+//   1. a program may only be added, rewritten or removed by someone the roster
+//      gives it to — a member's `products` / `externalProducts` name the
+//      programs they own, and a program is identified by its model;
+//   2. a signature is personal: a gate decision this save records or erases must
+//      carry the signed-in user's own roster name, never a colleague's.
+//
+// The roster is the persisted `teamMembers` slice: it already holds each
+// member's email, role and owned products, so it decides the rules and is
+// protected by them. Only the spreadsheet owner may change it — otherwise rule 1
+// could be undone in a single save by granting yourself every product.
+// ---------------------------------------------------------------------------
+
+/** Comparison key for a person or a product: no case, no padding. */
+function identityKey_(value) {
+  return String(value == null ? '' : value).trim().toLowerCase();
+}
+
+/** Stable JSON, so two copies with the same content compare equal whatever their key order. */
+function canonicalValue_(value) {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalValue_).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map(function(key) {
+    return JSON.stringify(key) + ':' + canonicalValue_(value[key]);
+  }).join(',') + '}';
+}
+
+/** The roster entry whose email is this person, or null when they are not on it. */
+function rosterMemberFor_(members, email) {
+  const key = identityKey_(email);
+  if (!key) return null;
+  const list = Array.isArray(members) ? members : [];
+  for (let i = 0; i < list.length; i++) {
+    if (identityKey_(list[i] && list[i].email) === key) return list[i];
+  }
+  return null;
+}
+
+/** The program models a roster member owns, as a lookup. */
+function ownedModels_(member) {
+  const owned = {};
+  if (!member) return owned;
+  [member.products, member.externalProducts].forEach(function(list) {
+    (Array.isArray(list) ? list : []).forEach(function(product) {
+      const key = identityKey_(product);
+      if (key) owned[key] = true;
+    });
+  });
+  return owned;
+}
+
+function ownsModel_(member, model) {
+  const key = identityKey_(model);
+  return !!key && ownedModels_(member)[key] === true;
+}
+
+/**
+ * Programs a save adds, rewrites or removes, with the model(s) each change needs
+ * permission for. A program carried forward unchanged is not a change. An
+ * omitted `projects` slice removes every program, so it is judged as a removal of
+ * each one rather than as "no changes".
+ */
+function changedProjects_(previousProjects, nextProjects) {
+  const before = {};
+  const after = {};
+  (Array.isArray(previousProjects) ? previousProjects : []).forEach(function(project) {
+    if (project && project.id) before[String(project.id)] = project;
+  });
+  (Array.isArray(nextProjects) ? nextProjects : []).forEach(function(project) {
+    if (project && project.id) after[String(project.id)] = project;
+  });
+
+  const changes = [];
+  Object.keys(after).forEach(function(id) {
+    const next = after[id];
+    const previous = before[id];
+    if (!previous) {
+      changes.push({ id: id, kind: 'create', models: [next.model] });
+      return;
+    }
+    if (canonicalValue_(previous) !== canonicalValue_(next)) {
+      // Renaming the model is two claims: the old program and the new one.
+      changes.push({ id: id, kind: 'update', models: [previous.model, next.model] });
+    }
+  });
+  Object.keys(before).forEach(function(id) {
+    if (after[id]) return;
+    changes.push({ id: id, kind: 'delete', models: [before[id].model] });
+  });
+  return changes;
+}
+
+/** Roster entries a save adds, rewrites or removes. */
+function changedRosterEntries_(previousMembers, nextMembers) {
+  const before = {};
+  const after = {};
+  (Array.isArray(previousMembers) ? previousMembers : []).forEach(function(member, index) {
+    before[String((member && member.id) || '#' + index)] = member;
+  });
+  (Array.isArray(nextMembers) ? nextMembers : []).forEach(function(member, index) {
+    after[String((member && member.id) || '#' + index)] = member;
+  });
+
+  const changes = [];
+  Object.keys(after).forEach(function(id) {
+    const label = String((after[id] && after[id].name) || id);
+    if (!before[id]) changes.push({ id: id, kind: 'create', label: label });
+    else if (canonicalValue_(before[id]) !== canonicalValue_(after[id])) {
+      changes.push({ id: id, kind: 'update', label: label });
+    }
+  });
+  Object.keys(before).forEach(function(id) {
+    if (after[id]) return;
+    changes.push({ id: id, kind: 'delete', label: String((before[id] && before[id].name) || id) });
+  });
+  return changes;
+}
+
+/** Email of the spreadsheet owner, or '' when the file cannot say (shared drive, no access). */
+function spreadsheetOwnerEmail_(ss) {
+  try {
+    const owner = ss.getOwner();
+    return owner ? String(owner.getEmail() || '') : '';
+  } catch (err) {
+    return '';
+  }
+}
+
+/** The file's owner: the only account that may change the roster or work outside its own programs. */
+function isSpreadsheetOwner_(ss, email) {
+  const owner = identityKey_(spreadsheetOwnerEmail_(ss));
+  return !!owner && owner === identityKey_(email);
+}
+
+/** One program change, named the way the person reading the refusal knows it. */
+function describeProgramChange_(change) {
+  const verb = change.kind === 'create' ? 'add ' : change.kind === 'delete' ? 'remove ' : 'change ';
+  const seen = {};
+  const models = [];
+  (change.models || []).forEach(function(model) {
+    const key = identityKey_(model);
+    if (!key || seen[key]) return;
+    seen[key] = true;
+    models.push(String(model).trim());
+  });
+  const model = models.length ? models.join(' → ') : 'a program with no model';
+  return verb + change.id + ' (' + model + ')';
+}
+
+/** The program models a member owns, spelled as the roster spells them. */
+function ownedModelNames_(member) {
+  const seen = {};
+  const names = [];
+  if (!member) return names;
+  [member.products, member.externalProducts].forEach(function(list) {
+    (Array.isArray(list) ? list : []).forEach(function(product) {
+      const key = identityKey_(product);
+      if (!key || seen[key]) return;
+      seen[key] = true;
+      names.push(String(product).trim());
+    });
+  });
+  return names;
+}
+
+/**
+ * Whether `actorEmail` may save `payload` over `previous`.
+ * Returns { ok: true, isOwner, actorName, actorRole } or { ok: false, error }.
+ * `previous` is `{ projects, teamMembers, gateRecords }` from the store, or null
+ * when nothing has been saved yet.
+ */
+function authorizeWorkspaceSave_(previous, payload, actorEmail, isOwner) {
+  const member = rosterMemberFor_(previous && previous.teamMembers, actorEmail);
+  const allowed = {
+    ok: true,
+    isOwner: !!isOwner,
+    actorName: String((member && member.name) || ''),
+    actorRole: String((member && member.role) || '')
+  };
+
+  // Nothing on file yet: this is the first seed, which establishes the roster it
+  // would otherwise have to be judged by.
+  if (!previous) return allowed;
+
+  // The file's owner can repair any program or roster entry, and needs no roster
+  // entry of their own to do it.
+  if (isOwner) return allowed;
+
+  const rosterChanges = changedRosterEntries_(previous.teamMembers, payload && payload.teamMembers);
+  if (rosterChanges.length > 0) {
+    return {
+      ok: false,
+      error: 'the team roster is owner data, and this save changes ' + rosterChanges.length +
+        ' roster entr' + (rosterChanges.length === 1 ? 'y' : 'ies') + ' (' +
+        rosterChanges.slice(0, 3).map(function(change) { return change.label; }).join(', ') +
+        '). Only the spreadsheet owner can change who is on the roster, their role, their email or the programs they own.'
+    };
+  }
+
+  const changes = changedProjects_(previous.projects, payload && payload.projects);
+  if (changes.length === 0) return allowed;
+
+  if (!member) {
+    return {
+      ok: false,
+      error: 'your account (' + actorEmail + ') is not on the team roster, so it owns no program. ' +
+        'Ask the spreadsheet owner to add you in Team & Workload with the programs you own, then reload.'
+    };
+  }
+
+  const refused = changes.filter(function(change) {
+    return !(change.models || []).every(function(model) { return ownsModel_(member, model); });
+  });
+  if (refused.length === 0) return allowed;
+
+  const owned = ownedModelNames_(member);
+  return {
+    ok: false,
+    error: 'you can only change programs you own: ' + refused.slice(0, 3).map(describeProgramChange_).join(', ') +
+      (refused.length > 3 ? ' and ' + (refused.length - 3) + ' more' : '') + '. ' +
+      'The roster has ' + (String(member.name || '').trim() || actorEmail) + ' responsible for ' +
+      (owned.length ? owned.join(', ') : 'no program') + '.'
+  };
+}
+
+/**
+ * Every signature this save records or erases, one entry per approver whose
+ * decision moved. A dossier this save created, or a gate it did not have before,
+ * produces nothing: seeding a dossier is not somebody approving. Likewise a
+ * decision carried forward unchanged is not a new signature.
+ */
+function signOffSignatureEdits_(previousGateRecords, nextGateRecords) {
+  if (!previousGateRecords || !nextGateRecords) return [];
+  const DECISIONS = { Approved: true, Conditional: true, Rejected: true };
+  const edits = [];
+
+  Object.keys(nextGateRecords).forEach(function(projectId) {
+    const nextLines = nextGateRecords[projectId] || {};
+    const previousLines = previousGateRecords[projectId] || {};
+    Object.keys(nextLines).forEach(function(lineKey) {
+      const nextGates = nextLines[lineKey] || {};
+      const previousGates = previousLines[lineKey] || {};
+      Object.keys(nextGates).forEach(function(gateId) {
+        const dossier = nextGates[gateId];
+        const before = previousGates[gateId];
+        if (!dossier || typeof dossier !== 'object' || !before || typeof before !== 'object') return;
+
+        // Approvers are matched by name: the name is what the signature carries.
+        const beforeDecisions = {};
+        (Array.isArray(before.approvers) ? before.approvers : []).forEach(function(approver) {
+          beforeDecisions[identityKey_(approver && approver.name)] = String((approver && approver.decision) || '');
+        });
+
+        const stillThere = {};
+        (Array.isArray(dossier.approvers) ? dossier.approvers : []).forEach(function(approver) {
+          if (!approver) return;
+          const nameKey = identityKey_(approver.name);
+          stillThere[nameKey] = true;
+          const decision = String(approver.decision || '');
+          if (!DECISIONS[decision]) return;
+          if (beforeDecisions[nameKey] === decision) return;
+          edits.push({
+            kind: 'decision',
+            projectId: projectId,
+            line: lineKey,
+            gateId: gateId,
+            approver: String(approver.name || ''),
+            role: String(approver.role || ''),
+            decision: decision,
+            remark: String(approver.remark || '')
+          });
+        });
+
+        // Erasing a colleague's decision is not a way around the rule above: a
+        // signature that disappears is still that person's signature.
+        (Array.isArray(before.approvers) ? before.approvers : []).forEach(function(approver) {
+          if (!approver) return;
+          const nameKey = identityKey_(approver.name);
+          const decision = String(approver.decision || '');
+          if (!DECISIONS[decision] || stillThere[nameKey]) return;
+          edits.push({
+            kind: 'removal',
+            projectId: projectId,
+            line: lineKey,
+            gateId: gateId,
+            approver: String(approver.name || ''),
+            role: String(approver.role || ''),
+            decision: decision,
+            remark: ''
+          });
+        });
+      });
+    });
+  });
+  return edits;
+}
+
+/**
+ * Signature edits that are not the actor's to make. A signature row names the
+ * person who signed it, so it may only carry the signed-in user's own identity.
+ * The app signs with the Workspace email (the modal states that), while older
+ * rows and the roster use the member's name, so both are the actor's own; an
+ * account with neither can record or erase nothing.
+ */
+function foreignSignOffEdits_(previousGateRecords, nextGateRecords, actorName, actorEmail) {
+  const own = {};
+  [actorName, actorEmail].forEach(function(value) {
+    const key = identityKey_(value);
+    if (key) own[key] = true;
+  });
+  return signOffSignatureEdits_(previousGateRecords, nextGateRecords).filter(function(edit) {
+    const signer = identityKey_(edit.approver);
+    return !signer || own[signer] !== true;
+  });
+}
+
 /**
  * Persists all workspace slices to `_FFM_STATE_STORE`, the single authoritative
  * copy of the workspace. Mirror tabs are derived reports and are only rebuilt
@@ -492,16 +1150,9 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
 
     // The gate decisions already on file, so the ledger records only what this
     // save actually changed — a save that carries dossiers forward writes nothing.
-    let previousGateRecords = null;
-    if (previousRows.length > 0) {
-      const gateChunks = [];
-      previousRows.forEach(function(row) {
-        if (String(row[0] || '') !== 'gateRecords') return;
-        gateChunks.push({ idx: Number(row[1]) || 0, count: Number(row[2]) || 0, text: String(row[4] || '') });
-      });
-      const parsedGates = parseChunkGroup_(gateChunks);
-      if (parsedGates.ok) previousGateRecords = parsedGates.value;
-    }
+    const previousGateRecords = previousRows.length > 0
+      ? previousSlice_(previousRows, 'gateRecords')
+      : null;
 
     // Reject a stale client instead of silently overwriting another user's save.
     if (expectedRevision !== undefined && expectedRevision !== null &&
@@ -511,6 +1162,46 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
         conflict: true,
         revision: prevRevision
       };
+    }
+
+    // Permissions are judged on the store as it stands, never on the payload:
+    // otherwise a save could grant itself the roster entry it needs to pass.
+    const permissions = authorizeWorkspaceSave_(
+      previousRows.length > 0
+        ? {
+            projects: previousSlice_(previousRows, 'projects'),
+            teamMembers: previousSlice_(previousRows, 'teamMembers'),
+            gateRecords: previousGateRecords
+          }
+        : null,
+      payload,
+      userEmail,
+      isSpreadsheetOwner_(ss, userEmail)
+    );
+    if (!permissions.ok) {
+      throw new Error('Save refused: ' + permissions.error);
+    }
+
+    const foreignSignatures = foreignSignOffEdits_(
+      previousGateRecords,
+      payload.gateRecords,
+      permissions.actorName,
+      userEmail
+    );
+    if (foreignSignatures.length > 0) {
+      const first = foreignSignatures[0];
+      const where = (GATE_LEDGER_LABELS[first.gateId] || first.gateId) +
+        ' on ' + first.projectId + ' · ' + first.line;
+      throw new Error(
+        'Save refused: a signature can only name the signed-in user. This save ' +
+        (first.kind === 'removal' ? 'erases ' : 'records ') + first.decision +
+        ' by ' + (String(first.approver || '').trim() || 'an unnamed approver') + ' at ' + where +
+        (foreignSignatures.length > 1 ? ' (and ' + (foreignSignatures.length - 1) + ' other signature)' : '') +
+        '. ' + (permissions.actorName
+          ? 'You are on the roster as ' + permissions.actorName + ' (' + userEmail +
+            '), so only your own decisions can be saved.'
+          : 'Your account is not on the team roster, so it has no name to sign with.')
+      );
     }
 
     const nextRevision = prevRevision + 1;
@@ -547,7 +1238,8 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       signOffRows = signOffLedgerRows(previousGateRecords, payload.gateRecords, payload.projects, {
         timestamp: nowIso,
         revision: nextRevision,
-        userEmail: userEmail
+        userEmail: userEmail,
+        actorRole: permissions.actorRole
       });
     }
 
@@ -634,54 +1326,43 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
  */
 function signOffLedgerRows(previousGateRecords, nextGateRecords, projects, meta) {
   if (!previousGateRecords || !nextGateRecords) return [];
-  const DECISIONS = { Approved: true, Conditional: true, Rejected: true };
   const models = {};
   (projects || []).forEach(function(project) {
     if (project && project.id) models[project.id] = String(project.model || '');
   });
 
-  const rows = [];
-  Object.keys(nextGateRecords).forEach(function(projectId) {
-    const nextLines = nextGateRecords[projectId] || {};
-    const previousLines = previousGateRecords[projectId] || {};
-    Object.keys(nextLines).forEach(function(lineKey) {
-      const nextGates = nextLines[lineKey] || {};
-      const previousGates = previousLines[lineKey] || {};
-      Object.keys(nextGates).forEach(function(gateId) {
-        const dossier = nextGates[gateId];
-        const before = previousGates[gateId];
-        if (!dossier || typeof dossier !== 'object' || !before || typeof before !== 'object') return;
-
-        // Approvers are matched by name: the name is what the signature carries.
-        const previousDecisions = {};
-        (Array.isArray(before.approvers) ? before.approvers : []).forEach(function(approver) {
-          previousDecisions[String((approver && approver.name) || '')] = String((approver && approver.decision) || '');
-        });
-
-        (Array.isArray(dossier.approvers) ? dossier.approvers : []).forEach(function(approver) {
-          if (!approver) return;
-          const decision = String(approver.decision || '');
-          if (!DECISIONS[decision]) return;
-          const name = String(approver.name || '');
-          if (previousDecisions[name] === decision) return;
-          rows.push([
-            meta.timestamp,
-            meta.revision,
-            projectId,
-            models[projectId] || '',
-            lineKey,
-            GATE_LEDGER_LABELS[gateId] || gateId,
-            name,
-            String(approver.role || ''),
-            decision,
-            String(approver.remark || ''),
-            meta.userEmail
-          ]);
-        });
-      });
+  // One row per decision, never per erasure: a removed signature has no decision
+  // of its own to record, and the ledger is append-only.
+  return signOffSignatureEdits_(previousGateRecords, nextGateRecords)
+    .filter(function(edit) { return edit.kind === 'decision'; })
+    .map(function(edit) {
+      return [
+        meta.timestamp,
+        meta.revision,
+        edit.projectId,
+        models[edit.projectId] || '',
+        edit.line,
+        GATE_LEDGER_LABELS[edit.gateId] || edit.gateId,
+        edit.approver,
+        // The signer's roster role when the save path resolved one: the roster is
+        // the authority on who signed, not the slot the client filled in.
+        String(meta.actorRole || edit.role || ''),
+        edit.decision,
+        edit.remark,
+        meta.userEmail
+      ];
     });
+}
+
+/** One slice of the store already on file, or null when it was never written. */
+function previousSlice_(rows, key) {
+  const chunks = [];
+  (rows || []).forEach(function(row) {
+    if (String(row[0] || '') !== key) return;
+    chunks.push({ idx: Number(row[1]) || 0, count: Number(row[2]) || 0, text: String(row[4] || '') });
   });
-  return rows;
+  const parsed = parseChunkGroup_(chunks);
+  return parsed.ok ? parsed.value : null;
 }
 
 /** Appends ledger rows; never rewrites the tab, never touches earlier rows. */

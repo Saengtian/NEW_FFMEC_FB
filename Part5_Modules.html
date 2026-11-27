@@ -2992,6 +2992,20 @@ const KPI_FAMILY_BUILDERS = {
   }
 };
 
+// --- Target label placement, shared with the report deck chart --------------------
+// KpiTrendChart and reportBarChartSvg (Part6) hang the same two-line target label:
+// "target" over the value, 9px lines TARGET_LABEL_GAP apart, anchored TARGET_LABEL_INSET
+// inside the right edge, with TARGET_LABEL_AIR of air before the plot edge. The
+// gutter is derived, not estimated: a target-line chart only ever prints the KPIs
+// whose target is drawn, and they all format to five characters, so the widest line
+// is "98.0%" — 25.95 units here at 390px, 26.5 in the deck's 400-unit chart.
+const TARGET_LABEL_INSET = 4;
+const TARGET_LABEL_GAP = 10;
+const TARGET_LABEL_AIR = 13;
+const TARGET_LABEL_WIDEST = { trend: 25.95, deck: 26.5 };
+const targetLabelGutter = (widestLineWidth) =>
+  Math.ceil(widestLineWidth + TARGET_LABEL_INSET + TARGET_LABEL_AIR);
+
 function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, thinNote }) {
   const [activeIdx, setActiveIdx] = useState(null);
   const wrapRef = useRef(null);
@@ -3017,23 +3031,17 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
   const W = chartW;
   const H = 190;
   const padL = 38;
-  // The target label keeps its own right gutter so it never prints over the last
-  // point, but it wraps onto two lines ("target" above the value) and the gutter
-  // is measured from that text, so a narrow modal keeps its plot wide instead of
-  // handing a quarter of it to one long line.
+  // The target label takes a right gutter so it never prints over the newest point
+  // or the dashed line; targetLabelGutter (above) resolves it to the 43 units this
+  // chart measured at 390px.
   const hasTarget = target !== null && target !== undefined;
   const targetValueText = hasTarget ? `${target.toFixed(digits)}${unit}` : '';
-  // 9px UI text averages about 4.9px per character; the extra 14px leaves a clear
-  // gap between the label and the dashed target line.
-  const approxTextWidth = (text) => text.length * 4.9;
-  const padR = hasTarget
-    ? Math.max(34, Math.min(104, Math.round(Math.max(approxTextWidth('target'), approxTextWidth(targetValueText)) + 14)))
-    : 16;
+  const padR = hasTarget ? targetLabelGutter(TARGET_LABEL_WIDEST.trend) : 16;
   const padT = 14;
   const padB = 26;
 
   const values = points.map((p) => p.value);
-  const candidates = target === null || target === undefined ? values : values.concat(target);
+  const candidates = hasTarget ? values.concat(target) : values;
   let minV = Math.min(...candidates);
   let maxV = Math.max(...candidates);
   if (maxV - minV < 1) {
@@ -3051,9 +3059,13 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
   const area = `${line} L${xOf(points.length - 1).toFixed(1)},${H - padB} L${xOf(0).toFixed(1)},${H - padB} Z`;
   const yTicks = [minV, minV + span / 2, maxV];
   const xTickIdx = points.length <= 4 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
-  // Centre the two label lines on the target, but keep both inside the plot band
-  // when the target sits on the top or bottom edge.
-  const targetLabelTop = hasTarget ? Math.min(Math.max(yOf(target) - 4, padT + 2), H - padB - 10) : 0;
+  // Centre the two 9px lines on the target line, then keep the block on the canvas
+  // when the target sits on an edge: the top bound clears the first line's
+  // ascender, the bottom bound leaves the second line's descenders 3px above the
+  // plot floor. Same bounds as the deck chart.
+  const targetLabelTop = hasTarget
+    ? Math.min(Math.max(yOf(target) - 5, 10), H - padB - (TARGET_LABEL_GAP + 3))
+    : 0;
 
   return (
     <div ref={wrapRef}>
@@ -3087,10 +3099,10 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
             strokeWidth="1"
             strokeDasharray="5 4"
           />
-          <text x={W - 4} y={targetLabelTop} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px' }}>
+          <text x={W - TARGET_LABEL_INSET} y={targetLabelTop} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px' }}>
             target
           </text>
-          <text x={W - 4} y={targetLabelTop + 10} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px', fontWeight: 700 }}>
+          <text x={W - TARGET_LABEL_INSET} y={targetLabelTop + TARGET_LABEL_GAP} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px', fontWeight: 700 }}>
             {targetValueText}
           </text>
         </g>
@@ -3243,7 +3255,7 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun }) {
         return (
           <div key={row.key} className="flex items-center gap-2 text-[11px]">
             <span
-              className={`w-44 shrink-0 truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
+              className={`w-28 sm:w-44 shrink-0 truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
               title={row.label}
             >
               {row.label}
@@ -3254,20 +3266,23 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun }) {
                 style={{ width: `${Math.max(1, Math.min(100, share))}%` }}
               />
             </div>
-            <span className={`w-20 text-right font-semibold tabular-nums ${row.isOthers ? 'text-slate-500 dark:text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
+            <span className={`w-16 sm:w-20 shrink-0 text-right font-semibold tabular-nums ${row.isOthers ? 'text-slate-500 dark:text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
               {Math.round(row.value).toLocaleString()} {unit}
             </span>
-            <span className="w-12 text-right tabular-nums text-slate-500 dark:text-slate-400">{share.toFixed(0)}%</span>
-            <span className={`w-16 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}>
-              {cumulative.toFixed(0)}% cum
+            <span className="w-9 sm:w-12 shrink-0 text-right tabular-nums text-slate-500 dark:text-slate-400">{share.toFixed(0)}%</span>
+            <span
+              className={`w-12 sm:w-16 shrink-0 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}
+              title="cumulative share"
+            >
+              {cumulative.toFixed(0)}%
             </span>
           </div>
         );
       })}
       <div className="text-[10px] text-slate-400 dark:text-slate-400 pt-1">
         {tail.length > 0
-          ? `Showing the top ${shown.length} of ${rows.length} contributors — solid bars cover the vital few (first 80% of loss); the remaining ${tail.length} are grouped as Others.`
-          : 'Solid bars are the vital few — the modes/categories making up the first 80% of total loss.'}
+          ? `Showing the top ${shown.length} of ${rows.length} contributors — solid bars cover the vital few (first 80% of loss), the last column is the cumulative share; the remaining ${tail.length} are grouped as Others.`
+          : 'Solid bars are the vital few — the modes/categories making up the first 80% of total loss; the last column is the cumulative share.'}
       </div>
     </div>
   );

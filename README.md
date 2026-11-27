@@ -22,7 +22,8 @@ browser ── Index.html + Bundle.html + Styles.html ──► React app
    │  google.script.run
    ▼
 Code.js ── _FFM_STATE_STORE (chunks) ── _FFM_STATE_HISTORY (last 5 revisions)
-        └─ AuditLog, SignOffLog, mirror tabs (Projects, Tasks, CpkRecords, ...)
+        ├─ AuditLog, SignOffLog, mirror tabs (Projects, Tasks, CpkRecords, ...)
+        └─ daily trigger ── Drive: FFM NPI Ops State Backups/*.json (newest 30)
 ```
 
 ## Quick start
@@ -30,8 +31,9 @@ Code.js ── _FFM_STATE_STORE (chunks) ── _FFM_STATE_HISTORY (last 5 revis
 ```bash
 bun install            # once
 bun run preview        # local preview on http://127.0.0.1:5183
-bun run test           # all six test suites
-bun run deploy         # build + clasp push + new version + update the production deployment
+bun run test           # every test suite
+bun run deploy:login   # once: sign the staging browser profile in to Google
+bun run deploy         # build → push → version → staging → browser check → production
 ```
 
 Prerequisites for anything that touches Google: Node ≥ 20 (Bun is used as the runner and packager),
@@ -45,7 +47,9 @@ and the backing spreadsheet.
 | `bun run build` | Compiles `Icons.html` + `Part*.html` into `Bundle.html` and Tailwind CSS into `Styles.html` |
 | `bun run preview` | Local server that rebuilds on change and shims `google.script.run` with `localStorage` |
 | `bun run test` | Fiscal-year, Cpk-freeze, SheetJS, review-fix, state-history and generated-bundle checks |
-| `bun run deploy` | Build, `clasp push -f`, `clasp version`, then point the production deployment at it |
+| `bun run deploy` | Build, `clasp push -f`, `clasp version`, put that version on the staging deployment, prove it in a real browser, then point production at it |
+| `bun run deploy:login` | One-time Google sign-in for the profile the staging check uses (`.preview/staging-browser`) |
+| `bun tools/verify-deployment.mjs <url>` | Load any deployment URL in headless Chrome; fails unless the page parses and `#root` renders |
 | `bun run state:import` | Imports a `_FFM_STATE_STORE` CSV export into the local preview |
 
 ## Project layout
@@ -72,7 +76,9 @@ and the backing spreadsheet.
 2. **Never leave in-flight state in the store.** Seed data may be incomplete, but nothing fabricated
    may be written to the spreadsheet; the app strips known fabricated Cpk seeds on load.
 3. **Provisional limits stay provisional** until a planner enters the real limit. The six CTQs in
-   `PROVISIONAL_LIMIT_SPEC_IDS` render neutral and are excluded from capability claims.
+   `PROVISIONAL_LIMIT_SPEC_IDS` render neutral, and `hasProvisionalLimits` keeps every capability figure —
+   the Overview line, the Cpk matrix share, the report — off a limit nobody confirmed. Confirming one
+   happens in Cpk & Master Specs: enter the real LSL / nominal / USL and clear *limits provisional*.
 4. **Do not commit** machine-specific files: `.clasprc.json`, `.env*`, `.preview/`, `.gemini/`,
    `.github/hooks/` are already ignored.
 
@@ -89,6 +95,12 @@ twelve app files should be tracked) and roll back with:
 clasp list-versions
 clasp update-deployment <deployment-id> -V <last-good-version> -d "rollback"
 ```
+
+**`bun run deploy` stopped at the browser check.** Production was not touched — the new version is on the staging
+deployment only. The check exits `1` when the served page throws a parse error or `#root` never replaces the
+splash, and `2` when it could not test anything (signed-out browser, no Chrome/Edge, unreachable page). Sign in
+once with `bun run deploy:login`, open the staging URL it prints, and re-run the deploy. If the version is
+broken, fix it and deploy again; the untouched production deployment keeps serving the last good version.
 
 **Preview shows an old bundle.** The preview server keeps its own copy; restart `bun run preview`
 after a build if the change does not appear.

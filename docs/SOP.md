@@ -8,8 +8,8 @@ web app. For how the app is built and deployed, see [../blueprint.md](../bluepri
 ## 0. Before you start
 
 1. Open the web app link in Chrome or Edge and sign in with your **@minebea.co.th** account.
-2. Accept the permissions when asked (Google Sheets and your email address). Without the email the
-   app cannot attribute a save and will refuse it.
+2. Accept the permissions when asked (Google Sheets, your email address, and Drive access for the
+automatic backups). Without the email the app cannot attribute a save and will refuse it.
 3. Check the top-right badge: **Sheet Synced · Rev #n** means your copy matches the sheet. Any other
    state (Saving…, Offline, Error) must be resolved before you continue.
 4. Set the **Global Scope** (Family · Model · Phase · Side · Process) at the top. Everything —
@@ -123,6 +123,11 @@ metrology and doc reference. Clear *limits provisional* only when the number is 
 **Six CTQs are currently provisional**: coverage height (mount), pillow coverage gap, current at 20
 and 100, speed at 20 and 100. They stay neutral until a planner confirms real limits.
 
+**Closing a provisional limit** happens on *Cpk & Master Specs*: open the spec → *Edit*, enter the real
+LSL / nominal / USL and the document reference, then clear *limits provisional*. Every capability figure
+excludes that CTQ until you do. Never clear the flag to make a chart look complete — the confirmed limit
+is the evidence that the number is real.
+
 ---
 
 ## 7. Cost saving, feedback and the roster
@@ -159,11 +164,30 @@ toolbar.
 
 | Need | How |
 | --- | --- |
+| Turn on the automatic daily backup | Sheet menu → *FFM NPI Ops → Daily State Backup → Install / repair the daily trigger* (once, as the file owner) |
 | Take a personal backup | Sidebar → *Backup* (downloads the workspace JSON) |
+| Back up right now | Sheet menu → *Daily State Backup → Back up now* |
+| See the automatic backups | Sheet menu → *Daily State Backup → Backup status*, or open the Drive folder *FFM NPI Ops State Backups* |
 | Restore a backup | Sidebar → *Restore*, pick the JSON; it saves back to the sheet immediately |
 | Look at an older revision | Topbar → *State history* (last 5 saves), preview and restore |
 | Force a reload from the sheet | Topbar → *Sync* / the reload icon |
 | Rebuild the human-readable tabs | Sheet menu → *FFM NPI Ops → Refresh Mirror Tabs…* |
+
+### The automatic daily backup
+
+Once the daily trigger is installed, the script writes the whole workspace to a JSON file in the Drive
+folder **FFM NPI Ops State Backups** every day at **01:30 (Asia/Bangkok)**, named
+`FFM_NPI_Ops_state_<yyyy-MM-dd>_<HHmm>.json`. It keeps the newest **30** files and moves older ones to
+the drive trash; anything in that folder the job did not write is left alone.
+
+- The file is the same format as *Backup*, so **restore is the normal path**: open the folder,
+download the file, then Sidebar → *Restore* and pick it. A restore is a normal save, so the permission
+rules apply — the program owner or the spreadsheet owner can restore; nobody can restore a change to
+programs they do not own.
+- The backup runs as the script owner, so it keeps working while nobody has the app open. It reads the
+state store directly and never writes to the sheet.
+- A missed day is a gap in the folder, not a broken sheet: *Backup status* shows the installed trigger
+and the newest files, and *Back up now* fills the gap.
 
 ---
 
@@ -174,6 +198,20 @@ Sign in with your Minebea account, grant the email permission, reload.
 
 **"Another user is currently saving…"**
 Someone else's save holds the lock for up to 15 s. Wait a few seconds and change something again.
+
+**"Save refused: you can only change programs you own"**
+The roster lists the programs each person owns (Team & Workload → the member's products). Only those
+programs, and only their models, can be added, edited or removed. Ask the spreadsheet owner to correct
+the roster — nobody else can change it, on purpose, so a save cannot grant itself a program.
+
+**"Save refused: your account is not on the team roster"**
+Your Google account is not matched to a roster entry, so it owns nothing and can sign nothing. The
+spreadsheet owner adds you in Team & Workload with your **email** and the programs you own.
+
+**"Save refused: a signature can only name the signed-in user"**
+A gate decision in that save records (or removes) someone else's approval. Sign your own slot only; a
+colleague signs theirs when they are signed in. Nothing was saved — the sheet still holds the previous
+revision.
 
 **Sync conflict dialog**
 Another user saved while you had unsaved edits; your edits are still in the browser. Open the

@@ -11,6 +11,8 @@ function OverviewView({
   costProjects,
   customerFeedback,
   globalSide,
+  masterSpecs = [],
+  cpkRecords = [],
   onOpenKpiDrilldown,
   onOpenGate,
   onSelectTask,
@@ -22,6 +24,14 @@ function OverviewView({
   );
 
   const recentRecords = useMemo(() => records.slice(0, 5), [records]);
+
+  // One line of capability on the landing page: counts and the Cpk ≥ 1.33 share,
+  // rolled up by the same rule the Cpk matrix uses. The matrix itself stays on its
+  // own view; this only keeps the signal visible without it.
+  const capability = useMemo(
+    () => summarizeCpkCapability(cpkRecords, masterSpecs),
+    [cpkRecords, masterSpecs]
+  );
 
   // KPI results roll-up: weighted actuals from the in-scope production runs.
   const kpiResults = useMemo(() => {
@@ -51,6 +61,10 @@ function OverviewView({
       runs: records.length,
       totalInput,
       finalGood,
+      fallout,
+      salvage,
+      downtimeMin,
+      plannedHr,
       fpy,
       fy,
       uph,
@@ -65,6 +79,7 @@ function OverviewView({
     const claimsFy2026 = (customerFeedback || []).filter(
       (f) => f.category === 'Claim' && isInKpiFiscalYear(f.feedbackDate)
     ).length;
+    const feedbackFyCount = (customerFeedback || []).filter((f) => isInKpiFiscalYear(f.feedbackDate)).length;
 
     const fySavingProjects = (costProjects || []).filter((item) =>
       isKpiFiscalYearTag(item.fyTarget)
@@ -93,7 +108,7 @@ function OverviewView({
 
     // mode 'max' = at-or-above target is good, 'min' = at-or-below target is good.
     const build = (key, label, value, target, opts = {}) => {
-      const { unit = '', digits = 1, mode = 'max', format, targetFormat, footnote } = opts;
+      const { unit = '', digits = 1, mode = 'max', format, targetFormat, footnote, drivers = [] } = opts;
       const fmt = format || ((v) => `${v.toFixed(digits)}${unit}`);
       const onTarget = mode === 'max' ? value >= target : value <= target;
       const headroom = mode === 'max' ? value - target : target - value;
@@ -108,11 +123,18 @@ function OverviewView({
             : `${Math.abs(headroom).toFixed(digits)} ${headroom >= 0 ? 'under limit' : 'over limit'}`,
         onTarget,
         barPct: Math.max(0, Math.min(100, target > 0 ? (value / target) * 100 : 0)),
-        footnote
+        footnote,
+        drivers
       };
     };
 
     const mihForecastText = `${mihSummary.forecastAchieved} of ${mihSummary.tracked} lines MIH-approved (forecast)`;
+    // The MIH tile depends on due dates and sign-offs, not on production: the map
+    // below says which half of that chain is missing when the tile reads "—".
+    const mihDrivers = [
+      { text: `${mihSummary.due} line${mihSummary.due === 1 ? '' : 's'} due`, ok: mihSummary.due > 0 },
+      { text: `${mihSummary.forecastAchieved} of ${mihSummary.tracked} lines approved`, ok: true }
+    ];
     const mihFootnote = mihSummary.due > 0
       ? `${mihSummary.onTime} of ${mihSummary.due} due lines on time \u00b7 ${mihForecastText}`
       : `${mihSummary.nextDue ? `Next MIH due ${mihSummary.nextDue}` : 'No MIH date scheduled'} \u00b7 ${mihForecastText}`;
@@ -120,7 +142,8 @@ function OverviewView({
       ? build('mih', 'Shipment to MIH Achieved', mihSummary.pct, KPI_TARGETS.mihAchievement, {
           digits: 0,
           unit: '%',
-          footnote: mihFootnote
+          footnote: mihFootnote,
+          drivers: mihDrivers
         })
       : {
           key: 'mih',
@@ -131,35 +154,114 @@ function OverviewView({
           onTarget: false,
           tone: 'neutral',
           barPct: 0,
-          footnote: mihFootnote
+          footnote: mihFootnote,
+          drivers: mihDrivers
         };
 
     return [
       build('fpy', 'First Pass Yield (FPY)', kpiResults.fpy, KPI_TARGETS.fpy, {
         unit: '%',
-        footnote: `${kpiResults.runs} runs in scope`
+        footnote: `${kpiResults.runs} runs in scope`,
+        drivers: [
+          { text: `${kpiResults.runs} production run${kpiResults.runs === 1 ? '' : 's'}`, ok: kpiResults.runs > 0 },
+          { text: `${kpiResults.totalInput.toLocaleString()} units input`, ok: kpiResults.totalInput > 0 }
+        ]
       }),
       build('fy', 'Final Yield (FY)', kpiResults.fy, KPI_TARGETS.fy, {
         unit: '%',
-        footnote: `${kpiResults.totalInput.toLocaleString()} units input`
+        footnote: `${kpiResults.totalInput.toLocaleString()} units input`,
+        drivers: [
+          { text: `${Math.round(kpiResults.salvage).toLocaleString()} salvage pcs`, ok: kpiResults.runs > 0 },
+          { text: `${kpiResults.totalInput.toLocaleString()} units input`, ok: kpiResults.totalInput > 0 }
+        ]
       }),
       build('eff', 'Line Efficiency', kpiResults.efficiency, KPI_TARGETS.efficiency, {
         unit: '%',
-        footnote: 'Input UPH vs net-good UPH'
+        footnote: 'Input UPH vs net-good UPH',
+        drivers: [
+          { text: `${kpiResults.plannedHr.toFixed(1)} h planned`, ok: kpiResults.plannedHr > 0 },
+          { text: `${Math.round(kpiResults.downtimeMin).toLocaleString()} min downtime`, ok: kpiResults.downtimeMin > 0 }
+        ]
       }),
       build('claims', `Customer Claims FY${currentFiscalYear()}`, claimsFy2026, KPI_TARGETS.customerClaims, {
         digits: 0,
         mode: 'min',
         targetFormat: (v) => `\u2264 ${v}`,
-        footnote: kpiFiscalScopeLabel()
+        footnote: kpiFiscalScopeLabel(),
+        drivers: [
+          { text: `${feedbackFyCount} feedback case${feedbackFyCount === 1 ? '' : 's'}`, ok: feedbackFyCount > 0 },
+          { text: `${claimsFy2026} claim${claimsFy2026 === 1 ? '' : 's'}`, ok: true }
+        ]
       }),
       build('saving', `Annual Cost Saving FY${currentFiscalYear()}`, annualSavingThb, KPI_TARGETS.annualSavingThb, {
         format: formatThbCompact,
-        footnote: `${fySavingProjects.length} saving initiatives tagged FY${currentFiscalYear()}`
+        footnote: `${fySavingProjects.length} saving initiatives tagged FY${currentFiscalYear()}`,
+        drivers: [
+          { text: `${fySavingProjects.length} initiative${fySavingProjects.length === 1 ? '' : 's'} tagged FY${currentFiscalYear()}`, ok: fySavingProjects.length > 0 }
+        ]
       }),
       mihTile
     ];
   }, [kpiResults, costProjects, customerFeedback, projects, gateRecords, globalSide]);
+
+  // The majority effect: inside the active scope, which few modes / categories /
+  // issues account for most of the measured loss. The three families keep their own
+  // units — pieces, minutes and claimed pieces are not additive — so the card
+  // switches between them rather than stacking them into one cumulative line.
+  const [paretoFamily, setParetoFamily] = useState('defects');
+  const lossPareto = useMemo(() => {
+    const tally = (map, key, value) => map.set(key, (map.get(key) || 0) + value);
+    const defects = new Map();
+    const downtime = new Map();
+    records.forEach((rec) => {
+      (rec.defectItems || []).forEach((item) => {
+        const fallout = Math.max(0, Number(item.falloutQty) || 0);
+        if (fallout > 0) tally(defects, item.mode || 'Unclassified', fallout);
+      });
+      (rec.downtimeEvents || []).forEach((evt) => {
+        const minutes = Math.max(0, Number(evt.durationMin) || 0);
+        if (minutes > 0) tally(downtime, evt.category || 'Unclassified', minutes);
+      });
+    });
+    const claims = new Map();
+    (customerFeedback || [])
+      .filter((f) => f.category === 'Claim' && isInKpiFiscalYear(f.feedbackDate))
+      .forEach((f) => {
+        tally(claims, f.issueItem || f.issueCategory || 'Unclassified', Math.max(1, Number(f.ngQty) || 1));
+      });
+    const toRows = (map) =>
+      [...map.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([label, value]) => ({ key: label, label, value }));
+
+    return [
+      {
+        key: 'defects',
+        label: 'Defects',
+        heading: 'fallout by failure mode',
+        unit: 'pcs',
+        emptyText: 'No defect fallout recorded in the active scope.',
+        rows: toRows(defects)
+      },
+      {
+        key: 'downtime',
+        label: 'Downtime',
+        heading: 'minutes by category',
+        unit: 'min',
+        emptyText: 'No downtime recorded in the active scope.',
+        rows: toRows(downtime)
+      },
+      {
+        key: 'claims',
+        label: 'Claims',
+        heading: 'claimed quantity by issue',
+        unit: 'ng pcs',
+        emptyText: `No claimed quantity in FY${currentFiscalYear()}.`,
+        rows: toRows(claims)
+      }
+    ];
+  }, [records, customerFeedback]);
+  const activePareto = lossPareto.find((family) => family.key === paretoFamily) || lossPareto[0];
 
   // Active NPI build progress: units actually run vs the planned build quantity.
   const buildProgress = useMemo(
@@ -282,6 +384,153 @@ function OverviewView({
             </button>
             );
           })}
+        </div>
+
+        {/* Capability in one line, and the way through to the full matrix. */}
+        <button
+          type="button"
+          onClick={() => onSwitchView('cpk')}
+          title="Open the Cpk matrix"
+          className="w-full border-t border-slate-200 dark:border-slate-800 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 transition-colors"
+        >
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+            <span className="font-semibold text-slate-600 dark:text-slate-300">Process capability</span>
+            {capability.total === 0 ? (
+              <span className="text-slate-500 dark:text-slate-400">
+                {capability.provisional > 0
+                  ? `${capability.provisional} reading${capability.provisional === 1 ? '' : 's'} on provisional limits — no valid Cpk yet`
+                  : 'No Cpk readings yet — import capability data to populate this'}
+              </span>
+            ) : (
+              <>
+                <span className="inline-flex items-center gap-1 rounded border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950 px-1.5 py-0.5 font-semibold text-emerald-800 dark:text-emerald-200 tabular-nums">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
+                  {capability.green} capable
+                </span>
+                <span className="inline-flex items-center gap-1 rounded border border-yellow-300 dark:border-yellow-700 bg-yellow-50 dark:bg-yellow-950 px-1.5 py-0.5 font-semibold text-yellow-800 dark:text-yellow-200 tabular-nums">
+                  <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" aria-hidden="true" />
+                  {capability.yellow} marginal
+                </span>
+                <span className="inline-flex items-center gap-1 rounded border border-orange-300 dark:border-orange-700 bg-orange-50 dark:bg-orange-950 px-1.5 py-0.5 font-semibold text-orange-800 dark:text-orange-200 tabular-nums">
+                  <span className="w-1.5 h-1.5 rounded-full bg-orange-500" aria-hidden="true" />
+                  {capability.orange} incapable
+                </span>
+                <span className="font-semibold text-slate-600 dark:text-slate-300 tabular-nums">
+                  Cpk &ge; 1.33 share: {capability.passRate.toFixed(0)}% ({capability.green}/{capability.total}{' '}
+                  valid)
+                </span>
+                {capability.provisional > 0 && (
+                  <span className="text-slate-500 dark:text-slate-400">
+                    · {capability.provisional} provisional excluded
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+          <span className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 dark:text-blue-400">
+            Cpk matrix
+            <ArrowRight className="w-3.5 h-3.5" />
+          </span>
+        </button>
+      </section>
+
+      {/* KPI dependency & majority effect — what each tile above reads, and which few
+          loss drivers account for most of the gap inside the active scope. */}
+      <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800">
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">KPI dependency &amp; majority effect</h2>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+            What each KPI above depends on — a missing input is why a tile has no score — and the vital few drivers
+            behind the loss in the active Global Scope
+          </p>
+        </div>
+
+        <div className="grid xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-slate-100 dark:divide-slate-800">
+          <div className="p-4 space-y-2 min-w-0">
+            {kpiTiles.map((tile) => {
+              const drivers = tile.drivers || [];
+              const missing = drivers.filter((d) => !d.ok).length;
+              const health = drivers.length === 0 || missing === drivers.length ? 'empty' : missing > 0 ? 'thin' : 'fed';
+              const dotClass =
+                health === 'fed'
+                  ? 'bg-emerald-500'
+                  : health === 'thin'
+                  ? 'bg-amber-500'
+                  : 'bg-slate-300 dark:bg-slate-600';
+              return (
+                <div key={tile.key} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+                  <span className="w-32 sm:w-44 shrink-0 flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-200">
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`} aria-hidden="true" />
+                    <span className="truncate" title={tile.label}>{tile.label}</span>
+                  </span>
+                  <div className="flex flex-1 flex-wrap items-center gap-1">
+                    {drivers.map((driver) => (
+                      <span
+                        key={driver.text}
+                        className={`px-1.5 py-0.5 rounded border tabular-nums ${
+                          driver.ok
+                            ? 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                            : 'border-rose-300 dark:border-rose-700 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300'
+                        }`}
+                      >
+                        {driver.text}
+                      </span>
+                    ))}
+                    {health !== 'fed' && (
+                      <span className="px-1.5 py-0.5 rounded border border-dashed border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300">
+                        {health === 'empty' ? 'no input — not scored' : 'partial input'}
+                      </span>
+                    )}
+                  </div>
+                  <span className="w-14 sm:w-20 shrink-0 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-200">
+                    {tile.valueText}
+                  </span>
+                  <span className="w-14 sm:w-24 shrink-0 text-right tabular-nums text-slate-400 dark:text-slate-400">
+                    {tile.targetText}
+                  </span>
+                </div>
+              );
+            })}
+            <p className="pt-1 text-[10px] text-slate-400 dark:text-slate-400">
+              Value then target on the right; a red chip is an input the tile needs and the store does not have.
+            </p>
+          </div>
+
+          <div className="p-4 space-y-2.5 min-w-0">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <h3 className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                  Pareto — {activePareto.heading}
+                </h3>
+                <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                  Ranked by {activePareto.unit}; the solid bars are the drivers that make up the first 80% of it
+                </p>
+              </div>
+              <div className="flex rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden text-[10px] font-semibold">
+                {lossPareto.map((family) => (
+                  <button
+                    key={family.key}
+                    type="button"
+                    onClick={() => setParetoFamily(family.key)}
+                    aria-pressed={paretoFamily === family.key}
+                    className={`px-2 py-1 transition-colors ${
+                      paretoFamily === family.key
+                        ? 'bg-slate-900 dark:bg-slate-700 text-white'
+                        : 'text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    {family.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <KpiParetoRows
+              rows={activePareto.rows}
+              unit={activePareto.unit}
+              emptyText={activePareto.emptyText}
+              groupNoun="drivers"
+            />
+          </div>
         </div>
       </section>
 
@@ -737,6 +986,407 @@ function GateWorkstreamMatrix({ projects, gateRecords, globalSide, onOpenGate })
         )}
       </div>
     </section>
+  );
+}
+
+// ============================================================================
+// VIEW: SIGN-OFF LEDGER — read-only `SignOffLog` + state reconciliation
+// ============================================================================
+
+function SignOffLedgerView({ gateRecords, projects }) {
+  const [ledger, setLedger] = useState({
+    status: 'loading',
+    rows: [],
+    error: '',
+    unavailable: '',
+    readAt: '',
+    sheetUrl: ''
+  });
+  const [programFilter, setProgramFilter] = useState('ALL');
+  const [decisionFilter, setDecisionFilter] = useState('ALL');
+  const [search, setSearch] = useState('');
+
+  const loadLedger = () => {
+    const runner =
+      typeof window !== 'undefined' && window.google && window.google.script && window.google.script.run;
+    if (!runner) {
+      setLedger({
+        status: 'error',
+        rows: [],
+        error: 'The ledger lives in the Google Sheet, so it can only be read from the deployed app.',
+        unavailable: '',
+        readAt: '',
+        sheetUrl: ''
+      });
+      return;
+    }
+    setLedger((prev) => ({ ...prev, status: 'loading', error: '' }));
+    runner
+      .withSuccessHandler((res) => {
+        if (!res || res.ok === false) {
+          setLedger({
+            status: 'error',
+            rows: [],
+            error: (res && res.error) || 'The ledger could not be read.',
+            unavailable: '',
+            readAt: '',
+            sheetUrl: (res && res.sheetUrl) || ''
+          });
+          return;
+        }
+        setLedger({
+          status: 'ready',
+          rows: Array.isArray(res.rows) ? res.rows : [],
+          error: '',
+          unavailable: String(res.unavailable || ''),
+          readAt: String(res.readAt || ''),
+          sheetUrl: String(res.sheetUrl || '')
+        });
+      })
+      .withFailureHandler((err) => {
+        setLedger({
+          status: 'error',
+          rows: [],
+          error: (err && err.message) || String(err || 'The ledger could not be read.'),
+          unavailable: '',
+          readAt: '',
+          sheetUrl: ''
+        });
+      })
+      .getSignOffLedger();
+  };
+
+  useEffect(() => {
+    loadLedger();
+  }, []);
+
+  // The seed is not an approval, so seeded decisions are excluded from "missing
+  // from the ledger" — see reconcileSignOffLedger.
+  const reconciliation = useMemo(() => {
+    if (ledger.status !== 'ready' || ledger.unavailable) return null;
+    return reconcileSignOffLedger(gateRecords, projects, ledger.rows, createInitialGateRecords());
+  }, [ledger, gateRecords, projects]);
+
+  const programOptions = useMemo(() => {
+    const seen = new Map();
+    ledger.rows.forEach((row) => {
+      if (row.programId && !seen.has(row.programId)) seen.set(row.programId, row.program || row.programId);
+    });
+    return Array.from(seen.entries()).sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+  }, [ledger.rows]);
+
+  const visibleRows = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return ledger.rows
+      .filter((row) => {
+        if (programFilter !== 'ALL' && row.programId !== programFilter) return false;
+        if (decisionFilter !== 'ALL' && row.decision !== decisionFilter) return false;
+        if (!query) return true;
+        return [row.program, row.programId, row.line, row.gate, row.approver, row.role, row.remark, row.signedInEmail]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().indexOf(query) !== -1);
+      })
+      .sort(
+        (a, b) =>
+          String(b.timestamp).localeCompare(String(a.timestamp)) ||
+          (Number(b.revision) || 0) - (Number(a.revision) || 0)
+      );
+  }, [ledger.rows, programFilter, decisionFilter, search]);
+
+  const handleExport = () =>
+    triggerCsvDownload(`FFM-signoff-ledger_${todayIso()}.csv`, signOffLedgerCsv(visibleRows));
+
+  const decisionChip = (decision) => {
+    if (decision === 'Approved')
+      return 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800';
+    if (decision === 'Conditional')
+      return 'bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800';
+    if (decision === 'Rejected')
+      return 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800';
+    return 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700';
+  };
+
+  return (
+    <div className="space-y-6">
+      <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">Gate Decision Ledger</h2>
+              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300">
+                Read-only
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+              Every gate decision recorded in <span className="font-mono">SignOffLog</span>, one row per changed
+              approver decision. The tab is append-only and is never edited by the app.
+              {ledger.status === 'ready' && ledger.readAt && (
+                <> Read at {String(ledger.readAt).slice(11, 19)} UTC.</>
+              )}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {ledger.sheetUrl && (
+              <a
+                href={ledger.sheetUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                Open SignOffLog
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={loadLedger}
+              disabled={ledger.status === 'loading'}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${ledger.status === 'loading' ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={handleExport}
+              disabled={ledger.status !== 'ready' || visibleRows.length === 0}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 dark:bg-slate-700 text-white text-[11px] font-semibold hover:bg-slate-800 dark:hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Export CSV ({visibleRows.length})
+            </button>
+          </div>
+        </div>
+
+        {ledger.status === 'error' && (
+          <div className="px-5 py-4 text-[11px] text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/60 border-b border-rose-200 dark:border-rose-800">
+            {ledger.error}
+          </div>
+        )}
+        {ledger.status === 'ready' && ledger.unavailable && (
+          <div className="px-5 py-4 text-[11px] text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800">
+            {ledger.unavailable}
+          </div>
+        )}
+        {ledger.status === 'loading' && (
+          <div className="px-5 py-4 text-[11px] text-slate-500 dark:text-slate-400">Reading SignOffLog…</div>
+        )}
+      </section>
+
+      {reconciliation && (
+        <section
+          className={`rounded-xl border overflow-hidden ${
+            reconciliation.inSync
+              ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950'
+              : 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950'
+          }`}
+        >
+          <div className="px-5 py-3.5 border-b border-current/10">
+            <h3
+              className={`text-sm font-bold flex items-center gap-1.5 ${
+                reconciliation.inSync
+                  ? 'text-emerald-900 dark:text-emerald-100'
+                  : 'text-amber-900 dark:text-amber-100'
+              }`}
+            >
+              {reconciliation.inSync ? (
+                <ShieldCheck className="w-4 h-4" />
+              ) : (
+                <AlertTriangle className="w-4 h-4" />
+              )}
+              {reconciliation.inSync
+                ? 'Ledger and saved state agree'
+                : 'Ledger and saved state disagree'}
+            </h3>
+            <p
+              className={`text-[11px] mt-1 ${
+                reconciliation.inSync
+                  ? 'text-emerald-800 dark:text-emerald-200'
+                  : 'text-amber-800 dark:text-amber-200'
+              }`}
+            >
+              {reconciliation.stateDecisionCount} decision(s) in the saved state ·{' '}
+              {reconciliation.ledgerDecisionCount} in the ledger · {reconciliation.matched} matched
+              {reconciliation.missingFromLedger.length > 0 &&
+                ` · ${reconciliation.missingFromLedger.length} missing from the ledger`}
+              {reconciliation.missingFromState.length > 0 &&
+                ` · ${reconciliation.missingFromState.length} in the ledger with no decision in state`}
+            </p>
+          </div>
+
+          {reconciliation.missingFromLedger.length > 0 && (
+            <div className="px-5 py-3 space-y-1.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-amber-900 dark:text-amber-100">
+                In the saved state, missing from SignOffLog
+              </div>
+              <p className="text-[10px] text-amber-800 dark:text-amber-200">
+                These decisions were saved but never appended — the failed import this view exists to catch. Add
+                them to the tab by hand, or re-save the gate after fixing the append.
+              </p>
+              {reconciliation.missingFromLedger.slice(0, 40).map((entry, idx) => (
+                <div
+                  key={`${entry.programId}-${entry.line}-${entry.gate}-${entry.approver}-${idx}`}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-900 dark:text-amber-100 tabular-nums"
+                >
+                  <span className="font-semibold">{entry.program || entry.programId}</span>
+                  <span className="text-amber-700 dark:text-amber-300">{entry.line}</span>
+                  <span className="text-amber-700 dark:text-amber-300">{entry.gate}</span>
+                  <span>{entry.approver}</span>
+                  <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${decisionChip(entry.decision)}`}>
+                    {entry.decision}
+                  </span>
+                  {entry.at && <span className="text-amber-700 dark:text-amber-300">{entry.at}</span>}
+                </div>
+              ))}
+              {reconciliation.missingFromLedger.length > 40 && (
+                <div className="text-[10px] text-amber-700 dark:text-amber-300">
+                  +{reconciliation.missingFromLedger.length - 40} more — export the CSV for the full list.
+                </div>
+              )}
+            </div>
+          )}
+
+          {reconciliation.missingFromState.length > 0 && (
+            <div className="px-5 py-3 space-y-1.5 border-t border-amber-200 dark:border-amber-800">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-amber-900 dark:text-amber-100">
+                In SignOffLog, no decision in the saved state
+              </div>
+              <p className="text-[10px] text-amber-800 dark:text-amber-200">
+                The ledger records a decision the saved state no longer holds — the gate was reopened, or the
+                program / line / approver was removed. History, not necessarily an error, but it is a divergence.
+              </p>
+              {reconciliation.missingFromState.slice(0, 40).map((entry, idx) => (
+                <div
+                  key={`${entry.programId}-${entry.line}-${entry.gate}-${entry.approver}-${idx}`}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-900 dark:text-amber-100 tabular-nums"
+                >
+                  <span className="font-semibold">{entry.program || entry.programId}</span>
+                  <span className="text-amber-700 dark:text-amber-300">{entry.line}</span>
+                  <span className="text-amber-700 dark:text-amber-300">{entry.gate}</span>
+                  <span>{entry.approver}</span>
+                  <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${decisionChip(entry.decision)}`}>
+                    {entry.decision}
+                  </span>
+                  <span className="text-amber-700 dark:text-amber-300">
+                    {entry.at} · Rev #{entry.revision}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+        <div className="px-5 py-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center gap-2">
+          <select
+            value={programFilter}
+            onChange={(e) => setProgramFilter(e.target.value)}
+            aria-label="Filter ledger by program"
+            className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-[11px] font-semibold"
+          >
+            <option value="ALL">All programs</option>
+            {programOptions.map(([id, label]) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <select
+            value={decisionFilter}
+            onChange={(e) => setDecisionFilter(e.target.value)}
+            aria-label="Filter ledger by decision"
+            className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-[11px] font-semibold"
+          >
+            <option value="ALL">All decisions</option>
+            {SIGN_OFF_LEDGER_DECISIONS.map((decision) => (
+              <option key={decision} value={decision}>
+                {decision}
+              </option>
+            ))}
+          </select>
+          <div className="relative flex-1 min-w-[180px]">
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search approver, gate, remark…"
+              aria-label="Search the ledger"
+              className="w-full pl-8 pr-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-[11px]"
+            />
+          </div>
+          <span className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+            {visibleRows.length} of {ledger.rows.length} row(s)
+          </span>
+        </div>
+
+        {ledger.status === 'ready' && visibleRows.length === 0 ? (
+          <div className="p-8 text-center text-xs text-slate-500 dark:text-slate-400">
+            {ledger.rows.length === 0
+              ? 'SignOffLog has no gate decisions yet. A save that changes a decision appends one row per approver.'
+              : 'No ledger rows match these filters.'}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                <tr>
+                  <th className="py-2.5 px-3 whitespace-nowrap">When</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Program</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Line</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Gate</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Approver</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Role</th>
+                  <th className="py-2.5 px-2.5 whitespace-nowrap">Decision</th>
+                  <th className="py-2.5 px-3">Remark</th>
+                  <th className="py-2.5 px-2.5 text-right whitespace-nowrap">Rev</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRows.map((row, idx) => (
+                  <tr
+                    key={`${row.timestamp}-${row.programId}-${row.line}-${row.gate}-${row.approver}-${idx}`}
+                    className="border-t border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                  >
+                    <td className="py-2 px-3 whitespace-nowrap tabular-nums text-slate-600 dark:text-slate-300">
+                      {String(row.timestamp).replace('T', ' ').slice(0, 16)}
+                    </td>
+                    <td className="py-2 px-2.5 whitespace-nowrap font-semibold text-slate-800 dark:text-slate-200">
+                      {row.program || row.programId}
+                      <div className="text-[10px] font-normal text-slate-400 dark:text-slate-500">{row.programId}</div>
+                    </td>
+                    <td className="py-2 px-2.5 whitespace-nowrap font-mono text-[11px] text-slate-600 dark:text-slate-300">
+                      {row.line}
+                    </td>
+                    <td className="py-2 px-2.5 whitespace-nowrap text-slate-700 dark:text-slate-200">{row.gate}</td>
+                    <td className="py-2 px-2.5 whitespace-nowrap text-slate-800 dark:text-slate-200">{row.approver}</td>
+                    <td className="py-2 px-2.5 whitespace-nowrap text-[11px] text-slate-500 dark:text-slate-400">
+                      {row.role}
+                    </td>
+                    <td className="py-2 px-2.5 whitespace-nowrap">
+                      <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-bold ${decisionChip(row.decision)}`}>
+                        {row.decision}
+                      </span>
+                    </td>
+                    <td className="py-2 px-3 max-w-[280px] text-[11px] text-slate-600 dark:text-slate-300">
+                      <span className="line-clamp-2" title={row.remark}>
+                        {row.remark || '—'}
+                      </span>
+                      {row.signedInEmail && (
+                        <div className="text-[10px] text-slate-400 dark:text-slate-500 truncate">{row.signedInEmail}</div>
+                      )}
+                    </td>
+                    <td className="py-2 px-2.5 text-right whitespace-nowrap tabular-nums text-slate-500 dark:text-slate-400">
+                      #{row.revision}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -4209,15 +4859,19 @@ function CpkMasterSpecsView({
                     ))}
                   </select>
                 </label>
-                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 font-semibold tabular-nums">
-                  Cpk &ge; 1.33 share: {cpkRollup.passRate.toFixed(0)}% ({cpkRollup.green}/{cpkRollup.total}
-                  {' '}valid)
-                  {cpkRollup.provisional > 0 && (
-                    <span className="font-medium text-slate-500 dark:text-slate-400">
-                      · {cpkRollup.provisional} provisional excluded
-                    </span>
-                  )}
-                </span>
+                {/* An empty workspace has no share to show: "0% (0/0 valid)" reads as
+                    a broken divide, not as "no data yet". */}
+                {cpkRollup.total > 0 && (
+                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 font-semibold tabular-nums">
+                    Cpk &ge; 1.33 share: {cpkRollup.passRate.toFixed(0)}% ({cpkRollup.green}/{cpkRollup.total}
+                    {' '}valid)
+                    {cpkRollup.provisional > 0 && (
+                      <span className="font-medium text-slate-500 dark:text-slate-400">
+                        · {cpkRollup.provisional} provisional excluded
+                      </span>
+                    )}
+                  </span>
+                )}
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-50 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 font-semibold">
                   <span className="w-2 h-2 rounded-full bg-emerald-500" />
                   Cpk &gt; 1.33
@@ -4235,8 +4889,25 @@ function CpkMasterSpecsView({
 
             <div className="divide-y divide-slate-200 dark:divide-slate-800">
               {cpkFamilyMatrices.length === 0 ? (
-                <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                  No Cpk records match the current scope.
+                <div className="px-6 py-10 text-center">
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                    {cpkRecords.length === 0 ? 'No capability data yet' : 'No Cpk records match the current scope'}
+                  </h3>
+                  <p className="mx-auto mt-1.5 max-w-md text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                    {cpkRecords.length === 0
+                      ? 'A new workspace carries no Cpk readings — every row here has to come from a real upload. Import an Excel or CSV file of measurements matched to a Master Spec and the matrix fills in.'
+                      : 'Every reading is filtered out by the Family filter or the Global Scope. Widen either to see the records that exist.'}
+                  </p>
+                  {cpkRecords.length === 0 && (
+                    <button
+                      type="button"
+                      onClick={onOpenCpkImport}
+                      className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white shadow-2xs transition-colors hover:bg-blue-700"
+                    >
+                      <Upload className="h-3.5 w-3.5" />
+                      <span>Import Excel / CSV</span>
+                    </button>
+                  )}
                 </div>
               ) : (
                 visibleCpkFamilyMatrices.map((section) => {

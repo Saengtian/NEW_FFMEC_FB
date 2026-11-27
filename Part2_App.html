@@ -295,7 +295,7 @@ function App() {
         );
         const cleanedCpk = stripLegacyFabricatedCpkRows(frozen);
         removedFabricated = frozen.length - cleanedCpk.length;
-        setCpkRecords(backfillSeedCpkSamples(cleanedCpk));
+        setCpkRecords(cleanedCpk);
       }
       if (Array.isArray(data.costProjects)) setCostProjects(data.costProjects);
       if (Array.isArray(data.customerFeedback)) setCustomerFeedback(data.customerFeedback);
@@ -1559,7 +1559,13 @@ function App() {
       docRef: form.docRef.trim() || 'SPC-FFM-00',
       samplingPlan: form.samplingPlan.trim() || '32 pcs / Lot',
       // Only CTQ parameters are plotted in the Station × Variable matrix.
-      ctq: form.ctq !== false
+      ctq: form.ctq !== false,
+      // Queue ownership for a placeholder limit; kept after confirmation so the
+      // record still shows who was on the hook when the limit landed.
+      limitsOwner: String(form.limitsOwner || '').trim(),
+      limitsDueDate: /^\d{4}-\d{2}-\d{2}$/.test(String(form.limitsDueDate || ''))
+        ? String(form.limitsDueDate).slice(0, 10)
+        : ''
     };
     const stamp = new Date().toISOString();
     const actor = cloudSync.userEmail || '';
@@ -2686,6 +2692,7 @@ function App() {
     { id: 'timeline', label: 'Build Timeline (Gantt)', icon: Calendar },
     { id: 'tasks', label: 'Tasks & AIL', icon: CheckSquare, badge: globalStats.openTasks },
     { id: 'gates', label: 'NPI Gate Sign-Off', icon: ShieldCheck, badge: globalStats.pendingSignOffs },
+    { id: 'ledger', label: 'Sign-off Ledger', icon: FileSpreadsheet },
     { id: 'cpk', label: 'Cpk & Master Specs', icon: BarChart3 },
     { id: 'costs', label: 'Projects & Cost Saving', icon: DollarSign, badge: scopedCostProjects.length },
     {
@@ -2707,6 +2714,7 @@ function App() {
     timeline: 'NPI Build Timeline & Milestone Gantt',
     tasks: 'FDB Fan Assembly Tasks & AIL (Action Item List)',
     gates: 'NPI Gate Pass Sign-Off Center (PEN-81-0002 Rev B)',
+    ledger: 'Gate Decision Ledger (SignOffLog) & State Reconciliation',
     cpk: 'Process Capability (Cpk) & Master Specifications',
     costs: 'FFM Projects & Cost Saving Portfolio (VA/VE · Yield · HC)',
     feedback: 'FFM Customer Feedback, FA & 8D FACA Tracker (Y2026)',
@@ -3123,6 +3131,8 @@ function App() {
                     onOpenGate={navigateToGate}
                     onSelectTask={(id) => setActiveTaskDrawerId(id)}
                     onSwitchView={setActiveView}
+                    masterSpecs={masterSpecs}
+                    cpkRecords={scopedCpkRecords}
                   />
                 );
               case 'projects':
@@ -3168,6 +3178,8 @@ function App() {
                     onOpenNewTask={() => setNewTaskModalOpen(true)}
                   />
                 );
+              case 'ledger':
+                return <SignOffLedgerView gateRecords={gateRecords} projects={projects} />;
               case 'gates':
                 return (
                   <GateSignOffView

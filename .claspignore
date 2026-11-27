@@ -1,6 +1,7 @@
 # Local tooling and artifacts that are not Apps Script files
 node_modules/**
 package.json
+deploy.config.json
 bun.lock
 bun.lockb
 tools/**

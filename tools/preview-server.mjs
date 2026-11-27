@@ -116,6 +116,19 @@ const GAS_SHIM = String.raw`
     return { spreadsheetId: 'LOCAL_PREVIEW', sheetUrl: '', webAppUrl: '', userEmail: EMAIL };
   }
 
+  // The real ledger lives in the Sheet's SignOffLog tab, which the preview has no
+  // copy of. Say so instead of pretending the ledger is empty — an empty ledger
+  // would read as "every decision is missing", which is a different finding.
+  function getSignOffLedger() {
+    return {
+      ok: true,
+      rows: [],
+      sheetUrl: '',
+      readAt: new Date().toISOString(),
+      unavailable: 'The local preview has no SignOffLog tab. Deploy to read and reconcile the real ledger; the gate records below are the locally edited ones.'
+    };
+  }
+
   function readHistory() {
     try {
       var raw = window.localStorage.getItem(HISTORY_KEY);
@@ -160,6 +173,7 @@ const GAS_SHIM = String.raw`
     saveWorkspaceState: saveWorkspaceState,
     initializeDatabase: initializeDatabase,
     getServerInfo: getServerInfo,
+    getSignOffLedger: getSignOffLedger,
     listStateRevisions: listStateRevisions,
     loadStateRevision: loadStateRevision
   };
