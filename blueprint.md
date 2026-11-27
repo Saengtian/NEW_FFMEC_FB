@@ -43,13 +43,17 @@ browser holds the entire working set in memory and saves it back as one revision
 ```
 Icons.html ─┐
 Part1_Data ─┤
-Part2_App  ─┤   esbuild (JSX → ES2017, minify, React 18 + xlsx from node_modules)
+Part2_App  ─┤   esbuild (JSX → ES2019, minify, React 18 from node_modules)
 Part3_ViewsA┤        │
 Part4_ViewsB┤        ├─ escape  </script → <\/script
 Part5_Modules        ├─ escape  http://  → http:\/\/
 Part6_Reports        └─ escape  <?       → <\?
             │        │
             └────────┴──► Bundle.html   (one <script> block, committed)
+
+xlsx (node_modules) ─► esbuild (own IIFE, minified, same escapes)
+                    ─► SheetJs.html (committed; Code.js serves it on the
+                       first Excel import, never at startup)
 Part*.html classes ──► Tailwind CLI ──► Styles.html (committed)
 ```
 
@@ -224,7 +228,7 @@ owner, reads the store and never writes to it, so a backup run cannot change a r
 | --- | --- |
 | `test-fy-helpers` | Fiscal-year window math and presets |
 | `test-cpk-freeze` | Provisional limits never produce capability verdicts |
-| `test-sheetjs-bundle` | SheetJS import path and bundle integrity |
+| `test-sheetjs-bundle` | SheetJS stays out of the startup bundle, loads on demand, and CSV never touches it |
 | `test-review-fixes` | Assignment, date formatting, quantiles, product families |
 | `test-project-crud` | Program create/edit/delete pruning only what the program owns |
 | `test-state-history` | Revision list/load/prune behaviour |
@@ -277,8 +281,8 @@ bun run build → clasp push -f (12 files) → clasp version "deploy <sha>"
 3. **Single runtime, no local dev server for Code.js.** The preview shims the RPC layer, so server
    changes are only exercised in Apps Script.
 4. **History is coarse.** Five whole-store snapshots; no per-record audit of spec edits.
-5. **Bundle size.** ~1.3 MB inline script, including SheetJS; startup on weak hardware is measurable
-   and splitting is the obvious relief valve.
+5. **Bundle size.** ~840 KB inline script, plus a ~486 KB SheetJs.html fetched only on the first
+   Excel import. React and every view still parse at startup; smaller splits are still possible.
 6. **Ledger repair is bounded by history.** Reconcile can only rebuild decisions whose pair of
    snapshots still sits in `_FFM_STATE_HISTORY`; a gap older than those five revisions is reported as
    unreconciled rather than reconstructed from the current state, which would make a seed look like a

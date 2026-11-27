@@ -203,6 +203,26 @@ const GAS_SHIM = String.raw`
     }
   }
 
+  // The real one reads SheetJs.html on demand; the preview serves the same built
+  // source from /sheetjs.js so the first Excel import exercises the same path.
+  function getSheetJsSource() {
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', '/sheetjs.js?t=' + Date.now(), false);
+      xhr.send(null);
+      if (xhr.status !== 200 || !xhr.responseText) {
+        return { ok: false, error: 'The local preview has no SheetJs.html build. Run bun run build.' };
+      }
+      return { ok: true, source: '<script>\n' + xhr.responseText + '\n<\/script>' };
+    } catch (err) {
+      return {
+        ok: false,
+        error: 'The local preview could not read SheetJs.html: ' +
+          (err && err.message ? err.message : String(err))
+      };
+    }
+  }
+
   var methods = {
     loadWorkspaceState: loadWorkspaceState,
     saveWorkspaceState: saveWorkspaceState,
@@ -211,7 +231,8 @@ const GAS_SHIM = String.raw`
     getSignOffLedger: getSignOffLedger,
     listStateRevisions: listStateRevisions,
     loadStateRevision: loadStateRevision,
-    exportRestoreSnapshot: exportRestoreSnapshot
+    exportRestoreSnapshot: exportRestoreSnapshot,
+    getSheetJsSource: getSheetJsSource
   };
 
   var successHandler = null;
@@ -277,7 +298,30 @@ function read(name) {
   }
 }
 
-function buildPage() {
+/**
+ * `?measure=1` records when React replaces the startup splash, so a change to
+ * the startup bundle can be compared on the same page and machine. Preview-only:
+ * nothing here ships to Apps Script.
+ */
+const MEASURE_SCRIPT = String.raw`
+<script>
+(function () {
+  window.__FFM_MEASURE__ = { at: null, done: false, started: performance.now() };
+  var observer = new MutationObserver(function () {
+    var root = document.getElementById('root');
+    if (!root || window.__FFM_MEASURE__.done) return;
+    if (!root.querySelector('.ffm-splash')) {
+      window.__FFM_MEASURE__.at = performance.now();
+      window.__FFM_MEASURE__.done = true;
+      observer.disconnect();
+    }
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+})();
+</script>
+`;
+
+function buildPage(measure) {
   let html = read("Index.html");
 
   // Index.html has no config on disk: `null` makes the app fall back to its own
@@ -306,21 +350,40 @@ function buildPage() {
   const shim = GAS_SHIM.replace("__FFM_PREVIEW_IMPORT__", () => importJson);
 
   // Classic script in the head, so it is installed before the bundle runs.
-  return html.replace("</head>", `<script>\n${shim}\n</script>\n</head>`);
+  const instrumentation = measure ? MEASURE_SCRIPT : "";
+  return html.replace("</head>", `<script>\n${shim}\n</script>\n${instrumentation}</head>`);
 }
 
 Bun.serve({
   hostname: HOST,
   port: PORT,
   async fetch(req) {
-    const { pathname } = new URL(req.url);
+    const url = new URL(req.url);
+    const { pathname } = url;
+    // Temporary local fixture for the Excel import check; not part of the app.
+    if (pathname === "/sheetjs.js") {
+      try {
+        if (isStale()) await build({ quiet: true });
+        const html = read("SheetJs.html");
+        const match = html.match(/<script[^>]*>([\s\S]*)<\/script>/i);
+        if (!match) throw new Error("SheetJs.html has no <script> block");
+        return new Response(match[1], {
+          headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" },
+        });
+      } catch (err) {
+        return new Response(`SheetJS build error\n\n${err.message}\n`, {
+          status: 500,
+          headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+        });
+      }
+    }
     if (pathname !== "/" && pathname !== "/index.html") {
       return new Response("Not found", { status: 404 });
     }
     try {
       // Same output the deployed app gets: rebuild when any source changed.
       if (isStale()) await build({ quiet: true });
-      return new Response(buildPage(), {
+      return new Response(buildPage(url.searchParams.get("measure") === "1"), {
         headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
       });
     } catch (err) {

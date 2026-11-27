@@ -3752,11 +3752,59 @@ function parseCsvText(text) {
   return { headers, rows };
 }
 
+let sheetJsLoadPromise = null;
+
+/** SheetJs.html wraps the library in a <script>; the injected text is the body. */
+function sheetJsSourceFromHtml(html) {
+  const text = String(html || '');
+  const match = text.match(/<script[^>]*>([\s\S]*)<\/script>/i);
+  return match ? match[1] : text;
+}
+
+function requestSheetJsSource() {
+  return new Promise((resolve, reject) => {
+    if (!(typeof google !== 'undefined' && google.script && google.script.run)) {
+      reject(new Error('the server bridge is unavailable'));
+      return;
+    }
+    google.script.run
+      .withSuccessHandler((res) => {
+        if (!res || res.ok !== true || !res.source) {
+          reject(new Error((res && res.error) || 'the server returned no parser'));
+          return;
+        }
+        resolve(sheetJsSourceFromHtml(res.source));
+      })
+      .withFailureHandler((err) => reject(new Error((err && err.message) || String(err))))
+      .getSheetJsSource();
+  });
+}
+
+/**
+ * SheetJS is ~486 KB minified, so it is not part of the startup bundle. The first Excel
+ * import fetches its source once and injects it; CSV imports never call this.
+ */
 async function loadSheetJsLib() {
-  // Bundled by tools/build.mjs from the pinned xlsx dependency (window.XLSX).
-  if (typeof XLSX !== 'undefined') return XLSX;
   if (typeof window !== 'undefined' && window.XLSX) return window.XLSX;
-  throw new Error('Excel parser is missing from this build. Please upload a .csv file.');
+  if (!sheetJsLoadPromise) {
+    sheetJsLoadPromise = requestSheetJsSource()
+      .then((source) => {
+        const script = document.createElement('script');
+        script.text = source;
+        document.head.appendChild(script);
+        script.remove();
+        if (typeof window === 'undefined' || !window.XLSX) {
+          throw new Error('the parser did not initialize');
+        }
+        return window.XLSX;
+      })
+      .catch((err) => {
+        // A transient failure must not poison the next import attempt.
+        sheetJsLoadPromise = null;
+        throw new Error(`Excel parser could not be loaded (${err.message}). Upload a .csv file instead.`);
+      });
+  }
+  return sheetJsLoadPromise;
 }
 
 async function parseUploadedTabularFile(file) {

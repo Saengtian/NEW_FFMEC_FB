@@ -168,6 +168,17 @@ const propertiesService = {
 
 const quietConsole = { log: () => {}, warn: () => {}, error: () => {} };
 
+const htmlService = {
+  content: "",
+  fail: false,
+  createHtmlOutputFromFile: (name) => ({
+    getContent: () => {
+      if (htmlService.fail) throw new Error(`missing ${name}.html`);
+      return htmlService.content;
+    }
+  })
+};
+
 const factory = new Function(
   "SpreadsheetApp",
   "Session",
@@ -194,6 +205,7 @@ return {
   listStateRevisions,
   loadStateRevision,
   exportRestoreSnapshot,
+  getSheetJsSource,
   refreshMirrorSheets,
   ensureAllTabs_,
   parseChunkGroup_
@@ -209,7 +221,7 @@ const api = factory(
   {},
   {},
   { PLAIN_TEXT: "text/plain" },
-  {},
+  htmlService,
   quietConsole
 );
 
@@ -881,6 +893,22 @@ check("a restore snapshot without a Google identity stops instead of writing", (
     assert.match(res.error, /identity/);
   } finally {
     session.email = saved;
+  }
+});
+
+check("the SheetJS source is read from its own HTML file on demand", () => {
+  htmlService.content = '<!-- built -->\n<script>\nwindow.XLSX = {};\n<\\/script>\n';
+  const res = api.getSheetJsSource();
+  equal(res.ok, true);
+  assert.match(res.source, /window\.XLSX/);
+
+  htmlService.fail = true;
+  try {
+    const failed = api.getSheetJsSource();
+    equal(failed.ok, false);
+    assert.match(failed.error, /could not be loaded/);
+  } finally {
+    htmlService.fail = false;
   }
 });
 

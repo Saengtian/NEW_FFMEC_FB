@@ -663,6 +663,23 @@ function exportRestoreSnapshot(payloadJson, sourceName) {
   }
 }
 
+/**
+ * Returns the SheetJS source to the browser on the first Excel import. Keeping
+ * the library in its own HTML file means Index.html does not download or parse
+ * the ~486 KB parser at startup; CSV imports never call this.
+ */
+function getSheetJsSource() {
+  try {
+    return { ok: true, source: HtmlService.createHtmlOutputFromFile('SheetJs').getContent() };
+  } catch (err) {
+    console.error('SheetJS source unavailable: ' + errorMessage_(err));
+    return {
+      ok: false,
+      error: 'Excel parser could not be loaded. Upload a .csv file instead.'
+    };
+  }
+}
+
 /** Installs (or repairs) the daily trigger. Idempotent: a second call replaces the first. */
 function installDailyBackupTrigger() {
   try {

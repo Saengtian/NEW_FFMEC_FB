@@ -1,10 +1,10 @@
 /**
  * Generated-bundle freshness check.
  *
- * Bundle.html and Styles.html are build products (`bun run build`) and the only
- * files Apps Script actually runs, so a commit that edits Part*.html, Icons.html
- * or Index.html without rebuilding would ship an artifact that does not match
- * the source in the same commit.
+ * Bundle.html, SheetJs.html and Styles.html are build products (`bun run build`)
+ * and the only generated files Apps Script actually runs, so a commit that edits
+ * Part*.html, Icons.html or Index.html without rebuilding would ship an artifact
+ * that does not match the source in the same commit.
  *
  * The check rebuilds and compares byte for byte. When they differ the checked-in
  * copy is put back, so the tests report a stale bundle instead of silently
@@ -21,7 +21,7 @@ import { join } from "node:path";
 import assert from "node:assert/strict";
 
 const ROOT = join(import.meta.dir, "..");
-const OUTPUTS = ["Bundle.html", "Styles.html"];
+const OUTPUTS = ["Bundle.html", "SheetJs.html", "Styles.html"];
 
 const committed = new Map(OUTPUTS.map((name) => [name, readFileSync(join(ROOT, name))]));
 const build = spawnSync(process.execPath, ["tools/build.mjs"], { cwd: ROOT, encoding: "utf8" });
