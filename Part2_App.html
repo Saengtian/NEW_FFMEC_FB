@@ -584,6 +584,22 @@ function App() {
           }
           if (backfillNotes.length > 0) saveSchedulerRef.current.schedule(backfillNotes);
           if (showNotice) showToast(`Reloaded workspace from Google Sheet (Rev #${res.revision || 1})`, 'success');
+
+          // Self-healing SignOffLog: a save whose ledger append failed cannot fail
+          // the save (the revision is real), so the missing rows are repaired here.
+          // The server answers from two small reads when the ledger is in sync and
+          // only replays the archived revisions when the row count disagrees.
+          window.google.script.run
+            .withSuccessHandler((repair) => {
+              if (repair && repair.appended > 0) {
+                showToast(
+                  `Restored ${repair.appended} gate decision${repair.appended === 1 ? '' : 's'} missing from the sign-off ledger.`,
+                  'success'
+                );
+              }
+            })
+            .withFailureHandler(() => {})
+            .reconcileSignOffLedger();
         } else {
           // First run on an empty Sheet: seed baseline data automatically
           hasLoadedCloudRef.current = true;

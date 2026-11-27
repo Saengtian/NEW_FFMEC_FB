@@ -86,6 +86,10 @@ Gate decisions are the audit record. Do them carefully.
 - Do not attach a plan or an email thread as evidence; attach the artefact.
 - Do not delete a criterion comment after signing — the ledger already holds the decision.
 
+**If a signature does not appear in the ledger**: nothing to do by hand. A save never fails because the
+ledger append did; the next time the app loads it restores the missing decisions itself and says how
+many it restored.
+
 **If a gate is blocked**: the dependency matrix and the Gantt both show which upstream gate holds it.
 Clearing the upstream gate is the only unblock path.
 

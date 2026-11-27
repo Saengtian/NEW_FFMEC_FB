@@ -187,6 +187,9 @@ return {
   saveWorkspaceState,
   loadWorkspaceState,
   getSignOffLedger,
+  reconcileSignOffLedger,
+  historySnapshots_,
+  missingSignOffLedgerRows_,
   getServerInfo,
   listStateRevisions,
   loadStateRevision,
@@ -708,6 +711,154 @@ check("an empty ledger reads as an empty list rather than an error", () => {
   const ledger = api.getSignOffLedger();
   equal(ledger.ok, true);
   deep(ledger.rows, []);
+});
+
+// ---------------------------------------------------------------------------
+// 4. Self-healing ledger: reconcile replays the archived revisions
+// ---------------------------------------------------------------------------
+
+const EXPECTED_PROP = "FFM_SIGN_OFF_LEDGER_ROWS";
+const signEngineer = (decision, extra = {}) =>
+  save({
+    payload: payloadOf({
+      gateRecords: gateRecordsWith([{ name: "Engineer", role: "NPI Engineer", decision, ...extra }])
+    }),
+    as: "engineer@minebea.co.th",
+    revision: extra.revision
+  });
+
+check("a ledger that is already complete reconciles nothing", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  signEngineer("Approved", { revision: 1 });
+  const before = JSON.stringify(ledgerData());
+  const repair = api.reconcileSignOffLedger();
+  equal(repair.ok, true);
+  equal(repair.appended, 0);
+  equal(repair.inSync, true);
+  equal(JSON.stringify(ledgerData()), before);
+});
+
+check("a failed append is repaired with the row the save would have written", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  sheetOf("SignOffLog").failSetValuesFromRow = 2;
+  const failed = signEngineer("Approved", { revision: 1, remark: "line released" });
+  equal(failed.ok, true, `the save itself still succeeds: ${failed.error || ""}`);
+  equal(ledgerData().length, 0, "the append really did fail");
+  sheetOf("SignOffLog").failSetValuesFromRow = 0; // the outage ends
+
+  const repair = api.reconcileSignOffLedger();
+  equal(repair.ok, true, `reconcile failed: ${repair.error || ""}`);
+  equal(repair.appended, 1);
+
+  const row = ledgerData()[0];
+  equal(row[0], failed.lastSavedAt, "the decision's own timestamp, not the repair time");
+  equal(Number(row[1]), 2, "the revision that recorded it");
+  equal(row[2], "PRJ-X4151");
+  equal(row[3], "X4151");
+  equal(row[4], LINE_KEY);
+  equal(row[5], "G4 MBO & OK2B");
+  equal(row[6], "Engineer");
+  equal(row[7], "NPI Engineer");
+  equal(row[8], "Approved");
+  equal(row[9], "line released");
+  equal(row[10], "engineer@minebea.co.th");
+
+  const again = api.reconcileSignOffLedger();
+  equal(again.appended, 0, "reconciling twice does not duplicate the row");
+  equal(ledgerData().length, 1);
+});
+
+check("a gap is still repaired after later saves have moved the store on", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  sheetOf("SignOffLog").failSetValuesFromRow = 2;
+  const failed = signEngineer("Approved", { revision: 1 });
+  equal(ledgerData().length, 0);
+  sheetOf("SignOffLog").failSetValuesFromRow = 0; // the next save appends normally
+
+  // A later save that changes no gate: it appends nothing, so the gap survives it.
+  ownerSave(payloadOf({ tasks: [] }), 2);
+  equal(ledgerData().length, 0);
+
+  const repair = api.reconcileSignOffLedger();
+  equal(repair.appended, 1);
+  equal(Number(ledgerData()[0][1]), 2, "attributed to the revision that made the decision");
+  equal(ledgerData()[0][0], failed.lastSavedAt);
+});
+
+check("seeded dossiers are never invented into the ledger", () => {
+  reset();
+  // The seed ships demo approvals; they were never a signature and the save path
+  // deliberately logs nothing for the state that created them.
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([{ name: "Quality", role: "Quality Engineer", decision: "Approved" }]) }));
+  ownerSave(payloadOf({ tasks: [] }), 1);
+  ownerSave(payloadOf({ tasks: [], productionRecords: [] }), 2);
+  equal(ledgerData().length, 0);
+
+  // Force the expensive path: the counter disagrees with the tab.
+  store.properties[EXPECTED_PROP] = "7";
+  const repair = api.reconcileSignOffLedger();
+  equal(repair.ok, true);
+  equal(repair.appended, 0, "an unchanged seed is not a missing decision");
+  equal(ledgerData().length, 0);
+  equal(repair.rebaselined, true, "the counter is re-based so the check stays cheap");
+});
+
+check("an erased signature is not rebuilt as a decision", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  signEngineer("Approved", { revision: 1 });
+  equal(ledgerData().length, 1);
+  // The signer withdraws their own decision: no new decision, so no new row.
+  save({ payload: payloadOf({ gateRecords: gateRecordsWith([]) }), as: "engineer@minebea.co.th", revision: 2 });
+  equal(ledgerData().length, 1);
+
+  store.properties[EXPECTED_PROP] = "4";
+  const repair = api.reconcileSignOffLedger();
+  equal(repair.appended, 0);
+  equal(ledgerData().length, 1);
+});
+
+check("reconcile refuses without an identity, under a save lock, and on an empty store", () => {
+  reset();
+  session.email = "";
+  const denied = api.reconcileSignOffLedger();
+  equal(denied.ok, false);
+  assert.match(denied.error, /Sign-in required/);
+
+  reset();
+  ownerSave(payloadOf());
+  lock.busy = true;
+  const locked = api.reconcileSignOffLedger();
+  equal(locked.ok, false);
+  equal(locked.locked, true);
+  lock.busy = false;
+
+  reset();
+  const empty = api.reconcileSignOffLedger();
+  equal(empty.ok, false);
+  assert.match(empty.error, /has not been saved yet/);
+});
+
+check("the repaired row is only built from adjacent revisions", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  sheetOf("SignOffLog").failSetValuesFromRow = 2;
+  signEngineer("Approved", { revision: 1 });
+  sheetOf("SignOffLog").failSetValuesFromRow = 0;
+  ownerSave(payloadOf({ tasks: [] }), 2);
+
+  const history = sheetOf("_FFM_STATE_HISTORY");
+  // Drop revision 1 from the archive: the pair that made the decision is gone, so
+  // the revision-2 snapshot must not be diffed against revision 3 instead.
+  history.rows = history.rows.filter((row) => Number(row[1]) !== 1);
+  store.properties[EXPECTED_PROP] = "9";
+
+  const repair = api.reconcileSignOffLedger();
+  equal(repair.appended, 0, "no decision is attributed to a revision that did not make it");
+  equal(ledgerData().length, 0);
 });
 
 // ---------------------------------------------------------------------------

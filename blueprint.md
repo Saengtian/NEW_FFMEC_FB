@@ -128,6 +128,7 @@ edit → setState → debounce → buildWorkspacePayload() → JSON
 | `refreshMirrorSheets()` / `readMirrorStatus_()` | Rebuild the human-readable tabs from the store |
 | `getServerInfo()` | Spreadsheet id/URL, web app URL, user email |
 | `getSignOffLedger()` | Read-only `SignOffLog` rows + tab URL, for the ledger view and its reconciliation |
+| `reconcileSignOffLedger()` | Self-healing ledger: replays the archived revisions, appends decisions the tab is missing, runs at app load under the save lock |
 | `exportStateBackup()` | Trigger handler and *Back up now*: writes the store to a dated JSON file in Drive, then prunes |
 | `installDailyBackupTrigger()` | Idempotent daily 01:30 trigger on `exportStateBackup` (replaces any earlier one) |
 | `backupFileName_` / `backupFilesToDelete_` / `buildStateBackup_` | Pure naming, retention and file-shape rules the trigger is made of |
@@ -155,6 +156,16 @@ Rows are derived by diffing the gate records already on file against the incomin
 that changes nothing writes nothing. The rows are built before the store is rewritten; the append runs
 after it commits, so a failed append is not reported as a failed save — the response carries `warnings`
 and `AuditLog` gets a `SIGN_OFF_LEDGER_ERROR` row naming the decisions missing from the ledger.
+
+That warning is not the end of it. Script properties keep `FFM_SIGN_OFF_LEDGER_ROWS`, the number of rows
+the tab should hold once a save's decisions are in it (incremented even when the append failed). On app
+load the client calls `reconcileSignOffLedger()`: under the save lock it compares that count with the tab
+and, only when they disagree, replays the archived revisions — each adjacent pair, newest one being the
+live store — rebuilding every changed decision the ledger does not already hold with the same timestamp,
+revision, gate label, role and signed-in email the save would have written. Seeded dossiers were never a
+signature and an erased one is not a decision, so neither produces a row; a second pass appends nothing.
+The repair is bounded by `HISTORY_LIMIT`: a gap older than the archived window is reported, never
+guessed at.
 
 `AuditLog` — one row per save: `Timestamp, UserEmail, Revision, Action, Summary, Executor`.
 
@@ -219,7 +230,7 @@ owner, reads the store and never writes to it, so a backup run cannot change a r
 | `test-signoff-ledger` | The append-only ledger's client-side view |
 | `test-server-permissions` | Program ownership, roster ownership and signature rules |
 | `test-state-backup` | Drive backup naming, pruning and the manifest scopes |
-| `test-code-js` | Code.js run against a mocked `SpreadsheetApp`: chunked state read/write, save permissions through the real save path, and the SignOffLog append (including an append that fails after the store committed) |
+| `test-code-js` | Code.js run against a mocked `SpreadsheetApp`: chunked state read/write, save permissions through the real save path, the SignOffLog append (including one that fails after the store committed) and its repair on the next reconcile, including a gap that later saves have moved past |
 | `test-generated-bundle` | `Bundle.html` / `Styles.html` match a fresh build byte for byte |
 
 Most suites are Node scripts that read the source files and assert behaviour of pure helpers. The
@@ -266,3 +277,7 @@ bun run build → clasp push -f (12 files) → clasp version "deploy <sha>"
 4. **History is coarse.** Five whole-store snapshots; no per-record audit of spec edits.
 5. **Bundle size.** ~1.3 MB inline script, including SheetJS; startup on weak hardware is measurable
    and splitting is the obvious relief valve.
+6. **Ledger repair is bounded by history.** Reconcile can only rebuild decisions whose pair of
+   snapshots still sits in `_FFM_STATE_HISTORY`; a gap older than those five revisions is reported as
+   unreconciled rather than reconstructed from the current state, which would make a seed look like a
+   signature.

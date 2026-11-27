@@ -40,6 +40,11 @@ const CONFIG = {
   HISTORY_LIMIT: 5,
   MIRROR_REVISION_PROP: 'FFM_MIRROR_REVISION',
   MIRROR_REFRESHED_PROP: 'FFM_MIRROR_REFRESHED_AT',
+  // Rows the SignOffLog should hold once every decision a save produced is in it.
+  // A failed append leaves the tab short of this count, which is how the
+  // self-healing reconcile step notices there is work to do without reading the
+  // history on every load.
+  SIGN_OFF_LEDGER_COUNT_PROP: 'FFM_SIGN_OFF_LEDGER_ROWS',
   // Daily state backup: one dated JSON file per run in this Drive folder, and
   // only the newest BACKUP_KEEP survive, so the folder cannot grow without limit.
   BACKUP_FOLDER_NAME: 'FFM NPI Ops State Backups',
@@ -351,6 +356,13 @@ function getSignOffLedger() {
     return { ok: true, rows: [], sheetUrl: sheetUrl, readAt: readAt, userEmail: userEmail };
   }
 
+  return { ok: true, rows: readSignOffLedgerRows_(ss), sheetUrl: sheetUrl, readAt: readAt, userEmail: userEmail };
+}
+
+/** The ledger tab as plain objects. Read-only: never creates the tab or a lock. */
+function readSignOffLedgerRows_(ss) {
+  const sheet = ss.getSheetByName(CONFIG.SIGN_OFF_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) return [];
   const values = sheet
     .getRange(2, 1, sheet.getLastRow() - 1, SIGN_OFF_LEDGER_HEADERS.length)
     .getValues();
@@ -378,8 +390,32 @@ function getSignOffLedger() {
       signedInEmail: cell(10)
     });
   }
+  return rows;
+}
 
-  return { ok: true, rows: rows, sheetUrl: sheetUrl, readAt: readAt, userEmail: userEmail };
+/** Rows the ledger holds, header excluded. */
+function ledgerRowCount_(ss) {
+  const sheet = ss.getSheetByName(CONFIG.SIGN_OFF_SHEET);
+  return sheet && sheet.getLastRow() > 1 ? sheet.getLastRow() - 1 : 0;
+}
+
+function readLedgerExpectation_() {
+  try {
+    return Number(PropertiesService.getScriptProperties().getProperty(CONFIG.SIGN_OFF_LEDGER_COUNT_PROP)) || 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
+function markLedgerExpectation_(count) {
+  try {
+    const value = String(Math.max(0, Number(count) || 0));
+    const patch = {};
+    patch[CONFIG.SIGN_OFF_LEDGER_COUNT_PROP] = value;
+    PropertiesService.getScriptProperties().setProperties(patch);
+  } catch (err) {
+    // Losing the counter only costs a cheaper reconcile path, never the ledger.
+  }
 }
 
 /**
@@ -1272,6 +1308,12 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       executorEmail
     ]);
 
+    // What the ledger should hold once this save's decisions are in it. A failed
+    // append leaves the tab short of this number, which is the signal the
+    // reconcile step on the next load acts on.
+    const ledgerBefore = ledgerRowCount_(ss);
+    const ledgerExpected = Math.max(readLedgerExpectation_(), ledgerBefore) + signOffRows.length;
+
     // Append-only gate decision ledger, written under the same lock as the store
     // it describes. Nothing in this path edits or deletes an existing row.
     // The store above is already committed, so a failure here cannot be reported
@@ -1280,6 +1322,7 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
     // save. The failure is logged, recorded in AuditLog and returned as a
     // warning — reported, never swallowed.
     const ledger = appendSignOffLedgerSafely_(ss, signOffRows);
+    markLedgerExpectation_(ledgerExpected);
     if (!ledger.ok) {
       try {
         auditSheet.appendRow([
@@ -1394,6 +1437,233 @@ function appendSignOffLedgerSafely_(ss, rows) {
     const message = errorMessage_(err);
     console.error('SignOffLog append failed after the state store committed: ' + message);
     return { ok: false, appended: 0, error: message };
+  }
+}
+
+/**
+ * Ledger identity of one decision: the revision that recorded it plus the four
+ * things the row names. Two epochs of the same approver on the same gate are two
+ * rows, so the revision is part of the key; without it a re-approval would look
+ * like a duplicate of the earlier one.
+ */
+function ledgerRowKey_(revision, programId, line, gate, approver, decision) {
+  return [
+    String(Number(revision) || 0),
+    String(programId || '').trim(),
+    String(line || '').trim(),
+    String(gate || '').trim(),
+    identityKey_(approver),
+    String(decision || '').trim()
+  ].join('\u0000');
+}
+
+/**
+ * Every archived revision as a snapshot, oldest first, parsed like the live store.
+ * A snapshot whose chunks do not reassemble is dropped rather than guessed at.
+ */
+function historySnapshots_(rows) {
+  const byRevision = new Map();
+  (rows || []).forEach(function(row) {
+    const revision = Number(row[1]) || 0;
+    const key = String(row[0] || '').trim();
+    if (!revision || !key) return;
+    let snapshot = byRevision.get(revision);
+    if (!snapshot) {
+      snapshot = { revision: revision, savedAt: '', savedBy: '', chunks: {} };
+      byRevision.set(revision, snapshot);
+    }
+    if (!snapshot.chunks[key]) snapshot.chunks[key] = [];
+    snapshot.chunks[key].push({
+      idx: Number(row[2]) || 0,
+      count: Number(row[3]) || 0,
+      text: String(row[5] || '')
+    });
+    if (!snapshot.savedAt && row[4]) snapshot.savedAt = String(row[4]);
+    if (!snapshot.savedBy && row[6]) snapshot.savedBy = String(row[6]);
+  });
+
+  const snapshots = [];
+  byRevision.forEach(function(snapshot) {
+    const data = {};
+    let corrupted = false;
+    PERSISTED_SLICES.forEach(function(slice) {
+      const parsed = parseChunkGroup_(snapshot.chunks[slice]);
+      if (parsed.ok) data[slice] = parsed.value;
+      else if (!parsed.missing) corrupted = true;
+    });
+    if (corrupted) return;
+    const meta = parseChunkGroup_(snapshot.chunks['__META__']);
+    const metaValue = meta.ok && meta.value ? meta.value : {};
+    snapshots.push({
+      revision: snapshot.revision,
+      savedAt: String(metaValue.lastSavedAt || snapshot.savedAt || ''),
+      savedBy: String(metaValue.lastSavedBy || snapshot.savedBy || ''),
+      data: data
+    });
+  });
+  return snapshots.sort(function(a, b) {
+    return a.revision - b.revision;
+  });
+}
+
+/**
+ * Decisions a consecutive pair of snapshots recorded that the ledger does not
+ * hold. The rows are built exactly as the save would have built them — same
+ * timestamp, revision, gate label, role and signed-in email — so a repaired row
+ * is indistinguishable from one the failed append would have written.
+ *
+ * Only decisions are repaired: an erased signature has no decision to record, and
+ * the ledger is append-only.
+ */
+function missingSignOffLedgerRows_(snapshots, ledgerRows) {
+  const known = {};
+  (ledgerRows || []).forEach(function(row) {
+    if (row && row.decision) {
+      known[ledgerRowKey_(row.revision, row.programId, row.line, row.gate, row.approver, row.decision)] = true;
+    }
+  });
+
+  const out = [];
+  const seen = {};
+  for (let i = 1; i < (snapshots || []).length; i += 1) {
+    const previous = snapshots[i - 1];
+    const next = snapshots[i];
+    // Only adjacent revisions are a save. A gap means the history no longer holds
+    // the state that save replaced, and diffing across it would attribute one
+    // save's decisions to another revision.
+    if (next.revision !== previous.revision + 1) continue;
+
+    const models = {};
+    (next.data.projects || []).forEach(function(project) {
+      if (project && project.id) models[project.id] = String(project.model || '');
+    });
+    // The save recorded the signer's roster role and the saver's email; both are
+    // derived here from the same roster the save read.
+    const actor = rosterMemberFor_(next.data.teamMembers, next.savedBy);
+
+    signOffSignatureEdits_(previous.data.gateRecords, next.data.gateRecords)
+      .filter(function(edit) {
+        return edit.kind === 'decision';
+      })
+      .forEach(function(edit) {
+        const gate = GATE_LEDGER_LABELS[edit.gateId] || edit.gateId;
+        const key = ledgerRowKey_(next.revision, edit.projectId, edit.line, gate, edit.approver, edit.decision);
+        if (known[key] || seen[key]) return;
+        seen[key] = true;
+        out.push([
+          next.savedAt || new Date().toISOString(),
+          next.revision,
+          edit.projectId,
+          models[edit.projectId] || '',
+          edit.line,
+          gate,
+          edit.approver,
+          String((actor && actor.role) || edit.role || ''),
+          edit.decision,
+          edit.remark,
+          String(next.savedBy || '')
+        ]);
+      });
+  }
+  return out;
+}
+
+/**
+ * Self-healing SignOffLog.
+ *
+ * A save appends the ledger after the state store has committed, so an append that
+ * fails cannot fail the save: the revision is real and the client must not retry
+ * it. The gap that leaves is repaired here — on the next load, under the same lock
+ * a save takes, by replaying the archived revisions against the tab and appending
+ * only the decisions that are missing.
+ *
+ * The cheap check comes first: script properties remember how many rows the tab
+ * should hold, so a healthy store returns after two small reads and never touches
+ * the history. Only a count mismatch pays for the replay.
+ */
+function reconcileSignOffLedger() {
+  const userEmail = getActiveUserEmail_();
+  if (!userEmail) {
+    return { ok: false, appended: 0, error: 'Sign-in required: the ledger is only readable by the accessing domain account.' };
+  }
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) {
+    return { ok: false, appended: 0, locked: true, error: 'Another user is currently saving to the Google Sheet. Please retry in a few seconds.' };
+  }
+
+  try {
+    const ss = getSpreadsheet_();
+    const state = loadWorkspaceState();
+    if (!state.initialized) {
+      return {
+        ok: false,
+        appended: 0,
+        corrupted: Boolean(state.corrupted),
+        error: state.error || 'The workspace store has not been saved yet, so there is no ledger to reconcile.'
+      };
+    }
+
+    const actual = ledgerRowCount_(ss);
+    const expected = readLedgerExpectation_();
+    if (actual === expected) {
+      return { ok: true, appended: 0, revision: state.revision, inSync: true };
+    }
+
+    const historySheet = ss.getSheetByName(CONFIG.STATE_HISTORY_SHEET);
+    const snapshots = historySheet && historySheet.getLastRow() >= 2
+      ? historySnapshots_(historySheet.getRange(2, 1, historySheet.getLastRow() - 1, 7).getValues())
+          .filter(function(snapshot) { return snapshot.revision < state.revision; })
+      : [];
+
+    // Nothing to replay against: the tab disagrees with the counter, but the state
+    // that would say what is missing is gone. Report it instead of inventing rows.
+    if (snapshots.length === 0) {
+      return {
+        ok: true,
+        appended: 0,
+        revision: state.revision,
+        inSync: false,
+        reason: 'No archived revision to compare against, so the ledger was left as it is.'
+      };
+    }
+
+    snapshots.push({
+      revision: state.revision,
+      savedAt: String(state.lastSavedAt || ''),
+      savedBy: String(state.lastSavedBy || ''),
+      data: state.data
+    });
+
+    const rows = missingSignOffLedgerRows_(snapshots, readSignOffLedgerRows_(ss));
+    if (rows.length === 0) {
+      // The gap was not a missing decision (a hand-added row, or an append that
+      // was written and then cleared). Re-baseline so the check stays cheap.
+      markLedgerExpectation_(actual);
+      return { ok: true, appended: 0, revision: state.revision, inSync: true, rebaselined: true };
+    }
+
+    const appended = appendSignOffLedger_(ss, rows);
+    markLedgerExpectation_(actual + appended);
+
+    try {
+      getOrCreateSheet_(ss, CONFIG.AUDIT_SHEET).appendRow([
+        new Date().toISOString(),
+        userEmail,
+        state.revision,
+        'SIGN_OFF_LEDGER_RECONCILED',
+        safeSheetText_(appended + ' gate decision(s) restored to SignOffLog from the archived revisions'),
+        getExecutorEmail_()
+      ]);
+    } catch (err) {
+      console.error('AuditLog could not record the ledger reconciliation: ' + errorMessage_(err));
+    }
+
+    return { ok: true, appended: appended, revision: state.revision, inSync: true };
+  } catch (err) {
+    return { ok: false, appended: 0, error: errorMessage_(err) };
+  } finally {
+    lock.releaseLock();
   }
 }
 
