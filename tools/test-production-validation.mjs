@@ -1,0 +1,319 @@
+/**
+ * Checks for the shared production-record rules.
+ *
+ * The form, the CSV / hydration loader and the save handler all judge a row with
+ * `productionRecordIssues` / `sanitizeProductionRecords`, so these cases are the
+ * contract every entry point has to meet:
+ *
+ *  - a good quantity above the input, or rejects that would make good negative,
+ *    is refused
+ *  - a non-positive input or planned time is refused (every yield and UPH
+ *    divides by them)
+ *  - a negative downtime is repairable: the row is kept with the value zeroed
+ *  - the same date × line × station cannot be counted twice — the duplicate is
+ *    refused in the form and dropped on load, and editing a row never clashes
+ *    with itself
+ *  - the seeded demo records pass the same rules, so the app does not greet a
+ *    fresh workspace by dropping its own data
+ *
+ * The helpers are read straight out of Part1_Data.html — the same text
+ * tools/build.mjs compiles — so the tests cannot drift from a copy of a rule.
+ * Tooling only: tools/** is in .claspignore, so nothing here ships to Apps Script.
+ *
+ * Run: bun tools/test-production-validation.mjs
+ */
+
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import assert from "node:assert/strict";
+
+const ROOT = join(import.meta.dir, "..");
+const source = readFileSync(join(ROOT, "Part1_Data.html"), "utf8");
+
+/** Top-level declarations the rules are made of. Functions end at column 0. */
+const DECLARATIONS = [
+  /const PRODUCTION_RECORD_ISSUES = \{[\s\S]*?\n\};/,
+  /function computeProductionMetrics\([\s\S]*?\n}/,
+  /function productionLineKey\([\s\S]*?\n}/,
+  /function productionRecordLabel\([\s\S]*?\n}/,
+  /function productionRecordGoodUnits\([\s\S]*?\n}/,
+  /function productionRecordIssues\([\s\S]*?\n}/,
+  /function productionRecordBlockingIssues\([\s\S]*?\n}/,
+  /function clampProductionDowntime\([\s\S]*?\n}/,
+  /function sanitizeProductionRecords\([\s\S]*?\n}/,
+  /const INITIAL_PRODUCTION_RECORDS = \[[\s\S]*?\n\];/,
+];
+
+const pieces = DECLARATIONS.map((pattern) => {
+  const match = source.match(pattern);
+  if (!match) {
+    console.error(`Part1_Data.html no longer declares ${pattern} — update this test, the rule moved.`);
+    process.exit(1);
+  }
+  return match[0];
+});
+
+const api = new Function(
+  `"use strict";\n${pieces.join("\n")}\n` +
+    "return { PRODUCTION_RECORD_ISSUES, computeProductionMetrics, productionLineKey, productionRecordLabel, " +
+    "productionRecordGoodUnits, productionRecordIssues, productionRecordBlockingIssues, clampProductionDowntime, " +
+    "sanitizeProductionRecords, INITIAL_PRODUCTION_RECORDS };"
+)();
+
+const {
+  PRODUCTION_RECORD_ISSUES,
+  computeProductionMetrics,
+  productionLineKey,
+  productionRecordLabel,
+  productionRecordGoodUnits,
+  productionRecordIssues,
+  productionRecordBlockingIssues,
+  clampProductionDowntime,
+  sanitizeProductionRecords,
+  INITIAL_PRODUCTION_RECORDS,
+} = api;
+
+const codes = (issues) => issues.map((issue) => issue.code);
+
+/** A row that describes a real run unless a case overrides a field. */
+const record = (overrides = {}) => ({
+  id: "REC-TEST-1",
+  model: "X4151",
+  phase: "EVT",
+  station: "Fan Assembly",
+  config: "ME11",
+  side: "RHS",
+  date: "2026-11-20",
+  input: 500,
+  plannedTimeHr: 1.5,
+  defectItems: [
+    { id: "d1", mode: "Z Para OOS", falloutQty: 12, salvageQty: 8 },
+  ],
+  downtimeEvents: [{ id: "dt1", category: "Equipment / Machine", reason: "Fixture", durationMin: 8 }],
+  ...overrides,
+});
+
+const results = [];
+function check(label, fn) {
+  try {
+    fn();
+    results.push({ label, ok: true });
+  } catch (error) {
+    results.push({ label, ok: false, message: error.message });
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+check("the seeded demo records pass the rules and are unique", () => {
+  assert.equal(INITIAL_PRODUCTION_RECORDS.length > 0, true);
+  INITIAL_PRODUCTION_RECORDS.forEach((row) => {
+    const issues = productionRecordBlockingIssues(row, null, null);
+    assert.deepEqual(issues.map((issue) => issue.code), [], `${row.id} is rejected by its own seed`);
+  });
+  const cleaned = sanitizeProductionRecords(INITIAL_PRODUCTION_RECORDS);
+  assert.equal(cleaned.dropped.length, 0, `the seed loses ${cleaned.dropped.length} row(s) on load`);
+  assert.equal(cleaned.records.length, INITIAL_PRODUCTION_RECORDS.length);
+  assert.equal(cleaned.repaired, 0);
+});
+
+check("a well-formed row has no issues at all", () => {
+  assert.deepEqual(productionRecordIssues(record()), []);
+  assert.deepEqual(productionRecordBlockingIssues(record()), []);
+});
+
+check("an input of zero or a missing input is refused", () => {
+  [0, -5, "", null, undefined, "abc"].forEach((input) => {
+    const issues = productionRecordIssues(record({ input }));
+    assert.deepEqual(codes(issues), [PRODUCTION_RECORD_ISSUES.INPUT_NOT_POSITIVE], `input=${String(input)}`);
+    assert.equal(issues[0].severity, "block");
+    assert.equal(issues[0].field, "input");
+    assert.match(issues[0].message, /above zero/);
+  });
+});
+
+check("planned time of zero or less is refused", () => {
+  [0, -1, "", null, "n/a"].forEach((plannedTimeHr) => {
+    const issues = productionRecordIssues(record({ plannedTimeHr }));
+    assert.deepEqual(codes(issues), [PRODUCTION_RECORD_ISSUES.PLANNED_HOURS_MISSING], `planned=${String(plannedTimeHr)}`);
+    assert.equal(issues[0].field, "plannedTimeHr");
+    assert.match(issues[0].message, /greater than zero/);
+  });
+});
+
+check("good units above the input are refused, from a reading or from rejects", () => {
+  const claimed = productionRecordIssues(record({ goodQty: 501 }));
+  assert.deepEqual(codes(claimed), [PRODUCTION_RECORD_ISSUES.GOOD_EXCEEDS_INPUT]);
+  assert.match(claimed[0].message, /cannot exceed the input \(500\)/);
+
+  // A row that carries its own good count is judged on it, whatever the defects say.
+  assert.equal(productionRecordGoodUnits(record({ good: 480 })), 480);
+  assert.equal(productionRecordGoodUnits(record({ finalGood: 0 })), 0);
+  assert.equal(productionRecordGoodUnits(record()), null);
+
+  const rejected = productionRecordIssues(
+    record({ input: 10, defectItems: [{ id: "d1", mode: "Crack", falloutQty: 12, salvageQty: 0 }] })
+  );
+  assert.deepEqual(codes(rejected), [PRODUCTION_RECORD_ISSUES.GOOD_EXCEEDS_INPUT]);
+  assert.match(rejected[0].message, /Rejects \(12\) exceed the input \(10\)/);
+
+  // Salvage can never lift good above the input: it is capped at the fallout.
+  const salvaged = productionRecordIssues(
+    record({ input: 100, defectItems: [{ id: "d1", mode: "Crack", falloutQty: 5, salvageQty: 999 }] })
+  );
+  assert.deepEqual(codes(salvaged), []);
+});
+
+check("a negative good count is refused", () => {
+  const issues = productionRecordIssues(record({ goodQty: -1 }));
+  assert.deepEqual(codes(issues), [PRODUCTION_RECORD_ISSUES.GOOD_NEGATIVE]);
+  assert.equal(issues[0].field, "good");
+});
+
+check("negative downtime is repairable, not refused", () => {
+  const row = record({
+    downtimeEvents: [
+      { id: "dt1", category: "Equipment / Machine", reason: "Swap", durationMin: -12 },
+      { id: "dt2", category: "Material / IQC Hold", reason: "Wait", durationMin: 8 },
+    ],
+  });
+  const issues = productionRecordIssues(row);
+  assert.deepEqual(codes(issues), [PRODUCTION_RECORD_ISSUES.DOWNTIME_NEGATIVE]);
+  assert.equal(issues[0].severity, "clamp");
+  assert.match(issues[0].message, /-12 min/);
+  assert.deepEqual(productionRecordBlockingIssues(row), [], "a repairable issue does not block the save");
+
+  const clamped = clampProductionDowntime(row);
+  assert.equal(clamped.downtimeEvents[0].durationMin, 0);
+  assert.equal(clamped.downtimeEvents[1].durationMin, 8);
+  assert.equal(row.downtimeEvents[0].durationMin, -12, "the original row is left alone");
+  assert.equal(computeProductionMetrics(clamped).downtimeMin, 8);
+
+  const legacy = productionRecordIssues(record({ downtimeEvents: [], downtimeHr: -2 }));
+  assert.deepEqual(codes(legacy), [PRODUCTION_RECORD_ISSUES.DOWNTIME_NEGATIVE]);
+  assert.equal(clampProductionDowntime(record({ downtimeEvents: [], downtimeHr: -2 })).downtimeHr, 0);
+});
+
+check("the same date × line × station cannot be logged twice", () => {
+  const first = record();
+  const second = record({ id: "REC-TEST-2" });
+  const issues = productionRecordIssues(second, [first], null);
+  assert.deepEqual(codes(issues), [PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE]);
+  assert.match(issues[0].message, /X4151 · ME11 RHS · Fan Assembly · 2026-11-20/);
+
+  // A different side, station, date or model is a different measurement.
+  assert.deepEqual(codes(productionRecordIssues(record({ side: "LHS" }), [first], null)), []);
+  assert.deepEqual(codes(productionRecordIssues(record({ station: "Fan Test & Accessory" }), [first], null)), []);
+  assert.deepEqual(codes(productionRecordIssues(record({ date: "2026-11-21" }), [first], null)), []);
+  assert.deepEqual(codes(productionRecordIssues(record({ model: "X4152" }), [first], null)), []);
+
+  // Editing the row that is already on file must not clash with itself.
+  assert.deepEqual(codes(productionRecordIssues(first, [first], first.id)), []);
+  // …but an actual second copy still does.
+  assert.deepEqual(
+    codes(productionRecordIssues(second, [first, second], "REC-TEST-9")),
+    [PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE]
+  );
+
+  // Line identity is case- and space-insensitive.
+  assert.equal(
+    productionLineKey(record({ config: " me11 ", side: "rhs" })),
+    productionLineKey(record())
+  );
+  assert.equal(productionRecordLabel(first), "X4151 · ME11 RHS · Fan Assembly · 2026-11-20");
+});
+
+check("a row with no line identity at all does not collide with another", () => {
+  const blank = { input: 10, plannedTimeHr: 1, defectItems: [], downtimeEvents: [] };
+  const other = { input: 20, plannedTimeHr: 2, defectItems: [], downtimeEvents: [] };
+  assert.deepEqual(codes(productionRecordIssues(blank, [other], null)), []);
+});
+
+check("loading a list drops the rows the KPIs cannot trust", () => {
+  const good = record();
+  const duplicate = record({ id: "REC-DUP" });
+  const zeroHours = record({ id: "REC-NOHR", date: "2026-11-21", plannedTimeHr: 0 });
+  const impossibleGood = record({ id: "REC-GOOD", date: "2026-11-22", goodQty: 900 });
+  const negativeInput = record({ id: "REC-NEG", date: "2026-11-23", input: -3 });
+  const negativeDowntime = record({
+    id: "REC-DT",
+    date: "2026-11-24",
+    downtimeEvents: [{ id: "dt1", category: "Equipment / Machine", reason: "Swap", durationMin: -30 }],
+  });
+
+  const cleaned = sanitizeProductionRecords([
+    good,
+    duplicate,
+    zeroHours,
+    impossibleGood,
+    negativeInput,
+    negativeDowntime,
+    null,
+    "not a record",
+  ]);
+
+  assert.equal(cleaned.records.length, 2, "only the valid row and the repairable one survive");
+  assert.deepEqual(cleaned.records.map((row) => row.id), ["REC-TEST-1", "REC-DT"]);
+  assert.equal(cleaned.repaired, 1);
+  assert.equal(cleaned.records[1].downtimeEvents[0].durationMin, 0, "the repairable row is saved clean");
+
+  assert.equal(cleaned.dropped.length, 6);
+  const droppedCodes = cleaned.dropped.map((entry) => codes(entry.issues));
+  assert.deepEqual(droppedCodes[0], [PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE]);
+  assert.deepEqual(droppedCodes[1], [PRODUCTION_RECORD_ISSUES.PLANNED_HOURS_MISSING]);
+  assert.deepEqual(droppedCodes[2], [PRODUCTION_RECORD_ISSUES.GOOD_EXCEEDS_INPUT]);
+  assert.deepEqual(droppedCodes[3], [PRODUCTION_RECORD_ISSUES.INPUT_NOT_POSITIVE]);
+  assert.deepEqual(droppedCodes[4], [PRODUCTION_RECORD_ISSUES.NOT_A_RECORD]);
+  assert.deepEqual(droppedCodes[5], [PRODUCTION_RECORD_ISSUES.NOT_A_RECORD]);
+  assert.deepEqual(cleaned.dropped.map((entry) => entry.index), [1, 2, 3, 4, 6, 7]);
+
+  // Whatever the loader keeps is exactly what the form would have accepted.
+  cleaned.records.forEach((row) => assert.deepEqual(productionRecordBlockingIssues(row), []));
+});
+
+check("loading does not mutate the rows it keeps", () => {
+  const row = record({
+    downtimeEvents: [{ id: "dt1", category: "Equipment / Machine", reason: "Swap", durationMin: -5 }],
+  });
+  const before = JSON.stringify(row);
+  const cleaned = sanitizeProductionRecords([row]);
+  assert.equal(JSON.stringify(row), before);
+  assert.notEqual(cleaned.records[0], row, "the repaired row is a copy");
+});
+
+check("an empty or non-array load is an empty list, not an error", () => {
+  [undefined, null, "nope", 42].forEach((input) => {
+    const cleaned = sanitizeProductionRecords(input);
+    assert.deepEqual(cleaned.records, []);
+    assert.deepEqual(cleaned.dropped, []);
+    assert.equal(cleaned.repaired, 0);
+  });
+});
+
+check("the cleaned list and the metric helpers agree on what a run is", () => {
+  // The refusal exists so a tile never divides by these rows: prove the metrics
+  // would have produced a nonsense figure, which is what the rule prevents.
+  const zeroHours = record({ plannedTimeHr: 0 });
+  assert.equal(computeProductionMetrics(zeroHours).uph, 0);
+  assert.equal(computeProductionMetrics(zeroHours).efficiency, 0);
+  assert.equal(productionRecordBlockingIssues(zeroHours).length, 1);
+
+  const clean = computeProductionMetrics(record());
+  assert.equal(clean.fpy > 0 && clean.fpy < 100, true);
+  assert.equal(clean.efficiency > 0, true);
+});
+
+// ---------------------------------------------------------------------------
+
+let passed = 0;
+for (const result of results) {
+  if (result.ok) {
+    passed += 1;
+    console.log(`  pass  ${result.label}`);
+  } else {
+    console.log(`  FAIL  ${result.label}  (${result.message})\n`);
+  }
+}
+
+console.log(`\n${passed}/${results.length} production validation checks passed.`);
+if (passed !== results.length) process.exit(1);

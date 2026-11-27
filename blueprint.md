@@ -215,6 +215,7 @@ owner, reads the store and never writes to it, so a backup run cannot change a r
 | Gate sequence | `NPI_GATES`, `getDefaultScheduleForRow` | G1…G9 with plan dates; a drag that breaks order is refused |
 | Product matching | `normalizeProductKey`, `productMatchesProject` | Free-text products resolve to live programs; unmatched strings are flagged |
 | Workload | `computeTeamWorkload` | Open tasks on owned programs + gates still missing a signature |
+| Production record rules | `productionRecordIssues`, `sanitizeProductionRecords` (Part1) | Input above zero, good never above input, planned hours above zero, no negative downtime, no duplicate date × line × station |
 | Report model | `buildReportModel` (Part6) | Six KPIs, bars, Pareto, Cpk section, movement, deck HTML |
 
 ## 6. Testing
@@ -230,6 +231,7 @@ owner, reads the store and never writes to it, so a backup run cannot change a r
 | `test-signoff-ledger` | The append-only ledger's client-side view |
 | `test-server-permissions` | Program ownership, roster ownership and signature rules |
 | `test-state-backup` | Drive backup naming, pruning and the manifest scopes |
+| `test-production-validation` | The shared production-record rules: impossible input / good / planned hours, negative downtime, duplicate date × line × station, and the loader's drop-and-repair pass |
 | `test-code-js` | Code.js run against a mocked `SpreadsheetApp`: chunked state read/write, save permissions through the real save path, the SignOffLog append (including one that fails after the store committed) and its repair on the next reconcile, including a gap that later saves have moved past |
 | `test-generated-bundle` | `Bundle.html` / `Styles.html` match a fresh build byte for byte |
 

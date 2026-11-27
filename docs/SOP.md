@@ -101,9 +101,14 @@ Clearing the upstream gate is the only unblock path.
 2. Enter date, program, line, station, input quantity, good quantity, UPH and efficiency.
 3. Check the computed FPY/FY before saving; a mistyped input shows immediately as an impossible
    yield.
-4. Edit an existing row rather than adding a duplicate for the same date/line/station.
+4. Edit an existing row rather than adding a duplicate for the same date/line/station — the form refuses a
+   second record for the same date, line and station, and says which row it clashes with.
+5. The form also refuses an input or planned time of zero, good units above the input, and rejects that
+   would make good negative; a negative downtime is zeroed rather than saved.
 
-These rows feed the yield KPIs, the report and the deep dives. A wrong row is visible everywhere.
+These rows feed the yield KPIs, the report and the deep dives. A wrong row is visible everywhere, so the
+same rules run when the workspace is loaded: a stored row that breaks them is dropped (and reported in
+the toast) instead of being counted in the tiles and the printed deck.
 
 ---
 

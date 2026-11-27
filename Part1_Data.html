@@ -2141,6 +2141,234 @@ function computeProductionMetrics(rec) {
 }
 
 // ============================================================================
+// PRODUCTION RECORD VALIDATION
+//
+// One rule set for the three ways a row reaches the store — the form, a CSV /
+// hydration payload, and the write itself — so a row that cannot describe a real
+// run never reaches the KPI tiles or the printed deck. `block` means the row is
+// refused (the form will not save it, the loader drops it); `clamp` means the
+// value is repairable (a negative downtime becomes zero) and the row is kept.
+// ============================================================================
+
+const PRODUCTION_RECORD_ISSUES = {
+  INPUT_NOT_POSITIVE: 'input-not-positive',
+  PLANNED_HOURS_MISSING: 'planned-hours-missing',
+  GOOD_EXCEEDS_INPUT: 'good-exceeds-input',
+  GOOD_NEGATIVE: 'good-negative',
+  DOWNTIME_NEGATIVE: 'downtime-negative',
+  DUPLICATE_LINE: 'duplicate-line',
+  NOT_A_RECORD: 'not-a-record'
+};
+
+/** Normalises the five fields that name one measurement on one line. */
+function productionLineKey(record) {
+  const field = function(key) {
+    const value = record ? record[key] : '';
+    return String(value === null || value === undefined ? '' : value).trim().toUpperCase();
+  };
+  return [field('date'), field('model'), field('config'), field('side'), field('station')].join('\u0000');
+}
+
+/** "X4151 · ME11 RHS · Fan Assembly · 2026-11-20" — the row a duplicate clashes with. */
+function productionRecordLabel(record) {
+  const rec = record || {};
+  const line = [rec.config, rec.side].filter(Boolean).join(' ');
+  return [rec.model, line, rec.station, rec.date].filter(Boolean).join(' · ') || 'this record';
+}
+
+/**
+ * The good quantity a row claims. Records store fallout and salvage, so good
+ * units are normally derived (input − net reject); a row imported from a CSV that
+ * carries its own good count is judged on that number instead.
+ */
+function productionRecordGoodUnits(record) {
+  const rec = record || {};
+  const candidates = ['goodQty', 'goodUnits', 'good', 'finalGood'];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const raw = rec[candidates[i]];
+    if (raw === null || raw === undefined || raw === '') continue;
+    const value = Number(raw);
+    if (isFinite(value)) return value;
+  }
+  return null;
+}
+
+/**
+ * Every problem with one record. `peers` (the rows already on file) and
+ * `ignoreId` (the row being edited) are how the duplicate rule is judged; leave
+ * them out to check a row on its own.
+ */
+function productionRecordIssues(record, peers, ignoreId) {
+  const issues = [];
+  const rec = record && typeof record === 'object' ? record : null;
+  if (!rec) {
+    return [{
+      field: 'record',
+      code: PRODUCTION_RECORD_ISSUES.NOT_A_RECORD,
+      severity: 'block',
+      message: 'Record is not an object.'
+    }];
+  }
+
+  const input = Number(rec.input);
+  const hasInput = isFinite(input) && input > 0;
+  if (!hasInput) {
+    issues.push({
+      field: 'input',
+      code: PRODUCTION_RECORD_ISSUES.INPUT_NOT_POSITIVE,
+      severity: 'block',
+      message: 'Input quantity must be a whole number above zero — every yield divides by it.'
+    });
+  }
+
+  const plannedHr = Number(rec.plannedTimeHr);
+  if (!isFinite(plannedHr) || plannedHr <= 0) {
+    issues.push({
+      field: 'plannedTimeHr',
+      code: PRODUCTION_RECORD_ISSUES.PLANNED_HOURS_MISSING,
+      severity: 'block',
+      message: 'Planned time must be greater than zero — UPH and efficiency divide by it.'
+    });
+  }
+
+  const claimedGood = productionRecordGoodUnits(rec);
+  if (claimedGood !== null && claimedGood < 0) {
+    issues.push({
+      field: 'good',
+      code: PRODUCTION_RECORD_ISSUES.GOOD_NEGATIVE,
+      severity: 'block',
+      message: `Good units cannot be negative (${claimedGood}).`
+    });
+  }
+  if (hasInput && claimedGood !== null && claimedGood > input) {
+    issues.push({
+      field: 'good',
+      code: PRODUCTION_RECORD_ISSUES.GOOD_EXCEEDS_INPUT,
+      severity: 'block',
+      message: `Good units (${claimedGood}) cannot exceed the input (${input}).`
+    });
+  }
+  if (hasInput && claimedGood === null) {
+    const metrics = computeProductionMetrics(rec);
+    if (metrics.netReject > input) {
+      issues.push({
+        field: 'defectItems',
+        code: PRODUCTION_RECORD_ISSUES.GOOD_EXCEEDS_INPUT,
+        severity: 'block',
+        message: `Rejects (${metrics.netReject}) exceed the input (${input}), so good units would be negative.`
+      });
+    }
+  }
+
+  const events = Array.isArray(rec.downtimeEvents) ? rec.downtimeEvents : [];
+  const negativeEvents = events.filter(function(event) {
+    return event && Number(event.durationMin) < 0;
+  });
+  const legacyNegative = Number(rec.downtimeHr) < 0;
+  if (negativeEvents.length > 0 || legacyNegative) {
+    const worst = negativeEvents.reduce(function(min, event) {
+      return Math.min(min, Number(event.durationMin));
+    }, 0);
+    issues.push({
+      field: 'downtimeEvents',
+      code: PRODUCTION_RECORD_ISSUES.DOWNTIME_NEGATIVE,
+      severity: 'clamp',
+      message: negativeEvents.length > 0
+        ? `Downtime cannot be negative (${worst} min on ${negativeEvents.length} event${negativeEvents.length === 1 ? '' : 's'}); it was treated as zero.`
+        : 'Downtime cannot be negative; it was treated as zero.'
+    });
+  }
+
+  if (Array.isArray(peers)) {
+    const key = productionLineKey(rec);
+    const emptyKey = productionLineKey({});
+    if (key !== emptyKey) {
+      const clash = peers.some(function(peer) {
+        if (!peer || peer === rec) return false;
+        if (ignoreId && peer.id === ignoreId) return false;
+        if (rec.id && peer.id === rec.id) return false;
+        return productionLineKey(peer) === key;
+      });
+      if (clash) {
+        issues.push({
+          field: 'date',
+          code: PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE,
+          severity: 'block',
+          message: `${productionRecordLabel(rec)} already has a record — edit that row instead of logging a second one.`
+        });
+      }
+    }
+  }
+
+  return issues;
+}
+
+/** Only the problems that refuse the row; `clamp` issues are repairable. */
+function productionRecordBlockingIssues(record, peers, ignoreId) {
+  return productionRecordIssues(record, peers, ignoreId).filter(function(issue) {
+    return issue.severity !== 'clamp';
+  });
+}
+
+/** A copy of the record with every negative downtime zeroed. */
+function clampProductionDowntime(record) {
+  const rec = record || {};
+  const events = Array.isArray(rec.downtimeEvents) ? rec.downtimeEvents : [];
+  const clean = {
+    ...rec,
+    downtimeEvents: events.map(function(event) {
+      if (!event) return event;
+      return Number(event.durationMin) < 0 ? { ...event, durationMin: 0 } : event;
+    })
+  };
+  if (Number(rec.downtimeHr) < 0) clean.downtimeHr = 0;
+  return clean;
+}
+
+/**
+ * Filters a loaded list (Sheet load, CSV → store import, backup restore) down to
+ * rows the KPIs can trust. A row with a blocking problem is dropped rather than
+ * repaired — a duplicate or an impossible yield has no safe fix — and the caller
+ * reports the count and saves the cleaned list back. Repairable rows survive with
+ * their negative downtime zeroed.
+ */
+function sanitizeProductionRecords(records) {
+  const list = Array.isArray(records) ? records : [];
+  const kept = [];
+  const dropped = [];
+  const seen = {};
+  let repaired = 0;
+
+  list.forEach(function(record, index) {
+    const issues = productionRecordIssues(record, null, null);
+    const blocking = issues.filter(function(issue) { return issue.severity !== 'clamp'; });
+
+    if (blocking.length === 0) {
+      const key = productionLineKey(record);
+      if (key !== productionLineKey({}) && seen[key]) {
+        blocking.push({
+          field: 'date',
+          code: PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE,
+          severity: 'block',
+          message: `${productionRecordLabel(record)} repeats a row already loaded; the later copy was dropped so the run is not counted twice.`
+        });
+      }
+      if (blocking.length === 0) {
+        if (key !== productionLineKey({})) seen[key] = true;
+        const clampable = issues.some(function(issue) { return issue.severity === 'clamp'; });
+        kept.push(clampable ? clampProductionDowntime(record) : record);
+        if (clampable) repaired += 1;
+        return;
+      }
+    }
+
+    dropped.push({ index: index, record: record, issues: blocking });
+  });
+
+  return { records: kept, dropped: dropped, repaired: repaired };
+}
+
+// ============================================================================
 // GANTT TIMELINE HELPERS & SIDE-PRIORITY / READINESS SEQUENCING
 // ============================================================================
 

@@ -2417,7 +2417,7 @@ function NewTaskModal({ projects, members = [], onClose, onSubmit }) {
   );
 }
 
-function NewProductionRecordModal({ initialRecord = null, onClose, onSubmit }) {
+function NewProductionRecordModal({ initialRecord = null, existingRecords = [], onClose, onSubmit }) {
   const isEditing = Boolean(initialRecord);
   const [form, setForm] = useState(() =>
     initialRecord
@@ -2459,6 +2459,33 @@ function NewProductionRecordModal({ initialRecord = null, onClose, onSubmit }) {
   );
 
   const preview = computeProductionMetrics(form);
+
+  // The form, the CSV / hydration loader and the save handler all judge a row with
+  // this one rule set, so what the modal accepts is exactly what the store keeps.
+  const issues = productionRecordIssues(
+    {
+      id: initialRecord ? initialRecord.id : null,
+      model: form.model,
+      date: form.date,
+      config: form.config,
+      side: form.side,
+      station: form.station,
+      input: form.input,
+      plannedTimeHr: form.plannedTimeHr,
+      defectItems: form.defectItems,
+      downtimeEvents: form.downtimeEvents
+    },
+    existingRecords,
+    initialRecord ? initialRecord.id : null
+  );
+  const blockingIssues = issues.filter((issue) => issue.severity !== 'clamp');
+  const issueFields = new Set(blockingIssues.map((issue) => issue.field));
+  const fieldClass = (field, base) =>
+    `${base} ${
+      issueFields.has(field)
+        ? 'border-rose-400 dark:border-rose-600 bg-rose-50/50 dark:bg-rose-950/30'
+        : 'border-slate-200 dark:border-slate-800'
+    }`;
 
   const addDefectRow = () => {
     setForm((prev) => ({
@@ -2520,6 +2547,7 @@ function NewProductionRecordModal({ initialRecord = null, onClose, onSubmit }) {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!form.model.trim()) return;
+    if (blockingIssues.length > 0) return;
     onSubmit(form);
   };
 
@@ -2632,10 +2660,11 @@ function NewProductionRecordModal({ initialRecord = null, onClose, onSubmit }) {
               <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Input Qty</label>
               <input
                 type="number"
-                min="0"
+                min="1"
                 value={form.input}
                 onChange={(e) => setForm({ ...form, input: e.target.value })}
-                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg text-right tabular-nums"
+                aria-invalid={issueFields.has('input')}
+                className={fieldClass('input', 'w-full px-2.5 py-2 border rounded-lg text-right tabular-nums')}
               />
             </div>
           </div>
@@ -2645,11 +2674,12 @@ function NewProductionRecordModal({ initialRecord = null, onClose, onSubmit }) {
               <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Planned Time (hr)</label>
               <input
                 type="number"
-                min="0"
+                min="0.05"
                 step="0.05"
                 value={form.plannedTimeHr}
                 onChange={(e) => setForm({ ...form, plannedTimeHr: e.target.value })}
-                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg text-right tabular-nums"
+                aria-invalid={issueFields.has('plannedTimeHr')}
+                className={fieldClass('plannedTimeHr', 'w-full px-2.5 py-2 border rounded-lg text-right tabular-nums')}
               />
             </div>
             <div className="px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-800 flex flex-col justify-center">
@@ -2816,6 +2846,28 @@ function NewProductionRecordModal({ initialRecord = null, onClose, onSubmit }) {
               <div className="text-sm font-bold text-amber-300 dark:text-amber-300">{preview.efficiency.toFixed(1)}%</div>
             </div>
           </div>
+
+          {issues.length > 0 && (
+            <div
+              role="alert"
+              aria-live="polite"
+              className={`rounded-xl border px-3.5 py-2.5 space-y-1 ${
+                blockingIssues.length > 0
+                  ? 'border-rose-300 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-800 dark:text-rose-200'
+                  : 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200'
+              }`}
+            >
+              <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                {blockingIssues.length > 0 ? 'Cannot save this record' : 'Repaired on save'}
+              </div>
+              <ul className="list-disc pl-5 space-y-0.5 text-[11px] leading-relaxed">
+                {issues.map((issue) => (
+                  <li key={issue.code}>{issue.message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
 
         <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2 shrink-0">
@@ -2828,7 +2880,9 @@ function NewProductionRecordModal({ initialRecord = null, onClose, onSubmit }) {
           </button>
           <button
             type="submit"
-            className="px-4 py-2 rounded-lg font-semibold bg-slate-900 dark:bg-slate-700 text-white hover:bg-slate-800 dark:hover:bg-slate-600"
+            disabled={blockingIssues.length > 0}
+            title={blockingIssues.length > 0 ? blockingIssues[0].message : undefined}
+            className="px-4 py-2 rounded-lg font-semibold bg-slate-900 dark:bg-slate-700 text-white hover:bg-slate-800 dark:hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-slate-900 dark:disabled:hover:bg-slate-700"
           >
             {isEditing ? 'Update Record' : 'Save Record'}
           </button>

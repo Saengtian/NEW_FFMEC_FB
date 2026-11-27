@@ -279,7 +279,17 @@ function App() {
         purgedEvidence = purged.removed;
         setGateRecords(purged.records);
       }
-      if (Array.isArray(data.productionRecords)) setProductionRecords(data.productionRecords);
+      let productionDropped = 0;
+      let productionRepaired = 0;
+      if (Array.isArray(data.productionRecords)) {
+        // A row that cannot describe a real run never reaches the tiles: the same
+        // rules the form enforces also gate what is loaded from the Sheet, a CSV
+        // import or a restored backup.
+        const cleaned = sanitizeProductionRecords(data.productionRecords);
+        productionDropped = cleaned.dropped.length;
+        productionRepaired = cleaned.repaired;
+        setProductionRecords(cleaned.records);
+      }
       const loadedSpecs = Array.isArray(data.masterSpecs)
         ? applyProvisionalLimitDefaults(data.masterSpecs)
         : null;
@@ -310,7 +320,7 @@ function App() {
     setTimeout(() => {
       isHydratingRef.current = false;
     }, 150);
-    return { frozenLimits, purgedEvidence, removedFabricated };
+    return { frozenLimits, purgedEvidence, removedFabricated, productionDropped, productionRepaired };
   };
 
   // ---------------------------------------------------------------------------
@@ -551,7 +561,7 @@ function App() {
           return;
         }
         if (res && res.initialized && res.data) {
-          let backfill = { frozenLimits: 0, purgedEvidence: 0, removedFabricated: 0 };
+          let backfill = { frozenLimits: 0, purgedEvidence: 0, removedFabricated: 0, productionDropped: 0, productionRepaired: 0 };
           try {
             backfill = hydrateFromPayload(res.data) || backfill;
           } catch (err) {
@@ -581,6 +591,12 @@ function App() {
           }
           if (backfill.removedFabricated > 0) {
             backfillNotes.push(`Removed ${backfill.removedFabricated} fabricated Cpk seed row(s)`);
+          }
+          if (backfill.productionDropped > 0) {
+            backfillNotes.push(`Dropped ${backfill.productionDropped} invalid production record(s)`);
+          }
+          if (backfill.productionRepaired > 0) {
+            backfillNotes.push(`Zeroed negative downtime on ${backfill.productionRepaired} production record(s)`);
           }
           if (backfillNotes.length > 0) saveSchedulerRef.current.schedule(backfillNotes);
           if (showNotice) showToast(`Reloaded workspace from Google Sheet (Rev #${res.revision || 1})`, 'success');
@@ -1504,6 +1520,13 @@ function App() {
       defectItems: cleanDefects,
       downtimeEvents: cleanDowntime
     };
+    // The modal refuses these before submit; this is the write boundary, where a
+    // bad row would otherwise become state every KPI reads.
+    const issues = productionRecordBlockingIssues(newRec, productionRecords, null);
+    if (issues.length > 0) {
+      showToast(issues[0].message, 'error');
+      return;
+    }
     setProductionRecords((prev) => [newRec, ...prev]);
     setNewProdRecordModalOpen(false);
     showToast(`Logged production record for ${newRec.model} ${newRec.phase} (${newRec.station})`);
@@ -1542,6 +1565,11 @@ function App() {
       defectItems: cleanDefects,
       downtimeEvents: cleanDowntime
     };
+    const issues = productionRecordBlockingIssues(updatedRec, productionRecords, id);
+    if (issues.length > 0) {
+      showToast(issues[0].message, 'error');
+      return;
+    }
     setProductionRecords((prev) => prev.map((r) => (r.id === id ? updatedRec : r)));
     setEditingProdRecord(null);
     showToast(`Updated production record for ${updatedRec.model} ${updatedRec.phase} (${updatedRec.station})`);
@@ -3418,6 +3446,7 @@ function App() {
       {(newProdRecordModalOpen || editingProdRecord) && (
         <NewProductionRecordModal
           initialRecord={editingProdRecord}
+          existingRecords={productionRecords}
           onClose={() => {
             setNewProdRecordModalOpen(false);
             setEditingProdRecord(null);
