@@ -272,7 +272,7 @@ function OverviewView({
             <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">KPI Results Summary</h2>
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
               Weighted actuals from {kpiResults.runs} production run{kpiResults.runs === 1 ? '' : 's'} in the
-              active Global Scope ({kpiResults.totalInput.toLocaleString()} units input) against the FY{currentFiscalYear()} KPI targets
+              active scope ({kpiResults.totalInput.toLocaleString()} units input) against the FY{currentFiscalYear()} KPI targets
             </p>
           </div>
           <button
@@ -426,7 +426,7 @@ function OverviewView({
 
         {buildProgress.length === 0 ? (
           <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
-            No NPI programs match the active Global Scope filter.
+            No NPI programs match the active scope filter.
           </div>
         ) : (
           <div className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -521,7 +521,7 @@ function OverviewView({
           <div className="overflow-x-auto">
             {recentRecords.length === 0 ? (
               <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                No production records match the current Global Scope.
+                No production records match the current scope.
               </div>
             ) : (
               <table className="w-full text-left border-collapse text-xs">
@@ -786,7 +786,7 @@ function GateWorkstreamMatrix({ projects, gateRecords, globalSide, scheduleOverr
       <div className="overflow-x-auto">
         {groupedSections.length === 0 ? (
           <div className="p-8 text-center text-xs text-slate-500 dark:text-slate-400">
-            No NPI programs match the active Global Scope filter.
+            No NPI programs match the active scope filter.
           </div>
         ) : (
           <table className="w-full text-left border-collapse text-xs">
@@ -1315,7 +1315,7 @@ function ProjectsMatrixView({
   if (projects.length === 0) {
     return (
       <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-10 text-center text-xs text-slate-500 dark:text-slate-400">
-        No NPI programs match the current Global Scope. Reset filters above to view all programs.
+        No NPI programs match the current scope. Reset filters above to view all programs.
       </div>
     );
   }
@@ -1969,7 +1969,7 @@ function BuildTimelineGanttView({
   if (projects.length === 0) {
     return (
       <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-10 text-center text-xs text-slate-500 dark:text-slate-400">
-        No NPI programs match the current Global Scope. Reset filters above to view the build timeline.
+        No NPI programs match the current scope. Reset filters above to view the build timeline.
       </div>
     );
   }
@@ -3186,7 +3186,7 @@ function GateSignOffView({
             </span>
           </div>
           <div className="text-[11px] text-slate-500 dark:text-slate-400">
-            PEN-81-0002 Rev B stage-gates across the active Global Scope
+            PEN-81-0002 Rev B stage-gates across the active scope
           </div>
         </div>
 
@@ -4027,7 +4027,7 @@ function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDelet
         <div className="overflow-x-auto">
           {filteredRecords.length === 0 ? (
             <div className="p-10 text-center text-xs text-slate-500 dark:text-slate-400">
-              No production records match the current Global Scope, station, or search filter.
+              No production records match the current scope, station, or search filter.
             </div>
           ) : (
             <table className="w-full text-left border-collapse text-xs">
@@ -4937,7 +4937,7 @@ function CpkMasterSpecsView({
                   <p className="mx-auto mt-1.5 max-w-md text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
                     {cpkRecords.length === 0
                       ? 'A new workspace carries no Cpk readings — every row here has to come from a real upload. Import an Excel or CSV file of measurements matched to a Master Spec and the matrix fills in.'
-                      : 'Every reading is filtered out by the Family filter or the Global Scope. Widen either to see the records that exist.'}
+                      : 'Every reading is filtered out by the Family filter or the scope. Widen either to see the records that exist.'}
                   </p>
                   {cpkRecords.length === 0 && (
                     <button

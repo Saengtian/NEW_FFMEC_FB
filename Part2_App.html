@@ -116,10 +116,8 @@ function ScopeFilterSelect({
   ariaLabel,
   value,
   options,
-  allLabel,
   onChange,
-  fullWidthOnMobile = false,
-  showAllCount = true
+  fullWidthOnMobile = false
 }) {
   const optionClass = 'bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100';
   const changed = value !== 'ALL';
@@ -149,7 +147,7 @@ function ScopeFilterSelect({
         }`}
       >
         <option value="ALL" className={optionClass}>
-          {allLabel}{showAllCount ? ` (${options.length})` : ''}
+          All ({options.length})
         </option>
         {options.map((option) => (
           <option key={option} value={option} className={optionClass}>
@@ -3004,53 +3002,47 @@ function App() {
     reports: 'Executive KPI Report & Snapshot Analysis'
   };
 
-  // One definition of the global scope controls: the header renders them, and the
+  // One definition of the scope controls: the header renders them, and the
   // KPI deep dive reuses the same list so its filters can never drift apart.
   const scopeFilters = [
     {
       key: 'family',
       label: 'Family',
-      ariaLabel: 'Global Family Filter',
+      ariaLabel: 'Family filter',
       value: globalFamily,
       options: availableFamilies,
-      allLabel: 'All',
-      showAllCount: false,
       onChange: handleGlobalFamilyChange
     },
     {
       key: 'model',
       label: 'Model',
-      ariaLabel: 'Global Model Filter',
+      ariaLabel: 'Model filter',
       value: globalModel,
       options: availableModels,
-      allLabel: 'All Models',
       onChange: handleGlobalModelChange
     },
     {
       key: 'phase',
       label: 'Phase',
-      ariaLabel: 'Global Phase Filter',
+      ariaLabel: 'Phase filter',
       value: globalPhase,
       options: availablePhases,
-      allLabel: 'All Phases',
       onChange: handleGlobalPhaseChange
     },
     {
       key: 'side',
       label: 'Side',
-      ariaLabel: 'Global Side Filter',
+      ariaLabel: 'Side filter',
       value: globalSide,
       options: availableSides,
-      allLabel: 'All Sides',
       onChange: handleGlobalSideChange
     },
     {
       key: 'process',
       label: 'Process',
-      ariaLabel: 'Global Process Filter',
+      ariaLabel: 'Process filter',
       value: globalProcess,
       options: availableProcesses,
-      allLabel: 'All Processes',
       onChange: setGlobalProcess,
       fullWidthOnMobile: true
     }
@@ -3240,7 +3232,7 @@ function App() {
 
       {/* Main Content Workspace */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Top Action Bar + Interactive Global Scope Filter */}
+        {/* Top Action Bar + Interactive Scope Filter */}
         <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-20 shrink-0">
           <div className="h-14 px-4 lg:px-6 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
@@ -3363,8 +3355,6 @@ function App() {
                     ariaLabel={filter.ariaLabel}
                     value={filter.value}
                     options={filter.options}
-                    allLabel={filter.allLabel}
-                    showAllCount={filter.showAllCount !== false}
                     onChange={filter.onChange}
                     fullWidthOnMobile={Boolean(filter.fullWidthOnMobile)}
                   />

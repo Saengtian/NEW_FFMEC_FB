@@ -3007,7 +3007,7 @@ const KPI_FAMILY_BUILDERS = {
     const value = kpiMetricValue(allRuns, kpiKey);
     return {
       headline: { value, text: `${value.toFixed(meta.digits)}${meta.unit}` },
-      scopeLabel: `Active Global Scope · ${scope.length} run${scope.length === 1 ? '' : 's'} · ${rangeLabel}`,
+      scopeLabel: `Active scope · ${scope.length} run${scope.length === 1 ? '' : 's'} · ${rangeLabel}`,
       trend,
       variant,
       pareto,
@@ -3547,6 +3547,80 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun, activeKey, onSelect }
   );
 }
 
+/**
+ * UPH, cycle time and line balance for an efficiency deep dive. The Overview
+ * card and the modal render this one block so their figures and labels cannot
+ * drift apart.
+ */
+function KpiEfficiencyDiagnostics({ analysis, headingClass, headingTag: Heading = 'h3' }) {
+  if (!analysis) return null;
+  const singleLine = analysis.lines.length === 1;
+  return (
+    <section>
+      <Heading className={`${headingClass} mb-2`}>UPH, Cycle Time &amp; Line Balance</Heading>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+        {[
+          ['Actual UPH', analysis.uph.toFixed(0), 'net good ÷ planned hr'],
+          ['Run-rate UPH', analysis.runUph.toFixed(0), 'input ÷ run hr'],
+          ['Cycle time', `${analysis.ctSec.toFixed(1)} s`, `run rate ${analysis.ctRunSec.toFixed(1)} s`],
+          ['Downtime CT cost', `${analysis.ctLossSec.toFixed(1)} s`, 'lost per good unit'],
+          ['Line balance', `${analysis.balanceRate.toFixed(0)}%`, singleLine ? 'single line in scope' : `bottleneck ${analysis.bottleneckLabel}`]
+        ].map(([label, value, sub]) => (
+          <div
+            key={label}
+            className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-2.5"
+          >
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{label}</div>
+            <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100 mt-0.5">{value}</div>
+            <div className="text-[10px] text-slate-400 dark:text-slate-500 truncate" title={sub}>
+              {sub}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3 space-y-1.5">
+        {analysis.lines.map((line) => {
+          const bottleneck = line.key === analysis.bottleneckKey;
+          return (
+            <div key={line.key} className="flex items-center gap-2 text-[11px]">
+              <span
+                className={`w-28 sm:w-40 shrink-0 truncate ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-400'}`}
+                title={line.label}
+              >
+                {line.label}
+              </span>
+              <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                <div
+                  className={`h-full ${bottleneck ? 'bg-rose-500' : 'bg-blue-500 dark:bg-blue-600'}`}
+                  style={{ width: `${Math.max(1, (line.ctSec / analysis.maxCt) * 100)}%` }}
+                />
+              </div>
+              <span className="w-14 sm:w-16 shrink-0 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{line.ctSec.toFixed(1)} s</span>
+              <span className="hidden sm:inline-block w-16 shrink-0 text-right tabular-nums text-slate-500 dark:text-slate-400">{line.uph.toFixed(0)} UPH</span>
+              <span
+                className={`hidden sm:inline-block w-14 shrink-0 text-right tabular-nums ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-500'}`}
+              >
+                {line.vsFastestPct <= 0.05 ? 'best' : `+${line.vsFastestPct.toFixed(0)}%`}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-2">
+        {singleLine
+          ? `Cycle time = planned hours × 3,600 ÷ net good units for ${analysis.bottleneckLabel}.`
+          : `Cycle time = planned hours × 3,600 ÷ net good units, across ${analysis.lines.length} lines. The bottleneck (${analysis.bottleneckLabel}) sets the pace at ${analysis.maxCt.toFixed(
+              1
+            )} s/unit against ${analysis.minCt.toFixed(1)} s/unit on the fastest line; perfect levelling of the same work would lift output by about +${analysis.balanceGainPct.toFixed(
+              0
+            )}% at the same planned hours.`}
+      </p>
+    </section>
+  );
+}
+
 /** The production rows behind one Pareto bar or one variant row. */
 function KpiDrillRecords({ selection, rows, kpiKey, onClose }) {
   const isVariant = selection.kind === 'variant';
@@ -3902,8 +3976,6 @@ function KpiDeepDiveModal({
                   ariaLabel={`${filter.ariaLabel} (deep dive)`}
                   value={filter.value}
                   options={filter.options}
-                  allLabel={filter.allLabel}
-                  showAllCount={filter.showAllCount !== false}
                   onChange={filter.onChange}
                 />
               ))}
@@ -4020,76 +4092,6 @@ function KpiDeepDiveModal({
             )}
           </section>
 
-          {view.effAnalysis && (
-            <section>
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
-                UPH, Cycle Time &amp; Line Balance
-              </h4>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-                {[
-                  ['Actual UPH', view.effAnalysis.uph.toFixed(0), 'net good ÷ planned hr'],
-                  ['Run-rate UPH', view.effAnalysis.runUph.toFixed(0), 'input ÷ run hr'],
-                  ['Cycle time', `${view.effAnalysis.ctSec.toFixed(1)} s`, `run rate ${view.effAnalysis.ctRunSec.toFixed(1)} s`],
-                  ['Downtime CT cost', `${view.effAnalysis.ctLossSec.toFixed(1)} s`, 'lost per good unit'],
-                  ['Line balance', `${view.effAnalysis.balanceRate.toFixed(0)}%`, `bottleneck ${view.effAnalysis.bottleneckLabel}`]
-                ].map(([label, value, sub]) => (
-                  <div
-                    key={label}
-                    className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-2.5"
-                  >
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{label}</div>
-                    <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100 mt-0.5">{value}</div>
-                    <div className="text-[10px] text-slate-400 dark:text-slate-500 truncate" title={sub}>
-                      {sub}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-3 space-y-1.5">
-                {view.effAnalysis.lines.map((line) => {
-                  const bottleneck = line.key === view.effAnalysis.bottleneckKey;
-                  return (
-                    <div key={line.key} className="flex items-center gap-2 text-[11px]">
-                      {/* 160+0+24+24+29 at 375px: the bar had collapsed and the
-                          numbers wrapped into slivers. Label and columns shrink
-                          below sm and the two trailing figures wait for room. */}
-                      <span
-                        className={`w-28 sm:w-40 shrink-0 truncate ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-400'}`}
-                        title={line.label}
-                      >
-                        {line.label}
-                      </span>
-                      <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                        <div
-                          className={`h-full ${bottleneck ? 'bg-rose-500' : 'bg-blue-500 dark:bg-blue-600'}`}
-                          style={{ width: `${Math.max(1, (line.ctSec / view.effAnalysis.maxCt) * 100)}%` }}
-                        />
-                      </div>
-                      <span className="w-14 sm:w-16 shrink-0 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{line.ctSec.toFixed(1)} s</span>
-                      <span className="hidden sm:inline-block w-16 shrink-0 text-right tabular-nums text-slate-500 dark:text-slate-400">{line.uph.toFixed(0)} UPH</span>
-                      <span
-                        className={`hidden sm:inline-block w-14 shrink-0 text-right tabular-nums ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-500'}`}
-                      >
-                        {line.vsFastestPct <= 0.05 ? 'best' : `+${line.vsFastestPct.toFixed(0)}%`}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-2">
-                {`Cycle time = planned hours × 3,600 ÷ net good units, across ${view.effAnalysis.lines.length} line${
-                  view.effAnalysis.lines.length === 1 ? '' : 's'
-                }. The bottleneck (${view.effAnalysis.bottleneckLabel}) sets the pace at ${view.effAnalysis.maxCt.toFixed(
-                  1
-                )} s/unit against ${view.effAnalysis.minCt.toFixed(1)} s/unit on the fastest line; perfect levelling of the same work would lift output by about +${view.effAnalysis.balanceGainPct.toFixed(
-                  0
-                )}% at the same planned hours.`}
-              </p>
-            </section>
-          )}
-
           <section>
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
               {meta.paretoHeading}
@@ -4110,6 +4112,12 @@ function KpiDeepDiveModal({
               <KpiDrillRecords selection={drill} rows={drillRows} kpiKey={kpiKey} onClose={() => setDrill(null)} />
             )}
           </section>
+
+          <KpiEfficiencyDiagnostics
+            analysis={view.effAnalysis}
+            headingClass="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400"
+            headingTag="h4"
+          />
         </div>
       </div>
     </div>
@@ -4241,9 +4249,9 @@ function KpiDeepDiveSection({
     >
       <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">KPI Deep dive</h2>
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">KPI Deep Dive</h2>
           <p className="text-[11px] text-slate-500 dark:text-slate-400">
-            {meta.title} · trend, the worst variants, and the drivers behind the loss in the active Global Scope
+            {meta.title} · trend, the worst variants, and the drivers behind the loss in the active scope
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -4291,7 +4299,7 @@ function KpiDeepDiveSection({
           {(variants.length > 1 || activeVariant !== 'ALL') && (
             <label className="flex items-center gap-1.5">
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                Variant
+                Variant scope
               </span>
               <select
                 value={activeVariant}
@@ -4398,72 +4406,7 @@ function KpiDeepDiveSection({
           </section>
         </div>
 
-        {view.effAnalysis && (
-          <section>
-            <h3 className={`${chartHeading} mb-2`}>
-              UPH, Cycle Time &amp; Line Balance
-            </h3>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
-              {[
-                ['Actual UPH', view.effAnalysis.uph.toFixed(0), 'net good ÷ planned hr'],
-                ['Run-rate UPH', view.effAnalysis.runUph.toFixed(0), 'input ÷ run hr'],
-                ['Cycle time', `${view.effAnalysis.ctSec.toFixed(1)} s`, `run rate ${view.effAnalysis.ctRunSec.toFixed(1)} s`],
-                ['Downtime CT cost', `${view.effAnalysis.ctLossSec.toFixed(1)} s`, 'lost per good unit'],
-                ['Line balance', `${view.effAnalysis.balanceRate.toFixed(0)}%`, `bottleneck ${view.effAnalysis.bottleneckLabel}`]
-              ].map(([label, value, sub]) => (
-                <div
-                  key={label}
-                  className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-2.5"
-                >
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{label}</div>
-                  <div className="text-sm font-bold tabular-nums text-slate-900 dark:text-slate-100 mt-0.5">{value}</div>
-                  <div className="text-[10px] text-slate-400 dark:text-slate-500 truncate" title={sub}>
-                    {sub}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-3 space-y-1.5">
-              {view.effAnalysis.lines.map((line) => {
-                const bottleneck = line.key === view.effAnalysis.bottleneckKey;
-                return (
-                  <div key={line.key} className="flex items-center gap-2 text-[11px]">
-                    <span
-                      className={`w-28 sm:w-40 shrink-0 truncate ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-600 dark:text-slate-400'}`}
-                      title={line.label}
-                    >
-                      {line.label}
-                    </span>
-                    <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                      <div
-                        className={`h-full ${bottleneck ? 'bg-rose-500' : 'bg-blue-500 dark:bg-blue-600'}`}
-                        style={{ width: `${Math.max(1, (line.ctSec / view.effAnalysis.maxCt) * 100)}%` }}
-                      />
-                    </div>
-                    <span className="w-14 sm:w-16 shrink-0 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{line.ctSec.toFixed(1)} s</span>
-                    <span className="hidden sm:inline-block w-16 shrink-0 text-right tabular-nums text-slate-500 dark:text-slate-400">{line.uph.toFixed(0)} UPH</span>
-                    <span
-                      className={`hidden sm:inline-block w-14 shrink-0 text-right tabular-nums ${bottleneck ? 'font-semibold text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-500'}`}
-                    >
-                      {line.vsFastestPct <= 0.05 ? 'best' : `+${line.vsFastestPct.toFixed(0)}%`}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-
-            <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-2">
-              {`Cycle time = planned hours × 3,600 ÷ net good units, across ${view.effAnalysis.lines.length} line${
-                view.effAnalysis.lines.length === 1 ? '' : 's'
-              }. The bottleneck (${view.effAnalysis.bottleneckLabel}) sets the pace at ${view.effAnalysis.maxCt.toFixed(
-                1
-              )} s/unit against ${view.effAnalysis.minCt.toFixed(1)} s/unit on the fastest line; perfect levelling of the same work would lift output by about +${view.effAnalysis.balanceGainPct.toFixed(
-                0
-              )}% at the same planned hours.`}
-            </p>
-          </section>
-        )}
+        <KpiEfficiencyDiagnostics analysis={view.effAnalysis} headingClass={chartHeading} />
 
         {drill && (
           <KpiDrillRecords selection={drill} rows={drillRows} kpiKey={kpiKey} onClose={() => setDrill(null)} />
