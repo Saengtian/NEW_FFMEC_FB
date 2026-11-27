@@ -215,6 +215,7 @@ function App() {
   const [stateHistory, setStateHistory] = useState(null);
   const [specCorrection, setSpecCorrection] = useState(null);
   const [workspaceExportCopy, setWorkspaceExportCopy] = useState(null);
+  const [restoreCandidate, setRestoreCandidate] = useState(null);
   const [signOffModal, setSignOffModal] = useState(null);
   const [kpiDrilldown, setKpiDrilldown] = useState(null);
   const [toast, setToast] = useState(null);
@@ -787,6 +788,8 @@ function App() {
     }
   };
 
+  // Reading the file only opens the confirmation dialog: choosing a backup must
+  // never hydrate and save over the live workspace on the same click.
   const handleImportWorkspaceJson = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -798,18 +801,109 @@ function App() {
         if (!payload.projects || !Array.isArray(payload.projects)) {
           throw new Error('Invalid FFM NPI Ops backup file.');
         }
-        const hydratedBackup = hydrateFromPayload(payload);
-        showToast('Workspace restored from JSON backup.', 'success');
-        announceProductionDrops(hydratedBackup && hydratedBackup.productionDrops);
-        if (isGasEnv) {
-          setTimeout(() => pushToGoogleSheet('Restored from JSON backup', { toast: true, refreshMirrors: true, payload }), 300);
-        }
+        setRestoreCandidate({
+          fileName: file.name,
+          payload,
+          exportedAt: parsed.exportedAt || null,
+          revision: Number(parsed.revision) || 0,
+          counts: {
+            current: summarizeWorkspaceForRestore(buildWorkspacePayload()),
+            incoming: summarizeWorkspaceForRestore(payload)
+          },
+          applying: false,
+          snapshotName: '',
+          error: null
+        });
       } catch (err) {
         showToast(`Restore failed: ${err.message}`, 'error');
       }
     };
+    reader.onerror = () => showToast('Restore failed: the file could not be read.', 'error');
     reader.readAsText(file);
     e.target.value = '';
+  };
+
+  const closeRestoreBackup = () => {
+    setRestoreCandidate((prev) => (prev && prev.applying ? prev : null));
+  };
+
+  const applyRestoreCandidate = (candidate) => {
+    const hydratedBackup = hydrateFromPayload(candidate.payload);
+    if (!hydratedBackup) {
+      setRestoreCandidate((prev) =>
+        prev ? { ...prev, applying: false, error: 'The backup could not be applied, so nothing was saved.' } : prev
+      );
+      return false;
+    }
+    showToast(
+      candidate.snapshotName
+        ? `Workspace restored · Drive snapshot ${candidate.snapshotName}`
+        : 'Workspace restored from JSON backup.',
+      'success'
+    );
+    announceProductionDrops(hydratedBackup.productionDrops);
+    if (isGasEnv) {
+      pushToGoogleSheet('Restored from JSON backup', {
+        toast: true,
+        refreshMirrors: true,
+        payload: candidate.payload
+      });
+    }
+    return true;
+  };
+
+  const confirmRestoreBackup = () => {
+    const candidate = restoreCandidate;
+    if (!candidate || candidate.applying) return;
+    if (syncConflictRef.current) {
+      setRestoreCandidate({
+        ...candidate,
+        error: 'Resolve the save conflict first — your edits are still in the browser.'
+      });
+      return;
+    }
+    if (cloudSync.status === 'saving' || cloudSync.status === 'loading') {
+      setRestoreCandidate({
+        ...candidate,
+        error: 'Wait for the current Sheet sync to finish, then restore.'
+      });
+      return;
+    }
+    // A queued autosave would write the workspace this restore is replacing.
+    saveSchedulerRef.current.cancel();
+
+    if (!isGasEnv) {
+      if (applyRestoreCandidate(candidate)) setRestoreCandidate(null);
+      return;
+    }
+
+    setRestoreCandidate({ ...candidate, applying: true, error: null });
+    const snapshotPayload = JSON.stringify(buildWorkspacePayload());
+    window.google.script.run
+      .withSuccessHandler((res) => {
+        if (!res || res.ok !== true) {
+          setRestoreCandidate((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  applying: false,
+                  error: (res && res.error) || 'The Drive snapshot could not be written, so nothing was restored.'
+                }
+              : prev
+          );
+          return;
+        }
+        if (applyRestoreCandidate({ ...candidate, snapshotName: res.fileName || '' })) {
+          setRestoreCandidate(null);
+        }
+      })
+      .withFailureHandler((err) => {
+        const msg = err && err.message ? err.message : String(err || 'The Drive snapshot could not be written.');
+        setRestoreCandidate((prev) => (prev ? { ...prev, applying: false, error: msg } : prev));
+      })
+      // The payload is the workspace as it stands here, not the last saved copy:
+      // unsaved edits must survive the restore too.
+      .exportRestoreSnapshot(snapshotPayload, candidate.fileName);
   };
 
   const projectMap = useMemo(() => {
@@ -3874,6 +3968,21 @@ function App() {
           revision={workspaceExportCopy.revision}
           reason={workspaceExportCopy.reason}
           onClose={() => setWorkspaceExportCopy(null)}
+        />
+      )}
+
+      {/* JSON restore: what the file replaces, then the Drive snapshot and save */}
+      {restoreCandidate && (
+        <RestoreBackupModal
+          fileName={restoreCandidate.fileName}
+          exportedAt={restoreCandidate.exportedAt}
+          revision={restoreCandidate.revision}
+          current={restoreCandidate.counts.current}
+          incoming={restoreCandidate.counts.incoming}
+          applying={restoreCandidate.applying}
+          error={restoreCandidate.error}
+          onCancel={closeRestoreBackup}
+          onConfirm={confirmRestoreBackup}
         />
       )}
 

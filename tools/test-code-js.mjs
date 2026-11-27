@@ -193,6 +193,7 @@ return {
   getServerInfo,
   listStateRevisions,
   loadStateRevision,
+  exportRestoreSnapshot,
   refreshMirrorSheets,
   ensureAllTabs_,
   parseChunkGroup_
@@ -859,6 +860,28 @@ check("the repaired row is only built from adjacent revisions", () => {
   const repair = api.reconcileSignOffLedger();
   equal(repair.appended, 0, "no decision is attributed to a revision that did not make it");
   equal(ledgerData().length, 0);
+});
+
+check("a restore snapshot refuses an empty or non-workspace payload before touching Drive", () => {
+  const empty = api.exportRestoreSnapshot("", "backup.json");
+  equal(empty.ok, false);
+  assert.match(empty.error, /could not be read/);
+
+  const invalid = api.exportRestoreSnapshot("{}", "backup.json");
+  equal(invalid.ok, false);
+  assert.match(invalid.error, /not a valid workspace payload/);
+});
+
+check("a restore snapshot without a Google identity stops instead of writing", () => {
+  const saved = session.email;
+  session.email = "";
+  try {
+    const res = api.exportRestoreSnapshot(JSON.stringify({ projects: [] }), "backup.json");
+    equal(res.ok, false);
+    assert.match(res.error, /identity/);
+  } finally {
+    session.email = saved;
+  }
 });
 
 // ---------------------------------------------------------------------------

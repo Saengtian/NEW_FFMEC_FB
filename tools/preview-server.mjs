@@ -35,6 +35,7 @@ const GAS_SHIM = String.raw`
   var KEY = 'ffm-npi-ops-preview-state';
   var HISTORY_KEY = 'ffm-npi-ops-preview-history';
   var HISTORY_LIMIT = 5;
+  var RESTORE_SNAPSHOT_KEY = 'ffm-npi-ops-preview-pre-restore';
   var IMPORT_KEY = 'ffm-npi-ops-preview-import-applied';
   var EMAIL = 'local-preview@minebea.co.th';
 
@@ -168,6 +169,40 @@ const GAS_SHIM = String.raw`
     };
   }
 
+  // The real one writes a Drive file; the preview records the same hand-off in
+  // localStorage so the confirmation flow can be exercised without Drive. The
+  // payload itself is already in the preview store when a restore is needed.
+  function exportRestoreSnapshot(payloadJson, sourceName) {
+    try {
+      var data = JSON.parse(payloadJson);
+      if (!data || typeof data !== 'object' || !Array.isArray(data.projects)) {
+        return { ok: false, error: 'The current workspace is not a valid workspace payload.' };
+      }
+      var now = new Date();
+      var stamp = now.toISOString().replace(/[-:]/g, '').replace(/\..+$/, '');
+      var fileName = 'FFM_NPI_Ops_pre_restore_' + stamp + '.json';
+      window.localStorage.setItem(RESTORE_SNAPSHOT_KEY, JSON.stringify({
+        fileName: fileName,
+        savedAt: now.toISOString(),
+        source: String(sourceName || '')
+      }));
+      return {
+        ok: true,
+        fileName: fileName,
+        folderName: 'Local preview',
+        folderUrl: '',
+        bytes: payloadJson.length,
+        local: true
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: 'The local preview could not record the restore snapshot: ' +
+          (err && err.message ? err.message : String(err))
+      };
+    }
+  }
+
   var methods = {
     loadWorkspaceState: loadWorkspaceState,
     saveWorkspaceState: saveWorkspaceState,
@@ -175,7 +210,8 @@ const GAS_SHIM = String.raw`
     getServerInfo: getServerInfo,
     getSignOffLedger: getSignOffLedger,
     listStateRevisions: listStateRevisions,
-    loadStateRevision: loadStateRevision
+    loadStateRevision: loadStateRevision,
+    exportRestoreSnapshot: exportRestoreSnapshot
   };
 
   var successHandler = null;

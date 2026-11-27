@@ -51,7 +51,11 @@ const CONFIG = {
   BACKUP_PREFIX: 'FFM_NPI_Ops_state_',
   BACKUP_KEEP: 30,
   BACKUP_HOUR: 1,
-  BACKUP_MINUTE: 30
+  BACKUP_MINUTE: 30,
+  // Pre-restore snapshots live in the same folder but keep their own count:
+  // a burst of restores must not evict the daily copies, and vice versa.
+  RESTORE_SNAPSHOT_PREFIX: 'FFM_NPI_Ops_pre_restore_',
+  RESTORE_SNAPSHOT_KEEP: 10
 };
 
 /** Handler name the daily trigger calls. Must stay a top-level function name. */
@@ -457,15 +461,16 @@ function backupFileName_(date, timeZone) {
  * Anything this job did not create is left alone — a hand-downloaded JSON backup,
  * a notes file, or a folder someone else is using.
  */
-function backupFilesToDelete_(fileNames, keep) {
+function backupFilesToDelete_(fileNames, keep, prefix) {
   // A keep of zero or nonsense is not "delete everything": fall back to the
   // configured limit rather than leaving the folder with one lonely file.
   const asked = Number(keep);
   const limit = asked > 0 ? Math.floor(asked) : CONFIG.BACKUP_KEEP;
+  const wanted = prefix || CONFIG.BACKUP_PREFIX;
   const mine = (fileNames || [])
     .map(function(name) { return String(name || ''); })
     .filter(function(name) {
-      return name.indexOf(CONFIG.BACKUP_PREFIX) === 0 && /\.json$/.test(name);
+      return name.indexOf(wanted) === 0 && /\.json$/.test(name);
     })
     .sort();
   return mine.slice(0, Math.max(0, mine.length - limit));
@@ -504,8 +509,8 @@ function backupFolder_() {
   return folders.hasNext() ? folders.next() : DriveApp.createFolder(CONFIG.BACKUP_FOLDER_NAME);
 }
 
-/** Trashes every backup beyond the newest CONFIG.BACKUP_KEEP. Returns how many went. */
-function pruneStateBackups_(folder) {
+/** Trashes files with `prefix` beyond the newest `keep`. Returns how many went. */
+function pruneSnapshotFiles_(folder, prefix, keep) {
   const byName = {};
   const iterator = folder.getFiles();
   while (iterator.hasNext()) {
@@ -513,7 +518,7 @@ function pruneStateBackups_(folder) {
     const name = String(file.getName() || '');
     if (name && !byName[name]) byName[name] = file;
   }
-  const doomed = backupFilesToDelete_(Object.keys(byName), CONFIG.BACKUP_KEEP);
+  const doomed = backupFilesToDelete_(Object.keys(byName), keep, prefix);
   doomed.forEach(function(name) {
     try {
       byName[name].setTrashed(true);
@@ -524,6 +529,11 @@ function pruneStateBackups_(folder) {
     }
   });
   return doomed.length;
+}
+
+/** Trashes every daily backup beyond the newest CONFIG.BACKUP_KEEP. */
+function pruneStateBackups_(folder) {
+  return pruneSnapshotFiles_(folder, CONFIG.BACKUP_PREFIX, CONFIG.BACKUP_KEEP);
 }
 
 /** Reads the store without the sidebar's consent to be signed in: the trigger runs as the owner. */
@@ -583,6 +593,73 @@ function exportStateBackup() {
   } catch (err) {
     console.error('Daily state backup failed: ' + errorMessage_(err));
     return { ok: false, error: errorMessage_(err) };
+  }
+}
+
+/** `2026-11-27_193045`: seconds keep two restores in one minute from sharing a name. */
+function restoreSnapshotStamp_(date, timeZone) {
+  return Utilities.formatDate(date, timeZone || Session.getScriptTimeZone(), 'yyyy-MM-dd_HHmmss');
+}
+
+function restoreSnapshotFileName_(date, timeZone) {
+  return CONFIG.RESTORE_SNAPSHOT_PREFIX + restoreSnapshotStamp_(date, timeZone) + '.json';
+}
+
+/**
+ * Writes the workspace the user is about to replace into the Drive backup folder.
+ * The Restore dialog calls this before it hydrates anything, and only applies the
+ * backup when this returns ok: a failed snapshot stops the restore.
+ */
+function exportRestoreSnapshot(payloadJson, sourceName) {
+  try {
+    const userEmail = getActiveUserEmail_();
+    if (!userEmail) {
+      return {
+        ok: false,
+        error:
+          'Restore stopped: FFM NPI Ops could not read your Google Workspace identity, so no Drive snapshot ' +
+          'could be written. Sign in again and retry.'
+      };
+    }
+    const text = String(payloadJson || '');
+    if (!text) {
+      return { ok: false, error: 'Restore stopped: the current workspace could not be read for its Drive snapshot.' };
+    }
+    if (text.length > 4 * 1024 * 1024) {
+      return { ok: false, error: 'Restore stopped: the current workspace is too large for a Drive snapshot (over 4 MB).' };
+    }
+    const data = JSON.parse(text);
+    if (!data || typeof data !== 'object' || !Array.isArray(data.projects)) {
+      return { ok: false, error: 'Restore stopped: the current workspace is not a valid workspace payload.' };
+    }
+
+    const now = new Date();
+    const payload = buildStateBackup_(
+      { meta: { revision: 0, lastSavedAt: now.toISOString(), lastSavedBy: userEmail }, data: data },
+      now.toISOString()
+    );
+    payload.reason = 'Before restoring ' + String(sourceName || 'a JSON backup').slice(0, 120);
+    const json = JSON.stringify(payload, null, 2);
+    const folder = backupFolder_();
+    const fileName = restoreSnapshotFileName_(now);
+    const file = folder.createFile(fileName, json, MimeType.PLAIN_TEXT);
+    const deleted = pruneSnapshotFiles_(folder, CONFIG.RESTORE_SNAPSHOT_PREFIX, CONFIG.RESTORE_SNAPSHOT_KEEP);
+    return {
+      ok: true,
+      fileId: file.getId(),
+      fileName: fileName,
+      folderName: folder.getName(),
+      folderUrl: folder.getUrl(),
+      bytes: json.length,
+      deleted: deleted,
+      kept: CONFIG.RESTORE_SNAPSHOT_KEEP
+    };
+  } catch (err) {
+    console.error('Restore snapshot failed: ' + errorMessage_(err));
+    return {
+      ok: false,
+      error: 'Restore stopped: the Drive snapshot failed (' + errorMessage_(err) + '). Nothing was changed.'
+    };
   }
 }
 

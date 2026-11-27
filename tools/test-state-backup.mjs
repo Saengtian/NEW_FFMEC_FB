@@ -36,6 +36,8 @@ const DECLARATIONS = [
   /function backupFileName_\([\s\S]*?\n}/,
   /function backupFilesToDelete_\([\s\S]*?\n}/,
   /function buildStateBackup_\([\s\S]*?\n}/,
+  /function restoreSnapshotStamp_\([\s\S]*?\n}/,
+  /function restoreSnapshotFileName_\([\s\S]*?\n}/,
   /function backupTriggers_\([\s\S]*?\n}/,
   /function pad2_\([\s\S]*?\n}/
 ];
@@ -57,10 +59,12 @@ const PRELUDE = `
     formatDate(date, timeZone, format) {
       const parts = new Intl.DateTimeFormat('en-GB', {
         timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hour12: false
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
       }).formatToParts(date).reduce((acc, part) => { acc[part.type] = part.value; return acc; }, {});
-      if (format !== 'yyyy-MM-dd_HHmm') throw new Error('unexpected format ' + format);
-      return parts.year + '-' + parts.month + '-' + parts.day + '_' + parts.hour + parts.minute;
+      const minuteStamp = parts.year + '-' + parts.month + '-' + parts.day + '_' + parts.hour + parts.minute;
+      if (format === 'yyyy-MM-dd_HHmm') return minuteStamp;
+      if (format === 'yyyy-MM-dd_HHmmss') return minuteStamp + parts.second;
+      throw new Error('unexpected format ' + format);
     }
   };
 `;
@@ -68,7 +72,7 @@ const PRELUDE = `
 const api = new Function(
   `"use strict";\n${PRELUDE}\n${pieces.join("\n")}\n` +
     "return { CONFIG, BACKUP_HANDLER, backupFileName_, backupStamp_, backupFilesToDelete_, " +
-    "buildStateBackup_, backupTriggers_, pad2_ };"
+    "buildStateBackup_, restoreSnapshotStamp_, restoreSnapshotFileName_, backupTriggers_, pad2_ };"
 )();
 
 const results = [];
@@ -94,6 +98,12 @@ check("the file is named for the day it ran, in the script's time zone", () => {
 
 check("an explicit time zone wins over the script's", () => {
   equal(api.backupFileName_(INSTANT, "UTC"), "FFM_NPI_Ops_state_2026-11-26_1830.json");
+});
+
+check("a pre-restore snapshot is named to the second, so two restores never collide", () => {
+  const instant = new Date("2026-11-26T18:30:05Z");
+  equal(api.restoreSnapshotFileName_(instant), "FFM_NPI_Ops_pre_restore_2026-11-27_013005.json");
+  assert.ok(api.restoreSnapshotFileName_(instant) < api.restoreSnapshotFileName_(new Date("2026-11-26T18:30:06Z")));
 });
 
 check("the day stamp is zero-padded, so names sort chronologically as text", () => {
@@ -140,6 +150,22 @@ check("a hand-downloaded backup or a stray file is never deleted", () => {
     "FFM_NPI_Ops_state_2026-11-01_0130.json",
     "FFM_NPI_Ops_state_2026-11-02_0130.json"
   ]);
+});
+
+check("pre-restore snapshots prune inside their own prefix", () => {
+  const mixed = [
+    ...namesFor(4),
+    "FFM_NPI_Ops_pre_restore_2026-11-01_010000.json",
+    "FFM_NPI_Ops_pre_restore_2026-11-02_010000.json",
+    "FFM_NPI_Ops_pre_restore_2026-11-03_010000.json",
+    "notes.txt"
+  ];
+  deep(api.backupFilesToDelete_(mixed, 1, api.CONFIG.RESTORE_SNAPSHOT_PREFIX), [
+    "FFM_NPI_Ops_pre_restore_2026-11-01_010000.json",
+    "FFM_NPI_Ops_pre_restore_2026-11-02_010000.json"
+  ]);
+  // The daily job counts only its own files too, so restores never evict them.
+  deep(api.backupFilesToDelete_(mixed, 30), []);
 });
 
 check("fewer files than the limit deletes nothing", () => {

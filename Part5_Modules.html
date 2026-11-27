@@ -1836,6 +1836,163 @@ function ImportMergePreviewModal({ kind, fileName, summary, samples, removedSamp
 }
 
 // ============================================================================
+// RESTORE BACKUP MODAL — say what the file replaces before anything is applied
+// ============================================================================
+
+/**
+ * A JSON backup replaces every workspace slice at once, so the sidebar's Restore
+ * asks here first. The dialog names the file, compares its four headline counts
+ * with the live workspace, and states the two safety nets: a Drive snapshot of the
+ * current workspace before anything changes, and the new revision the save leaves
+ * in State history.
+ */
+function RestoreBackupModal({
+  fileName,
+  exportedAt,
+  revision,
+  current = {},
+  incoming = {},
+  applying,
+  error,
+  onCancel,
+  onConfirm
+}) {
+  const count = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0).toLocaleString();
+  const rows = [
+    { key: 'programs', label: 'Programs', now: current.programs, next: incoming.programs },
+    { key: 'production', label: 'Production rows', now: current.productionRows, next: incoming.productionRows },
+    { key: 'gates', label: 'Gate cells', now: current.gates, next: incoming.gates },
+    { key: 'tasks', label: 'Tasks', now: current.tasks, next: incoming.tasks }
+  ];
+  const emptied = rows.filter((row) => Number(row.next) === 0 && Number(row.now) > 0);
+  const emptiedLabels = emptied.map((row) => row.label.toLowerCase());
+  const emptiedPhrase =
+    emptiedLabels.length <= 1
+      ? emptiedLabels[0] || ''
+      : `${emptiedLabels.slice(0, -1).join(', ')} and ${emptiedLabels[emptiedLabels.length - 1]}`;
+  const exportedLabel = exportedAt ? String(exportedAt).replace('T', ' ').slice(0, 16) : null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="restore-backup-title"
+        className="w-full max-w-lg max-h-[90vh] flex flex-col bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs"
+      >
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Upload className="w-4 h-4 shrink-0 text-blue-600 dark:text-blue-400" />
+            <h3 id="restore-backup-title" className="text-sm font-bold text-slate-900 dark:text-slate-100">
+              Restore workspace from backup
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={applying}
+            aria-label="Cancel restore"
+            className="p-1 rounded text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3 overflow-y-auto">
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 break-all">
+            <span className="font-semibold text-slate-700 dark:text-slate-300">{fileName}</span>
+            {exportedLabel ? ` · exported ${exportedLabel}` : ''}
+            {Number(revision) > 0 ? ` · Rev #${Number(revision)}` : ''}
+          </p>
+
+          <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200">
+            <div className="font-bold flex items-center gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              This replaces the whole workspace
+            </div>
+            <div className="mt-1 text-[10px] leading-relaxed">
+              Every program, production row, gate decision and task in the app is replaced by the file's contents.
+              Nothing is merged.
+            </div>
+          </div>
+
+          <table className="w-full border-collapse text-xs">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                <th className="py-1.5 text-left font-semibold">Record</th>
+                <th className="py-1.5 text-right font-semibold">Now</th>
+                <th className="py-1.5 text-right font-semibold">From backup</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {rows.map((row) => {
+                const drops = Number(row.next) === 0 && Number(row.now) > 0;
+                return (
+                  <tr key={row.key}>
+                    <td className="py-2 font-semibold text-slate-700 dark:text-slate-300">{row.label}</td>
+                    <td className="py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">{count(row.now)}</td>
+                    <td
+                      className={`py-2 text-right font-bold tabular-nums ${
+                        drops ? 'text-rose-700 dark:text-rose-300' : 'text-slate-900 dark:text-slate-100'
+                      }`}
+                    >
+                      {count(row.next)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+
+          <p className="text-[10px] text-slate-500 dark:text-slate-400 tabular-nums">
+            Signed-off gate cells: {count(current.signedOff)} now · {count(incoming.signedOff)} in the backup.
+            {emptied.length > 0 ? ` The backup leaves ${emptiedPhrase} empty.` : ''}
+          </p>
+
+          <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-800">
+            <div className="font-semibold flex items-center gap-1.5 text-slate-700 dark:text-slate-200">
+              <ShieldCheck className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              A Drive snapshot is written first
+            </div>
+            <p className="mt-1 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
+              The workspace as it stands now — including unsaved edits — is saved to a dated JSON file in the Drive
+              backup folder before anything changes. If that snapshot fails, nothing is restored. The restore is then
+              saved as a new revision, so State history also keeps the workspace you leave behind.
+            </p>
+          </div>
+
+          {error && (
+            <p role="alert" className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950 border border-rose-200 dark:border-rose-800 text-[11px] leading-relaxed text-rose-800 dark:text-rose-200 break-words">
+              {error}
+            </p>
+          )}
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={applying}
+            className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={applying}
+            className="px-4 py-2 rounded-lg font-semibold text-white bg-amber-600 hover:bg-amber-500 inline-flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            {applying ? 'Writing Drive snapshot…' : 'Back up & restore'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // SAVE CONFLICT MODAL — local edits are never discarded without a choice
 // ============================================================================
 

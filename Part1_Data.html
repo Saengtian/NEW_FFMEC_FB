@@ -4527,6 +4527,36 @@ function diffWorkspacePayloads(local, remote) {
   return slices;
 }
 
+/**
+ * The four counts the restore dialog shows before a JSON backup replaces the
+ * workspace: programs, production rows, gate cells and tasks. A gate cell is one
+ * program/line/gate dossier; `signedOff` counts the approved ones, so a restore
+ * that keeps the rows but drops the signatures is still visible.
+ */
+function summarizeWorkspaceForRestore(payload) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  let gates = 0;
+  let signedOff = 0;
+  Object.values(source.gateRecords && typeof source.gateRecords === 'object' ? source.gateRecords : {}).forEach(
+    (lines) => {
+      Object.values(lines && typeof lines === 'object' ? lines : {}).forEach((cells) => {
+        Object.values(cells && typeof cells === 'object' ? cells : {}).forEach((cell) => {
+          if (!cell || typeof cell !== 'object') return;
+          gates += 1;
+          if (cell.status === 'Approved') signedOff += 1;
+        });
+      });
+    }
+  );
+  return {
+    programs: Array.isArray(source.projects) ? source.projects.length : 0,
+    productionRows: Array.isArray(source.productionRecords) ? source.productionRecords.length : 0,
+    gates,
+    signedOff,
+    tasks: Array.isArray(source.tasks) ? source.tasks.length : 0
+  };
+}
+
 function triggerCsvDownload(filename, csv) {
   // UTF-8 BOM so Excel shows Thai text and the ฿ sign instead of mojibake.
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
