@@ -346,10 +346,49 @@ check("a production date is read from the shapes a file writes", () => {
   assert.equal(normalizeProductionDate("2026-13-45"), "", "an impossible date is not read as one");
   assert.equal(normalizeProductionDate(""), "");
   assert.equal(normalizeProductionDate(null), "");
+});
 
-  // A row with no readable date cannot be placed in any period, so it is refused.
-  const issues = productionRecordIssues(record({ date: "" }), null, null);
-  assert.deepEqual(codes(issues), [PRODUCTION_RECORD_ISSUES.DATE_MISSING]);
+check("a record with no readable date is refused by every entry point", () => {
+  const badDates = ["", "   ", "not a date", "2026-02-30", "11/20/2026", 20261120, null, undefined];
+  badDates.forEach((date) => {
+    const issues = productionRecordIssues(record({ date }), null, null);
+    assert.deepEqual(
+      codes(issues),
+      [PRODUCTION_RECORD_ISSUES.DATE_MISSING],
+      `date ${JSON.stringify(date)} should be refused`
+    );
+    assert.equal(issues[0].severity, "block");
+
+    // The form's gate and the loader's filter both read this one rule.
+    assert.equal(productionRecordBlockingIssues(record({ date }), [], null).length, 1);
+    const cleaned = sanitizeProductionRecords([record({ date })]);
+    assert.equal(cleaned.records.length, 0, "a row without a date is never kept");
+    assert.deepEqual(codes(cleaned.dropped[0].issues), [PRODUCTION_RECORD_ISSUES.DATE_MISSING]);
+  });
+
+  // A real day is accepted in both ISO shapes a record may hold.
+  ["2026-11-20", "2026-11-20T08:30:00.000Z"].forEach((date) => {
+    assert.deepEqual(codes(productionRecordIssues(record({ date }), null, null)), []);
+    assert.equal(sanitizeProductionRecords([record({ date })]).records.length, 1);
+  });
+});
+
+check("the duplicate rule is keyed on the date, so a blank date cannot hide a repeat", () => {
+  const dated = record({ date: "2026-11-20" });
+  const sameDayOtherShape = record({ id: "REC-TEST-2", date: "2026-11-20T00:00:00.000Z" });
+  assert.equal(productionLineKey(dated), productionLineKey(sameDayOtherShape), "one day is one key");
+
+  const blank = record({ id: "REC-TEST-3", date: "" });
+  assert.notEqual(productionLineKey(blank), productionLineKey(dated), "an empty date cannot key onto the dated row");
+
+  // …which is exactly why the blank row is refused before dedupe could miss it.
+  assert.deepEqual(codes(productionRecordIssues(blank, [dated], null)), [PRODUCTION_RECORD_ISSUES.DATE_MISSING]);
+
+  // The same day written two ways is still a duplicate.
+  assert.deepEqual(
+    codes(productionRecordIssues(sameDayOtherShape, [dated], null)),
+    [PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE]
+  );
 });
 
 check("a CSV import plans the rows that pass and names the ones it refuses", () => {

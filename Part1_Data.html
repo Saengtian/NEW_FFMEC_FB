@@ -2191,7 +2191,11 @@ function productionLineKey(record) {
     const value = record ? record[key] : '';
     return String(value === null || value === undefined ? '' : value).trim().toUpperCase();
   };
-  return [field('date'), field('model'), field('config'), field('side'), field('station')].join('\u0000');
+  // The date is the day it names, not the string it was written as: a row saved
+  // with 2026-11-20T00:00:00Z is the same run as one saved with 2026-11-20.
+  const rawDate = field('date');
+  const date = normalizeProductionDate(rawDate) || rawDate;
+  return [date, field('model'), field('config'), field('side'), field('station')].join('\u0000');
 }
 
 /** "X4151 · ME11 RHS · Fan Assembly · 2026-11-20" — the row a duplicate clashes with. */
