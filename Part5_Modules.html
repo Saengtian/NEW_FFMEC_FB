@@ -3181,7 +3181,7 @@ function KpiBarRows({ rows, emptyText, activeKey, onSelect }) {
             onClick={interactive ? () => onSelect(row.key) : undefined}
             aria-pressed={interactive ? active : undefined}
             title={interactive ? (active ? 'Clear variant scope' : `Scope the deep dive to ${row.label}`) : undefined}
-            className={`w-full flex items-center gap-2 text-[11px] text-left rounded-md ${
+            className={`w-full flex items-center gap-2 text-[11px] text-left rounded-md break-inside-avoid ${
               active
                 ? 'bg-blue-50 dark:bg-blue-950/60 ring-1 ring-blue-300 dark:ring-blue-800 px-1.5 py-1 -mx-1.5'
                 : interactive
@@ -3189,15 +3189,18 @@ function KpiBarRows({ rows, emptyText, activeKey, onSelect }) {
                 : ''
             }`}
           >
-            <span className={`w-44 shrink-0 truncate ${active ? 'font-semibold text-blue-800 dark:text-blue-200' : 'text-slate-600 dark:text-slate-400'}`} title={row.label}>
+            {/* The three fixed columns shrink and the sample count drops out below
+                sm: at 375px the old 176+80+128 left the bar at 0 width and the row
+                clipped 58px past the card. */}
+            <span className={`w-44 max-w-[11rem] min-w-0 shrink truncate ${active ? 'font-semibold text-blue-800 dark:text-blue-200' : 'text-slate-600 dark:text-slate-400'}`} title={row.label}>
               {row.label}
             </span>
-            <div className="flex-1 h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+            <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
               <div className={`h-full ${row.barClass}`} style={{ width: `${Math.max(1, Math.min(100, row.pct))}%` }} />
             </div>
-            <span className="w-20 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{row.valueText}</span>
+            <span className="w-16 sm:w-20 shrink-0 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{row.valueText}</span>
             {row.meta && (
-              <span className="w-32 text-right text-[10px] text-slate-400 dark:text-slate-400 truncate" title={row.meta}>
+              <span className="hidden sm:inline w-20 sm:w-32 shrink-0 text-right text-[10px] text-slate-400 dark:text-slate-400 truncate" title={row.meta}>
                 {row.meta}
               </span>
             )}
@@ -3253,25 +3256,30 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun }) {
         cumulative += share;
         const vital = !row.isOthers && before < 80;
         return (
-          <div key={row.key} className="flex items-center gap-2 text-[11px]">
+          <div key={row.key} className="flex items-center gap-2 text-[11px] break-inside-avoid">
+            {/* The label takes its share of the row instead of a fixed 112px below
+                sm: at 600px the card is 551px wide and was cutting names at 112px
+                with 400px of free space next to the bar. */}
             <span
-              className={`w-28 sm:w-44 shrink-0 truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
+              className={`w-44 max-w-[11rem] min-w-0 shrink truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
               title={row.label}
             >
               {row.label}
             </span>
-            <div className="flex-1 h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+            <div className="flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
               <div
                 className={`h-full ${row.isOthers ? 'bg-slate-400 dark:bg-slate-600' : vital ? 'bg-rose-500' : 'bg-rose-300 dark:bg-rose-800'}`}
                 style={{ width: `${Math.max(1, Math.min(100, share))}%` }}
               />
             </div>
-            <span className={`w-16 sm:w-20 shrink-0 text-right font-semibold tabular-nums ${row.isOthers ? 'text-slate-500 dark:text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
+            <span className={`w-14 sm:w-20 shrink-0 text-right font-semibold tabular-nums ${row.isOthers ? 'text-slate-500 dark:text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
               {Math.round(row.value).toLocaleString()} {unit}
             </span>
             <span className="w-9 sm:w-12 shrink-0 text-right tabular-nums text-slate-500 dark:text-slate-400">{share.toFixed(0)}%</span>
+            {/* Below sm the cumulative column is dropped so the name and the bar
+                keep half the row each; the footer stops promising it there. */}
             <span
-              className={`w-12 sm:w-16 shrink-0 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}
+              className={`hidden sm:inline-block w-12 sm:w-16 shrink-0 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}
               title="cumulative share"
             >
               {cumulative.toFixed(0)}%
@@ -3281,8 +3289,10 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun }) {
       })}
       <div className="text-[10px] text-slate-400 dark:text-slate-400 pt-1">
         {tail.length > 0
-          ? `Showing the top ${shown.length} of ${rows.length} contributors — solid bars cover the vital few (first 80% of loss), the last column is the cumulative share; the remaining ${tail.length} are grouped as Others.`
-          : 'Solid bars are the vital few — the modes/categories making up the first 80% of total loss; the last column is the cumulative share.'}
+          ? `Showing the top ${shown.length} of ${rows.length} contributors — solid bars cover the vital few (first 80% of loss)`
+          : 'Solid bars are the vital few — the modes/categories making up the first 80% of total loss'}
+        <span className="hidden sm:inline">; the last column is the cumulative share</span>
+        {tail.length > 0 ? `; the remaining ${tail.length} are grouped as Others.` : '.'}
       </div>
     </div>
   );
@@ -3854,7 +3864,9 @@ function KpiDeepDiveSection({
           )}
         </section>
 
-        <div className="grid gap-5 xl:grid-cols-2">
+        {/* grid-cols-1 keeps the implicit track shrinkable: without it the auto
+            track sized to the rows' min-content and pushed 58px past the card. */}
+        <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
           <section>
             <h3 className={`${chartHeading} mb-2`}>{meta.variantHeading}</h3>
             <KpiBarRows rows={view.variant} emptyText="No records in this range." />
