@@ -1456,15 +1456,36 @@ function App() {
     if (!project) return;
     const keys = Array.isArray(rowKeys) ? rowKeys : [rowKeys];
 
-    setScheduleOverrides((prev) => {
-      const next = { ...prev };
-      keys.forEach((k) => {
-        next[`${projectId}::${k}`] = { ...scheduleForm };
-      });
-      return next;
+    // Only lines that actually move get an override. Saving the modal without
+    // touching a date used to store the plan back on top of itself, so the store
+    // filled up with "overrides" identical to the row's own schedule; an
+    // override that only repeats the default plan is dropped for the same reason.
+    const next = { ...scheduleOverrides };
+    const movedKeys = [];
+    const clearedKeys = [];
+    keys.forEach((k) => {
+      const scopedKey = `${projectId}::${k}`;
+      const current = lineGateSchedule(project, k, scheduleOverrides);
+      if (scheduleMatchesTimeline(scheduleForm, current)) {
+        if (next[scopedKey] && scheduleMatchesTimeline(scheduleForm, lineGateSchedule(project, k, {}))) {
+          delete next[scopedKey];
+          clearedKeys.push(k);
+        }
+        return;
+      }
+      next[scopedKey] = { ...scheduleForm };
+      movedKeys.push(k);
     });
 
-    if (scheduleForm.mih) {
+    // A row's own FATP MIH follows the line only when that line moved.
+    const mihKeys = movedKeys.filter((k) =>
+      project.buildMatrix.some(
+        (r) => `${r.config}-${r.side || 'RHS'}` === k && r.fatpMih !== scheduleForm.mih
+      )
+    );
+
+    if (movedKeys.length > 0 || clearedKeys.length > 0) setScheduleOverrides(next);
+    if (scheduleForm.mih && mihKeys.length > 0) {
       setProjects((prev) =>
         prev.map((p) => {
           if (p.id !== projectId) return p;
@@ -1472,7 +1493,7 @@ function App() {
             ...p,
             buildMatrix: p.buildMatrix.map((r) => {
               const rKey = `${r.config}-${r.side || 'RHS'}`;
-              return keys.includes(rKey) ? { ...r, fatpMih: scheduleForm.mih } : r;
+              return mihKeys.includes(rKey) ? { ...r, fatpMih: scheduleForm.mih } : r;
             })
           };
         })
@@ -1480,9 +1501,18 @@ function App() {
     }
 
     setEditingScheduleTarget(null);
-    showToast(
-      `Updated Gantt timeline for ${project.model} (${keys.length} ${keys.length === 1 ? 'line' : 'lines'})`
-    );
+    if (movedKeys.length === 0 && clearedKeys.length === 0) {
+      showToast(`Timeline for ${project.model} already matched — nothing saved`);
+      return;
+    }
+    const parts = [];
+    if (movedKeys.length > 0) {
+      parts.push(`${movedKeys.length} ${movedKeys.length === 1 ? 'line' : 'lines'} moved`);
+    }
+    if (clearedKeys.length > 0) {
+      parts.push(`${clearedKeys.length} ${clearedKeys.length === 1 ? 'override' : 'overrides'} cleared`);
+    }
+    showToast(`Updated Gantt timeline for ${project.model} (${parts.join(', ')})`);
   };
 
   // Team directory: who is on the program, what they own and how to reach them.

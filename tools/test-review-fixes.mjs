@@ -88,6 +88,8 @@ const DECLARATIONS = [
   /function gateSignOffDueIso\([\s\S]*?\n}/,
   /function gateStatusPrefix\([\s\S]*?\n}/,
   /function lineGateSchedule\([\s\S]*?\n}/,
+  /const SCHEDULE_TIMELINE_FIELDS = \[[\s\S]*?\n\];/,
+  /function scheduleMatchesTimeline\([\s\S]*?\n}/,
   /function compareSignOffsByDue\([\s\S]*?\n}/,
   /function computeTeamWorkload\([\s\S]*?\n}/,
 ];
@@ -103,7 +105,7 @@ const pieces = DECLARATIONS.map((pattern) => {
 
 const api = new Function(
   `"use strict";\n${pieces.join("\n")}\n` +
-    "return { currentFiscalYear, fiscalYearWindow, applySpecLimitEdit, kpiFiscalScopeLabel, stageDragReschedulePayload, isOpenableEvidenceUrl, purgePlaceholderEvidence, ganttStageGateDriver, ganttGateTone, GANTT_GATE_TONES, GANTT_GATE_UNSIGNED_TONE, stageMoveConflict, normalizePersonName, teamMemberForOwner, unassignedOpenTasks, distinctProductStrings, programModels, programFamilies, productMatchesProject, memberExternalPrograms, unmatchedProducts, formatShortDate, formatMonthDay, sampleQuantile, cpkBoxSummary, getDefaultScheduleForRow, gateSignOffDueIso, gateStatusPrefix, lineGateSchedule, compareSignOffsByDue, computeTeamWorkload };"
+    "return { currentFiscalYear, fiscalYearWindow, applySpecLimitEdit, kpiFiscalScopeLabel, stageDragReschedulePayload, isOpenableEvidenceUrl, purgePlaceholderEvidence, ganttStageGateDriver, ganttGateTone, GANTT_GATE_TONES, GANTT_GATE_UNSIGNED_TONE, stageMoveConflict, normalizePersonName, teamMemberForOwner, unassignedOpenTasks, distinctProductStrings, programModels, programFamilies, productMatchesProject, memberExternalPrograms, unmatchedProducts, formatShortDate, formatMonthDay, sampleQuantile, cpkBoxSummary, getDefaultScheduleForRow, SCHEDULE_TIMELINE_FIELDS, scheduleMatchesTimeline, gateSignOffDueIso, gateStatusPrefix, lineGateSchedule, compareSignOffsByDue, computeTeamWorkload };"
 )();
 
 // The gate decision ledger is written in Code.js, so its row builder is read out
@@ -886,6 +888,39 @@ check('a failed append is reported, logged and never thrown', () => {
     logged.some((line) => line.indexOf('SignOffLog append failed after the state store committed') !== -1),
     'the failure was swallowed without a log line'
   );
+});
+
+check("a timeline saved unchanged is the line's own schedule, not a move", () => {
+  const project = {
+    id: 'PRJ-T1',
+    model: 'X4151',
+    phase: 'EVT',
+    mihDate: '2026-12-24',
+    buildMatrix: [{ config: 'ME11', side: 'RHS', fatpMih: '2026-12-20' }]
+  };
+  const defaults = api.getDefaultScheduleForRow(project, project.buildMatrix[0]);
+  equal(api.SCHEDULE_TIMELINE_FIELDS.length, 11);
+
+  // Opening the modal and saving it untouched repeats the schedule the line has.
+  equal(api.scheduleMatchesTimeline(defaults, api.lineGateSchedule(project, 'ME11-RHS', {})), true);
+  equal(api.scheduleMatchesTimeline({ ...defaults }, { ...defaults }), true);
+
+  // One moved date is a real move, and must still be stored.
+  equal(api.scheduleMatchesTimeline({ ...defaults, mainEnd: '2026-12-01' }, defaults), false);
+  equal(api.scheduleMatchesTimeline({ ...defaults, mih: '2026-12-21' }, defaults), false);
+
+  // An earlier move is the line's schedule now: re-saving it changes nothing.
+  const moved = { ...defaults, mih: '2026-12-27', etd: '2026-12-23' };
+  const overrides = { 'PRJ-T1::ME11-RHS': moved };
+  equal(api.scheduleMatchesTimeline(moved, api.lineGateSchedule(project, 'ME11-RHS', overrides)), true);
+  equal(
+    api.scheduleMatchesTimeline({ ...moved }, api.lineGateSchedule(project, 'ME11-RHS', overrides)),
+    true
+  );
+
+  // A schedule on neither side never counts as a match.
+  equal(api.scheduleMatchesTimeline(null, defaults), false);
+  equal(api.scheduleMatchesTimeline(defaults, undefined), false);
 });
 
 for (const r of results) {

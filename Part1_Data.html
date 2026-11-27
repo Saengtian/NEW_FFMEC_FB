@@ -2835,6 +2835,33 @@ function getDefaultScheduleForRow(project, row) {
   };
 }
 
+// The eleven dates the Gantt draws, in the order the timeline reads them.
+const SCHEDULE_TIMELINE_FIELDS = [
+  'prepStart',
+  'brrEnd',
+  'mboStart',
+  'mboEnd',
+  'mainStart',
+  'mainEnd',
+  'oqcStart',
+  'oqcEnd',
+  'etd',
+  'mih',
+  'pbr'
+];
+
+/**
+ * True when `next` repeats `current` date for date. Saving the timeline a line
+ * already has is not a move, so no override is stored for it — the plan stays
+ * derived from the row, and the override store keeps only lines someone moved.
+ */
+function scheduleMatchesTimeline(next, current) {
+  if (!next || !current) return false;
+  return SCHEDULE_TIMELINE_FIELDS.every(
+    (field) => String(next[field] || '') === String(current[field] || '')
+  );
+}
+
 /**
  * Why a stage's proposed dates cannot be the plan, or null when they can. A stage
  * may move, but not out of order: it cannot begin before the stage it follows has
