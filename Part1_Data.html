@@ -4046,9 +4046,14 @@ function diffWorkspacePayloads(local, remote) {
   return slices;
 }
 
+// UTF-8 BOM so Excel shows Thai text and the ฿ sign instead of mojibake.
+// Shared by every CSV download path, including the KPI deep-dive export.
+function csvDownloadText(csv) {
+  return '\uFEFF' + csv;
+}
+
 function triggerCsvDownload(filename, csv) {
-  // UTF-8 BOM so Excel shows Thai text and the ฿ sign instead of mojibake.
-  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const blob = new Blob([csvDownloadText(csv)], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

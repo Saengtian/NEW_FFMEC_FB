@@ -8,8 +8,14 @@
  *  - deleting a seeded ME12 (whose ME: counter is still 0) records the config
  *    so the next add cannot reissue it
  *
- * The helpers are read straight out of Part1_Data.html, Part2_App.html and
- * Part4_ViewsB.html —
+ * Task 3 covers CSV/state safety:
+ *
+ *  - KPI CSV exports neutralize cells that would open as spreadsheet formulas
+ *  - every CSV download carries a UTF-8 BOM
+ *  - archived state history rows neutralize formula-like payload text
+ *
+ * The helpers are read straight out of Part1_Data.html, Part2_App.html,
+ * Part4_ViewsB.html and Part5_Modules.html —
  * the same text tools/build.mjs compiles — so the tests cannot drift from a copy
  * of a rule. Later tasks add their checks to this same file and `api` object.
  * Tooling only: tools/** is in .claspignore, so nothing here ships to Apps Script.
@@ -26,6 +32,7 @@ const sources = {
   part1: readFileSync(join(ROOT, "Part1_Data.html"), "utf8"),
   part2: readFileSync(join(ROOT, "Part2_App.html"), "utf8"),
   part4: readFileSync(join(ROOT, "Part4_ViewsB.html"), "utf8"),
+  part5: readFileSync(join(ROOT, "Part5_Modules.html"), "utf8"),
   code: readFileSync(join(ROOT, "Code.js"), "utf8")
 };
 
@@ -35,7 +42,13 @@ const DECLARATIONS = [
   { file: "part1", pattern: /function withIdCounter\([\s\S]*?\n}/, optional: true },
   { file: "part1", pattern: /function getSideList\([\s\S]*?\n}/ },
   { file: "part4", pattern: /function nextBuildMatrixConfig\([\s\S]*?\n}/ },
-  { file: "code", pattern: /function saveIdentity_\([\s\S]*?\n}/, optional: true }
+  { file: "code", pattern: /function saveIdentity_\([\s\S]*?\n}/, optional: true },
+  { file: "part1", pattern: /function csvText\([\s\S]*?\n}/ },
+  { file: "part1", pattern: /function csvDownloadText\([\s\S]*?\n}/, optional: true },
+  { file: "part5", pattern: /function kpiDeepDiveCsv\([\s\S]*?\n}/ },
+  { file: "code", pattern: /function safeSheetText_\([\s\S]*?\n}/ },
+  { file: "code", pattern: /function safeSheetRow_\([\s\S]*?\n}/ },
+  { file: "code", pattern: /function stateHistoryRows_\([\s\S]*?\n}/, optional: true }
 ];
 
 const pieces = DECLARATIONS.flatMap(({ file, pattern, optional }) => {
@@ -52,7 +65,10 @@ const api = new Function(
   `"use strict";\n${pieces.join("\n")}\n` +
     "return { nextId, getSideList, nextBuildMatrixConfig, " +
     "withIdCounter: typeof withIdCounter === 'function' ? withIdCounter : undefined, " +
-    "saveIdentity_: typeof saveIdentity_ === 'function' ? saveIdentity_ : undefined };"
+    "saveIdentity_: typeof saveIdentity_ === 'function' ? saveIdentity_ : undefined, " +
+    "csvDownloadText: typeof csvDownloadText === 'function' ? csvDownloadText : undefined, " +
+    "kpiDeepDiveCsv, " +
+    "stateHistoryRows_: typeof stateHistoryRows_ === 'function' ? stateHistoryRows_ : undefined };"
 )();
 
 /**
@@ -155,6 +171,24 @@ check('saveWorkspaceState binds the typed email for ledger and response', () => 
     'ledger and response must both use the typed email');
   assert.ok(!/userEmail: actorLabel/.test(src),
     'the fallback actorLabel must not replace the typed email');
+});
+
+// Task 3: exported CSV and archived state rows must not evaluate as formulas.
+check('KPI CSV neutralizes a formula', () => {
+  const kpi = api.kpiDeepDiveCsv(
+    { digits: 0 },
+    { trend: [{ label: '=1+1', value: 1, meta: '', thin: false }], variant: [], pareto: [] }
+  );
+  assert.match(kpi, /"'=1\+1"/);
+});
+check('KPI export text carries a BOM', () =>
+  equal(api.csvDownloadText('a,b'), '\uFEFFa,b'));
+check('history rows neutralize a formula', () => {
+  const rows = api.stateHistoryRows_(
+    [['k', 0, 1, '2026-01-01', '=1+1']], 7, 'user@example.com'
+  );
+  equal(rows[0][5], "'=1+1");
+  equal(rows[0][6], 'user@example.com');
 });
 
 for (const r of results) {

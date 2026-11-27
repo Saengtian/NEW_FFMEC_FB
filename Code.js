@@ -673,6 +673,19 @@ function appendSignOffLedger_(ss, rows) {
 }
 
 /**
+ * Builds one history row per persisted state row. Payload chunks are user text,
+ * so every cell goes through safeSheetRow_ before it reaches setValues.
+ */
+function stateHistoryRows_(rows, revision, savedBy) {
+  return rows.map(function(row) {
+    return [
+      String(row[0] || ''), revision, Number(row[1]) || 0, Number(row[2]) || 0,
+      String(row[3] || ''), String(row[4] || ''), savedBy
+    ];
+  }).map(safeSheetRow_);
+}
+
+/**
  * Copies the state rows that are about to be overwritten into
  * `_FFM_STATE_HISTORY`, so a save can be undone. Only the newest
  * CONFIG.HISTORY_LIMIT revisions are kept.
@@ -695,12 +708,7 @@ function archiveStateRevision_(ss, revision, rows) {
     }
   }
 
-  const out = rows.map(function(row) {
-    return [
-      String(row[0] || ''), revision, Number(row[1]) || 0, Number(row[2]) || 0,
-      String(row[3] || ''), String(row[4] || ''), savedBy
-    ];
-  });
+  const out = stateHistoryRows_(rows, revision, savedBy);
   if (out.length === 0) return;
   sheet.getRange(sheet.getLastRow() + 1, 1, out.length, 7).setValues(out);
   pruneStateHistory_(sheet, CONFIG.HISTORY_LIMIT);

@@ -2582,11 +2582,6 @@ function kpiTrendPoints(map) {
     }));
 }
 
-function kpiCsvCell(value) {
-  const text = value === null || value === undefined ? '' : String(value);
-  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
 // One flat sheet (section · label · value · unit · share · cumulative · sample) so the
 // download opens cleanly in Excel and the three tables can be filtered or pivoted.
 function kpiDeepDiveCsv(meta, view) {
@@ -2652,7 +2647,7 @@ function kpiDeepDiveCsv(meta, view) {
     ]);
   });
 
-  return rows.map((cells) => cells.map(kpiCsvCell).join(',')).join('\r\n');
+  return rows.map((cells) => cells.map(csvText).join(',')).join('\r\n');
 }
 
 // One builder per KPI family. Everything the modal renders — headline, scope line,
@@ -3346,7 +3341,7 @@ function KpiDeepDiveModal({
     .replace(/^-|-$/g, '')}-deep-dive-${range.id}-${todayIso()}`;
 
   const handleExportCsv = () => {
-    const blob = new Blob([kpiDeepDiveCsv(meta, view)], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob([csvDownloadText(kpiDeepDiveCsv(meta, view))], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
