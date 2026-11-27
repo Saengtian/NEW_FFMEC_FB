@@ -115,10 +115,11 @@ whole app crosses into the next fiscal year together on 1 April rather than on a
 1. Six CTQs carry provisional limits and cannot be certified capable until real limits are entered.
 2. The whole workspace is one JSON document in chunked rows: every save rewrites all slices, so two
    people saving at once end in a revision conflict rather than a merge.
-3. The sign-off ledger records only decisions changed by a save, and is appended after the state
-   write; a ledger failure can report an error on an otherwise saved change. The next app load repairs
-   the gap (the client calls `reconcileSignOffLedger()`, which appends only the missing decisions), but
-   only while the two revisions that bracket the failed save are still in history — five saves deep.
+3. The sign-off ledger records only decisions changed by a save, and is appended before the state
+   write; a ledger failure refuses the save rather than committing a signature without its audit row.
+   The next app load still repairs legacy gaps (the client calls `reconcileSignOffLedger()`, which
+   appends only the missing decisions), but only while the two revisions that bracket the legacy gap
+   are still in history — five saves deep.
 4. History keeps five revisions of the whole store, not per-record history.
 5. The bundle is ~1.3 MB of inline script; startup cost on weak hardware is noticeable.
 

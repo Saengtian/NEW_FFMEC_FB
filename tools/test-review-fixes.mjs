@@ -14,9 +14,8 @@
  *    stages and inside the line's FATP MIH
  *  - the server's sign-off ledger appends a row only for a decision this save
  *    actually changed, and never for a dossier the same save created
- *  - the ledger append runs after the state chunks commit, so a failure there
- *    is logged, audited and returned as a warning instead of failing a
- *    committed save
+ *  - the ledger append runs before the state chunks commit, so a failure there
+ *    refuses the save instead of leaving a committed signature unlogged
  *  - the toast controller honours a per-message duration, hide() clears the
  *    toast, and no success line can bury a warning someone still has to read
  *  - a team member's workload counts only the tasks assigned to them (a stored
@@ -145,30 +144,6 @@ const serverPieces = SERVER_DECLARATIONS.map((pattern) => {
 
 const serverApi = new Function(
   `"use strict";\n${serverPieces.join("\n")}\n` + "return { SIGN_OFF_LEDGER_HEADERS, signOffLedgerRows };"
-)();
-
-// The ledger append is the post-commit step, so its guard is read out of Code.js
-// with the sheet writer stubbed: the test drives success, failure and no-rows
-// without a spreadsheet.
-const SAFE_LEDGER_DECLARATIONS = [
-  /function appendSignOffLedgerSafely_\([\s\S]*?\n}/,
-  /function errorMessage_\([\s\S]*?\n}/
-];
-
-const safeLedgerPieces = SAFE_LEDGER_DECLARATIONS.map((pattern) => {
-  const match = serverSource.match(pattern);
-  if (!match) {
-    console.error(`Code.js no longer declares ${pattern} — update this test, the ledger guard moved.`);
-    process.exit(1);
-  }
-  return match[0];
-});
-
-const safeLedgerApi = new Function(
-  `"use strict";\nlet appendImpl = null;\n` +
-    "function appendSignOffLedger_(ss, rows) { return appendImpl(ss, rows); }\n" +
-    `${safeLedgerPieces.join("\n")}\n` +
-    'return { run(impl, rows) { appendImpl = impl; return appendSignOffLedgerSafely_({ id: "sheet" }, rows); } };'
 )();
 
 const saveBody = serverSource.slice(
@@ -860,48 +835,27 @@ check('the ledger header names the program, gate, approver and signer', () => {
   });
 });
 
-// --- sign-off ledger after the commit (Code.js save path) ---
+// --- sign-off ledger before the commit (Code.js save path) ---
 
-check('ledger rows are built before the state store is rewritten', () => {
+check('ledger rows are built before the idempotent append and the store rewrite', () => {
   const buildAt = saveBody.indexOf('signOffRows = signOffLedgerRows(');
+  const appendAt = saveBody.indexOf('ledgerAppended = appendSignOffLedgerOnce_(');
   const writeAt = saveBody.indexOf('stateSheet.clearContents()');
-  assert.ok(buildAt !== -1 && writeAt !== -1, 'the save path no longer builds rows and writes where expected');
-  assert.ok(buildAt < writeAt, 'ledger rows are still built after the state chunks are written');
-});
-check('the committed save reaches the ledger through the guard, never the raw append', () => {
-  const writeAt = saveBody.indexOf('stateSheet.clearContents()');
-  const guardAt = saveBody.indexOf('appendSignOffLedgerSafely_');
-  assert.ok(guardAt !== -1, 'saveWorkspaceState no longer writes the ledger through the guard');
-  assert.ok(guardAt > writeAt, 'the ledger guard moved before the state write');
-  assert.ok(!/\bappendSignOffLedger_\(/.test(saveBody), 'saveWorkspaceState still calls appendSignOffLedger_ directly');
-  assert.ok(/warnings: warnings/.test(saveBody), 'the save response no longer carries the ledger warning');
-});
-check('a working ledger append reports what it wrote', () => {
-  deep(safeLedgerApi.run(() => 2, [['row'], ['row']]), { ok: true, appended: 2, error: '' });
-});
-check('a save with no ledger rows does not touch the ledger tab', () => {
-  let calls = 0;
-  const result = safeLedgerApi.run(() => { calls += 1; return 1; }, []);
-  deep(result, { ok: true, appended: 0, error: '' });
-  equal(calls, 0);
-});
-check('a failed append is reported, logged and never thrown', () => {
-  const logged = [];
-  const original = console.error;
-  console.error = (...args) => logged.push(args.join(" "));
-  let result;
-  try {
-    result = safeLedgerApi.run(() => { throw new Error('Service invoked too many times'); }, [['row']]);
-  } finally {
-    console.error = original;
-  }
-  equal(result.ok, false);
-  equal(result.appended, 0);
-  equal(result.error, 'Service invoked too many times');
   assert.ok(
-    logged.some((line) => line.indexOf('SignOffLog append failed after the state store committed') !== -1),
-    'the failure was swallowed without a log line'
+    buildAt !== -1 && appendAt !== -1 && writeAt !== -1,
+    'the save path no longer builds rows, appends them and writes where expected'
   );
+  assert.ok(buildAt < appendAt, 'ledger rows are built after the append');
+  assert.ok(appendAt < writeAt, 'the ledger append moved after the state chunks are written');
+});
+check('a ledger append failure refuses the save instead of warning after commit', () => {
+  const appendAt = saveBody.indexOf('ledgerAppended = appendSignOffLedgerOnce_(');
+  const clearAt = saveBody.indexOf('stateSheet.clearContents()');
+  const refusalAt = saveBody.indexOf('Save refused: SignOffLog could not be written');
+  assert.ok(appendAt !== -1 && clearAt !== -1 && refusalAt !== -1, 'the ledger guard moved');
+  assert.ok(refusalAt < clearAt, 'the ledger failure is handled before the store commit');
+  assert.ok(!/appendSignOffLedgerSafely_/.test(saveBody), 'the post-commit ledger guard is still in the save path');
+  assert.ok(/warnings: \[\]/.test(saveBody), 'the save response still promises a ledger warning');
 });
 
 check("a toast keeps its own duration, can be hidden, and never lets success bury a warning", () => {

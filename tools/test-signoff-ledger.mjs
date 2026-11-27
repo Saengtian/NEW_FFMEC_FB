@@ -3,7 +3,7 @@
  *
  *  - the ledger is matched to the saved gate records by program + line + gate +
  *    approver, so a decision is never matched across programs or lines
- *  - a saved decision the ledger never received is reported (the failed append)
+ *  - a saved decision the ledger never received is reported (a legacy gap)
  *  - a ledger decision the saved state no longer holds is reported (reopened)
  *  - seeded decisions are not reported, because the server deliberately does not
  *    log dossiers that already existed when the decision was seeded

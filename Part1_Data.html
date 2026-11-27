@@ -4660,9 +4660,9 @@ function buildSampleCpkCsv(mode = 'wide') {
 // ---------------------------------------------------------------- sign-off ledger
 //
 // `SignOffLog` is the append-only gate decision ledger. A save appends to it
-// after the state store has committed, so a failed append leaves the saved state
-// ahead of the ledger and the only trace was a toast that disappears. These
-// helpers read it back, export it, and name where it disagrees with the state.
+// before the state store commits, so a committed signature cannot be missing
+// from the ledger. These helpers read it back, export it, and name where a legacy
+// gap or hand edit disagrees with the state.
 
 const SIGN_OFF_LEDGER_DECISIONS = ['Approved', 'Conditional', 'Rejected'];
 
@@ -4720,7 +4720,7 @@ function signOffStateDecisions(gateRecords, projects) {
  *
  * Two disagreements, and they mean different things:
  *  - missingFromLedger: the saved state holds a decision the ledger never got.
- *    A save appends every changed decision, so this is the failed append.
+ *    New saves append before the commit, so this is a legacy gap or a hand edit.
  *  - missingFromState: the ledger holds a decision whose approver has no decision
  *    in the saved state at all — the gate was signed and later reopened, or the
  *    program / line / approver was removed.

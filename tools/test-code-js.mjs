@@ -13,8 +13,9 @@
  *   2. the save permission rules, judged on the store rather than the payload —
  *      program ownership, roster ownership, and signatures that may only name
  *      the signed-in user;
- *   3. the append-only sign-off ledger — what gets a row, what does not, and what
- *      the save reports when the append fails after the store committed.
+ *   3. the append-only sign-off ledger — what gets a row, what does not, that
+ *      the ledger is written before the store commits, and that a failed append
+ *      refuses the save rather than leaving a committed signature unlogged.
  *
  * The mocks are deliberately dumb: a sheet is an array of rows, a range is a
  * window into it, and anything Apps Script would do on its own (formulas,
@@ -52,8 +53,8 @@ function createRange(sheet, r1, c1, numRows, numCols) {
   };
 
   const write = (values) => {
-    // One failure switch, used to prove a ledger append that throws after the
-    // store committed is reported rather than re-failing a saved revision.
+    // One failure switch, used to prove a ledger append that throws before the
+    // store commits refuses the save instead of committing an unlogged signature.
     if (sheet.failSetValuesFromRow && r1 >= sheet.failSetValuesFromRow) {
       throw new Error(`simulated sheet write failure at row ${r1}`);
     }
@@ -656,27 +657,102 @@ check("a decision that changes again appends a new row and leaves the earlier on
   equal(ledgerData()[1][8], "Rejected");
 });
 
-check("a ledger append that fails after the store committed is a warning, not a failed save", () => {
+check("a ledger append that fails refuses the save before the store commits", () => {
   reset();
   ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  const stateBefore = stateRows().map((row) => row.slice());
+  const historyBefore = sheetOf("_FFM_STATE_HISTORY").rows.map((row) => row.slice());
   sheetOf("SignOffLog").failSetValuesFromRow = 2; // header row is fine; the append is not
-  const result = save({
+
+  assert.throws(
+    () =>
+      save({
+        payload: payloadOf({ gateRecords: gateRecordsWith([{ name: "Engineer", decision: "Approved" }]) }),
+        as: "engineer@minebea.co.th",
+        revision: 1
+      }),
+    /Save refused: SignOffLog could not be written/
+  );
+
+  deep(stateRows().map((row) => row.slice()), stateBefore, "the store did not move");
+  deep(sheetOf("_FFM_STATE_HISTORY").rows.map((row) => row.slice()), historyBefore, "history did not move");
+  equal(api.loadWorkspaceState().revision, 1);
+  equal(
+    api.loadWorkspaceState().data.gateRecords["PRJ-X4151"][LINE_KEY].mbo.approvers.length,
+    0,
+    "the signature is not in the saved gate records"
+  );
+  equal(ledgerData().length, 0, "no audit row was written without a committed decision");
+
+  sheetOf("SignOffLog").failSetValuesFromRow = 0; // the outage ends
+  const retry = save({
     payload: payloadOf({ gateRecords: gateRecordsWith([{ name: "Engineer", decision: "Approved" }]) }),
     as: "engineer@minebea.co.th",
     revision: 1
   });
+  equal(retry.ok, true);
+  equal(retry.revision, 2);
+  equal(retry.signOffLedger.appended, 1);
+  equal(ledgerData().length, 1, "the retry writes the decision once");
+});
 
-  equal(result.ok, true, "the revision really did save");
-  equal(result.revision, 2);
-  equal(result.signOffLedger.appended, 0);
-  assert.match(result.warnings[0], /SignOffLog could not be appended/);
+check("a refused signature is not a gap after five later revisions", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  sheetOf("SignOffLog").failSetValuesFromRow = 2;
+  assert.throws(
+    () =>
+      save({
+        payload: payloadOf({ gateRecords: gateRecordsWith([{ name: "Engineer", decision: "Approved" }]) }),
+        as: "engineer@minebea.co.th",
+        revision: 1
+      }),
+    /Save refused: SignOffLog could not be written/
+  );
+  sheetOf("SignOffLog").failSetValuesFromRow = 0;
+
+  // Move the live state past the whole history window. There is no signature to
+  // recover because the refused save never committed one.
+  let revision = 1;
+  for (let i = 0; i < 5; i += 1) {
+    const result = ownerSave(payloadOf({ gateRecords: gateRecordsWith([]), tasks: [] }), revision);
+    revision = result.revision;
+  }
+  equal(revision, 6);
   equal(ledgerData().length, 0);
+  equal(api.loadWorkspaceState().data.gateRecords["PRJ-X4151"][LINE_KEY].mbo.approvers.length, 0);
+});
 
-  const audit = sheetOf("AuditLog").rows;
-  const errorRow = audit.find((row) => row[3] === "SIGN_OFF_LEDGER_ERROR");
-  assert.ok(errorRow, "the failure is recorded in AuditLog");
-  assert.match(String(errorRow[4]), /1 gate decision\(s\) missing from SignOffLog/);
-  equal(api.loadWorkspaceState().data.gateRecords["PRJ-X4151"][LINE_KEY].mbo.approvers[0].decision, "Approved");
+check("a retry cannot duplicate a decision already in the ledger", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  // Simulate a ledger row whose state commit failed: the retry must not append
+  // the same decision again. The identity is revision + program + line + gate +
+  // approver + decision; the timestamp and remark are not part of it.
+  const existing = [
+    "2026-11-20T00:00:00.000Z",
+    2,
+    "PRJ-X4151",
+    "X4151",
+    LINE_KEY,
+    "G4 MBO & OK2B",
+    "Engineer",
+    "NPI Engineer",
+    "Approved",
+    "",
+    "engineer@minebea.co.th"
+  ];
+  sheetOf("SignOffLog").appendRow(existing);
+
+  const retry = save({
+    payload: payloadOf({ gateRecords: gateRecordsWith([{ name: "Engineer", decision: "Approved" }]) }),
+    as: "engineer@minebea.co.th",
+    revision: 1
+  });
+  equal(retry.ok, true);
+  equal(retry.signOffLedger.appended, 0);
+  equal(ledgerData().length, 1);
+  deep(ledgerData()[0], existing);
 });
 
 check("getSignOffLedger reads the tab back as decision objects", () => {
@@ -752,53 +828,44 @@ check("a ledger that is already complete reconciles nothing", () => {
   equal(JSON.stringify(ledgerData()), before);
 });
 
-check("a failed append is repaired with the row the save would have written", () => {
+check("a missing ledger row is repaired from the archived revisions", () => {
   reset();
   ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
-  sheetOf("SignOffLog").failSetValuesFromRow = 2;
-  const failed = signEngineer("Approved", { revision: 1, remark: "line released" });
-  equal(failed.ok, true, `the save itself still succeeds: ${failed.error || ""}`);
-  equal(ledgerData().length, 0, "the append really did fail");
-  sheetOf("SignOffLog").failSetValuesFromRow = 0; // the outage ends
+  const signed = signEngineer("Approved", { revision: 1, remark: "line released" });
+  equal(signed.signOffLedger.appended, 1);
+  const expected = ledgerData()[0].slice();
+
+  // Simulate a legacy post-commit append that never landed: the state has the
+  // decision and the archived revision still lets the ledger be rebuilt.
+  sheetOf("SignOffLog").rows = ledgerRows().slice(0, 1);
+  equal(ledgerData().length, 0, "the row is missing");
 
   const repair = api.reconcileSignOffLedger();
   equal(repair.ok, true, `reconcile failed: ${repair.error || ""}`);
   equal(repair.appended, 1);
-
-  const row = ledgerData()[0];
-  equal(row[0], failed.lastSavedAt, "the decision's own timestamp, not the repair time");
-  equal(Number(row[1]), 2, "the revision that recorded it");
-  equal(row[2], "PRJ-X4151");
-  equal(row[3], "X4151");
-  equal(row[4], LINE_KEY);
-  equal(row[5], "G4 MBO & OK2B");
-  equal(row[6], "Engineer");
-  equal(row[7], "NPI Engineer");
-  equal(row[8], "Approved");
-  equal(row[9], "line released");
-  equal(row[10], "engineer@minebea.co.th");
+  deep(ledgerData()[0], expected, "the rebuilt row keeps the save's timestamp and values");
 
   const again = api.reconcileSignOffLedger();
   equal(again.appended, 0, "reconciling twice does not duplicate the row");
   equal(ledgerData().length, 1);
 });
 
-check("a gap is still repaired after later saves have moved the store on", () => {
+check("a legacy gap is still repaired after later saves have moved the store on", () => {
   reset();
   ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
-  sheetOf("SignOffLog").failSetValuesFromRow = 2;
-  const failed = signEngineer("Approved", { revision: 1 });
+  const signed = signEngineer("Approved", { revision: 1 });
+  const expected = ledgerData()[0].slice();
+  // Simulate the old post-commit loss, then let later saves move the store on.
+  sheetOf("SignOffLog").rows = ledgerRows().slice(0, 1);
   equal(ledgerData().length, 0);
-  sheetOf("SignOffLog").failSetValuesFromRow = 0; // the next save appends normally
 
   // A later save that changes no gate: it appends nothing, so the gap survives it.
   ownerSave(payloadOf({ tasks: [] }), 2);
-  equal(ledgerData().length, 0);
 
   const repair = api.reconcileSignOffLedger();
   equal(repair.appended, 1);
+  deep(ledgerData()[0], expected, "the rebuilt row keeps the save's timestamp and values");
   equal(Number(ledgerData()[0][1]), 2, "attributed to the revision that made the decision");
-  equal(ledgerData()[0][0], failed.lastSavedAt);
 });
 
 check("seeded dossiers are never invented into the ledger", () => {
@@ -858,9 +925,8 @@ check("reconcile refuses without an identity, under a save lock, and on an empty
 check("the repaired row is only built from adjacent revisions", () => {
   reset();
   ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
-  sheetOf("SignOffLog").failSetValuesFromRow = 2;
   signEngineer("Approved", { revision: 1 });
-  sheetOf("SignOffLog").failSetValuesFromRow = 0;
+  sheetOf("SignOffLog").rows = ledgerRows().slice(0, 1);
   ownerSave(payloadOf({ tasks: [] }), 2);
 
   const history = sheetOf("_FFM_STATE_HISTORY");

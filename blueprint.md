@@ -126,7 +126,7 @@ edit → setState → debounce → buildWorkspacePayload() → JSON
 | `doGet(e)` | Fail-closed entry: no email → sign-in page; otherwise evaluate the `Index` template with `serverConfigJson` |
 | `include(name)` | `HtmlService.createHtmlOutputFromFile(name).getContent()` |
 | `loadWorkspaceState()` | Reads chunks, parses `__META__`, returns `{data, revision, lastSavedAt, lastSavedBy}` |
-| `saveWorkspaceState(json, summary, expectedRevision, refreshMirrors)` | Revision check, permission check, archive old copy, write new chunks, audit row, sign-off ledger rows, optional mirror refresh |
+| `saveWorkspaceState(json, summary, expectedRevision, refreshMirrors)` | Revision check, permission check, sign-off ledger append, archive old copy, write new chunks, audit row, optional mirror refresh |
 | `authorizeWorkspaceSave_(previous, payload, email, isOwner)` | Program ownership, roster protection and signature identity, judged against the stored state |
 | `listStateRevisions()` / `loadStateRevision(rev)` | History sheet access (last `HISTORY_LIMIT = 5`) |
 | `refreshMirrorSheets()` / `readMirrorStatus_()` | Rebuild the human-readable tabs from the store |
@@ -157,19 +157,20 @@ projects | 1 | 3 | <iso> | <json chunk 1>
 `SignOffLog` — append-only, 11 columns:
 `Timestamp, Revision, ProgramID, Program, Line, Gate, Approver, Role, Decision, Remark, SignedInEmail`.
 Rows are derived by diffing the gate records already on file against the incoming payload, so a save
-that changes nothing writes nothing. The rows are built before the store is rewritten; the append runs
-after it commits, so a failed append is not reported as a failed save — the response carries `warnings`
-and `AuditLog` gets a `SIGN_OFF_LEDGER_ERROR` row naming the decisions missing from the ledger.
+that changes nothing writes nothing. The rows are appended **before** the mutable store is rewritten:
+if the append fails the save is refused while the old state is still intact, so a committed signature
+can never be missing from the ledger. The append checks a decision's stable identity — revision plus
+program, line, gate, approver and decision — so retrying a save after a later state-write failure does
+not duplicate its audit row.
 
-That warning is not the end of it. Script properties keep `FFM_SIGN_OFF_LEDGER_ROWS`, the number of rows
-the tab should hold once a save's decisions are in it (incremented even when the append failed). On app
-load the client calls `reconcileSignOffLedger()`: under the save lock it compares that count with the tab
-and, only when they disagree, replays the archived revisions — each adjacent pair, newest one being the
-live store — rebuilding every changed decision the ledger does not already hold with the same timestamp,
-revision, gate label, role and signed-in email the save would have written. Seeded dossiers were never a
-signature and an erased one is not a decision, so neither produces a row; a second pass appends nothing.
-The repair is bounded by `HISTORY_LIMIT`: a gap older than the archived window is reported, never
-guessed at.
+Script properties keep `FFM_SIGN_OFF_LEDGER_ROWS`, the number of rows the tab should hold. On app load
+the client calls `reconcileSignOffLedger()`: under the save lock it compares that count with the tab and,
+only when they disagree, replays the archived revisions — each adjacent pair, newest one being the live
+store — rebuilding every changed decision the ledger does not already hold with the same timestamp,
+revision, gate label, role and signed-in email the save would have written. This now covers legacy gaps
+and hand edits, not new saves. Seeded dossiers were never a signature and an erased one is not a
+decision, so neither produces a row; a second pass appends nothing. The repair is bounded by
+`HISTORY_LIMIT`: a gap older than the archived window is reported, never guessed at.
 
 `AuditLog` — one row per save: `Timestamp, UserEmail, Revision, Action, Summary, Executor`.
 
@@ -236,7 +237,7 @@ owner, reads the store and never writes to it, so a backup run cannot change a r
 | `test-server-permissions` | Program ownership, roster ownership and signature rules |
 | `test-state-backup` | Drive backup naming, pruning and the manifest scopes |
 | `test-production-validation` | The shared production-record rules: impossible input / good / planned hours, negative downtime, duplicate date × line × station, and the loader's drop-and-repair pass |
-| `test-code-js` | Code.js run against a mocked `SpreadsheetApp`: chunked state read/write, save permissions through the real save path, the SignOffLog append (including one that fails after the store committed) and its repair on the next reconcile, including a gap that later saves have moved past |
+| `test-code-js` | Code.js run against a mocked `SpreadsheetApp`: chunked state read/write, save permissions through the real save path, the SignOffLog append before the store commit (including a failed append that refuses the save), retry idempotency, and repair of a legacy gap on the next reconcile |
 | `test-generated-bundle` | `Bundle.html` / `Styles.html` match a fresh build byte for byte |
 
 Most suites are Node scripts that read the source files and assert behaviour of pure helpers. The

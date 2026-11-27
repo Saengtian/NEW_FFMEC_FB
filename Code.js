@@ -15,11 +15,12 @@
  *    manual save), never on the debounced autosave path. The revision and
  *    timestamp of the last rebuild are kept in script properties and shown
  *    in the menu, so a stale mirror is visible rather than silent.
- *  - AuditLog is appended on every save.
+ *  - AuditLog is appended on every committed save.
  *  - SignOffLog is the append-only gate decision ledger: one immutable row per
  *    changed gate decision (program, line, gate, approver, decision, timestamp,
- *    signed-in email), written inside the same save lock, so "who approved what"
- *    is answered from its own tab instead of from the mutable gateRecords JSON.
+ *    signed-in email), written inside the same save lock and before the mutable
+ *    store commits, so "who approved what" is answered from its own tab instead
+ *    of from the mutable gateRecords JSON.
  *  - Concurrency safe via LockService.getScriptLock().
  *  - Runs as the accessing user (executeAs USER_ACCESSING), so the AuditLog can
  *    attribute every save and sign-off to the signed-in Google account. Saves
@@ -40,10 +41,9 @@ const CONFIG = {
   HISTORY_LIMIT: 5,
   MIRROR_REVISION_PROP: 'FFM_MIRROR_REVISION',
   MIRROR_REFRESHED_PROP: 'FFM_MIRROR_REFRESHED_AT',
-  // Rows the SignOffLog should hold once every decision a save produced is in it.
-  // A failed append leaves the tab short of this count, which is how the
-  // self-healing reconcile step notices there is work to do without reading the
-  // history on every load.
+  // Rows the SignOffLog should hold once every committed decision is in it.
+  // New saves write the ledger before committing, so this counter mainly makes
+  // the legacy-gap reconcile cheap; a mismatch is the signal to inspect history.
   SIGN_OFF_LEDGER_COUNT_PROP: 'FFM_SIGN_OFF_LEDGER_ROWS',
   // Daily state backup: one dated JSON file per run in this Drive folder, and
   // only the newest BACKUP_KEEP survive, so the folder cannot grow without limit.
@@ -332,12 +332,11 @@ function protectManagedTabsFromMenu_() {
 /**
  * Read-only view of the gate decision ledger (`SignOffLog`).
  *
- * Nothing in the app read that tab before: a save appends to it after the state
- * store commits, so when the append failed the saved state was already ahead of
- * the ledger and the only trace was a toast plus an AuditLog row. Once the toast
- * was gone the divergence was invisible. This returns the tab as plain objects so
- * the app can show it and reconcile it against the saved gate records. It never
- * writes: no locks, no sheet creation, no repairs.
+ * A save appends the ledger before the state store commits, so a committed
+ * signature always has its audit row. This returns the tab as plain objects so
+ * the app can show it and reconcile it against the saved gate records, including
+ * gaps left by older revisions or a hand edit. It never writes: no locks, no
+ * sheet creation, no repairs.
  */
 function getSignOffLedger() {
   const userEmail = getActiveUserEmail_();
@@ -1361,8 +1360,8 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
     });
 
     // Build the ledger rows before the store is touched: building them is pure,
-    // so a malformed dossier fails the save while nothing has committed. Only
-    // the append itself is a post-commit step (see below).
+    // so a malformed dossier fails the save while nothing has committed. The
+    // append follows before the store commit (see below).
     let signOffRows = [];
     if (previousGateRecords && payload.gateRecords && typeof payload.gateRecords === 'object') {
       signOffRows = signOffLedgerRows(previousGateRecords, payload.gateRecords, payload.projects, {
@@ -1371,6 +1370,26 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
         userEmail: userEmail,
         actorRole: permissions.actorRole
       });
+    }
+
+    // The ledger is the audit trail, so write it before the mutable store. If
+    // this append fails the save is refused while the old state is still intact:
+    // a signature can never be committed without its immutable ledger row. The
+    // append checks ledger identity, so retrying a save after a later failure
+    // cannot duplicate a decision. Keep any legacy count gap across this save so
+    // a later reconcile can still see it.
+    const ledgerBefore = ledgerRowCount_(ss);
+    const ledgerGap = Math.max(0, readLedgerExpectation_() - ledgerBefore);
+    let ledgerAppended = 0;
+    if (signOffRows.length > 0) {
+      try {
+        ledgerAppended = appendSignOffLedgerOnce_(ss, signOffRows);
+      } catch (err) {
+        throw new Error(
+          'Save refused: SignOffLog could not be written (' + errorMessage_(err) + '). ' +
+          'No workspace change was saved.'
+        );
+      }
     }
 
     // Keep the copy being replaced: every save is undoable from the history tab.
@@ -1402,41 +1421,10 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       executorEmail
     ]);
 
-    // What the ledger should hold once this save's decisions are in it. A failed
-    // append leaves the tab short of this number, which is the signal the
-    // reconcile step on the next load acts on.
-    const ledgerBefore = ledgerRowCount_(ss);
-    const ledgerExpected = Math.max(readLedgerExpectation_(), ledgerBefore) + signOffRows.length;
-
-    // Append-only gate decision ledger, written under the same lock as the store
-    // it describes. Nothing in this path edits or deletes an existing row.
-    // The store above is already committed, so a failure here cannot be reported
-    // as a failed save: the revision is real either way, and failing it would
-    // leave the client on a stale revision while hiding the decisions that did
-    // save. The failure is logged, recorded in AuditLog and returned as a
-    // warning — reported, never swallowed.
-    const ledger = appendSignOffLedgerSafely_(ss, signOffRows);
-    markLedgerExpectation_(ledgerExpected);
-    if (!ledger.ok) {
-      try {
-        auditSheet.appendRow([
-          nowIso,
-          actorLabel,
-          nextRevision,
-          'SIGN_OFF_LEDGER_ERROR',
-          safeSheetText_(signOffRows.length + ' gate decision(s) missing from SignOffLog: ' + ledger.error),
-          executorEmail
-        ]);
-      } catch (auditErr) {
-        console.error('AuditLog could not record the SignOffLog failure: ' + errorMessage_(auditErr));
-      }
-    }
-
-    const warnings = ledger.ok ? [] : [
-      'Saved Rev #' + nextRevision + ', but SignOffLog could not be appended (' + ledger.error + '). ' +
-      signOffRows.length + ' gate decision(s) are in the saved state but missing from the ledger — ' +
-      'add them to SignOffLog by hand.'
-    ];
+    // The ledger row is already in place. Update the count only after the store
+    // commits; carrying the pre-existing gap forward keeps a legacy repair visible
+    // instead of hiding it behind this successful save.
+    markLedgerExpectation_(ledgerBefore + ledgerAppended + ledgerGap);
 
     return {
       ok: true,
@@ -1444,8 +1432,8 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       lastSavedAt: nowIso,
       lastSavedBy: actorLabel,
       userEmail: userEmail,
-      signOffLedger: { appended: ledger.appended, error: ledger.error },
-      warnings: warnings
+      signOffLedger: { appended: ledgerAppended, error: '' },
+      warnings: []
     };
   } finally {
     lock.releaseLock();
@@ -1518,20 +1506,26 @@ function appendSignOffLedger_(ss, rows) {
 }
 
 /**
- * Writes the ledger rows once the state store has committed. This step cannot
- * roll the save back, so it never throws: the outcome (including the error text)
- * is returned to the caller, which turns a failure into a warning and an audit
- * row instead of an exception that would misreport a committed save.
+ * Appends only the rows the tab does not already hold. A decision's identity is
+ * the revision plus the program, line, gate, approver and decision, so a retry
+ * after a save wrote the ledger but failed to commit the store cannot duplicate
+ * the audit row. The caller decides whether an append failure should fail the
+ * save; the save path writes this before the mutable store.
  */
-function appendSignOffLedgerSafely_(ss, rows) {
-  if (!rows || rows.length === 0) return { ok: true, appended: 0, error: '' };
-  try {
-    return { ok: true, appended: appendSignOffLedger_(ss, rows), error: '' };
-  } catch (err) {
-    const message = errorMessage_(err);
-    console.error('SignOffLog append failed after the state store committed: ' + message);
-    return { ok: false, appended: 0, error: message };
-  }
+function appendSignOffLedgerOnce_(ss, rows) {
+  if (!rows || rows.length === 0) return 0;
+  const known = {};
+  readSignOffLedgerRows_(ss).forEach(function(row) {
+    known[ledgerRowKey_(row.revision, row.programId, row.line, row.gate, row.approver, row.decision)] = true;
+  });
+  const fresh = [];
+  rows.forEach(function(row) {
+    const key = ledgerRowKey_(row[1], row[2], row[4], row[5], row[6], row[8]);
+    if (known[key]) return;
+    known[key] = true;
+    fresh.push(row);
+  });
+  return appendSignOffLedger_(ss, fresh);
 }
 
 /**
@@ -1663,13 +1657,13 @@ function missingSignOffLedgerRows_(snapshots, ledgerRows) {
 }
 
 /**
- * Self-healing SignOffLog.
+ * Self-healing SignOffLog for legacy gaps.
  *
- * A save appends the ledger after the state store has committed, so an append that
- * fails cannot fail the save: the revision is real and the client must not retry
- * it. The gap that leaves is repaired here — on the next load, under the same lock
- * a save takes, by replaying the archived revisions against the tab and appending
- * only the decisions that are missing.
+ * New saves write the ledger before the store commits, so a failed append refuses
+ * the save rather than leaving a committed signature without an audit row. This
+ * repair still covers rows lost by an older post-commit save or removed by a hand
+ * edit — on the next load, under the same lock a save takes, by replaying the
+ * archived revisions against the tab and appending only the decisions missing.
  *
  * The cheap check comes first: script properties remember how many rows the tab
  * should hold, so a healthy store returns after two small reads and never touches
@@ -1737,7 +1731,7 @@ function reconcileSignOffLedger() {
       return { ok: true, appended: 0, revision: state.revision, inSync: true, rebaselined: true };
     }
 
-    const appended = appendSignOffLedger_(ss, rows);
+    const appended = appendSignOffLedgerOnce_(ss, rows);
     markLedgerExpectation_(actual + appended);
 
     try {

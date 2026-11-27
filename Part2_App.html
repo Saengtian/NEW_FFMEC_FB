@@ -100,8 +100,8 @@ function resolveSaveResult(res, currentRevision) {
   return {
     conflict: false,
     revision: Number(res?.revision) || (Number(currentRevision) || 0) + 1,
-    // A committed save can carry warnings (e.g. the sign-off ledger append
-    // failed afterwards). They are shown, not treated as a failed save.
+    // A committed save can still carry warnings. They are shown, not treated as
+    // a failed save; the sign-off ledger is now written before the commit.
     warnings: Array.isArray(res?.warnings) ? res.warnings.map(String).filter(Boolean) : []
   };
 }
