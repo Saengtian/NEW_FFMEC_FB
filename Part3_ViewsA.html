@@ -4366,6 +4366,23 @@ function CpkMasterSpecsView({
     [masterSpecs]
   );
 
+  // One matrix, one lens. The two toolbar chips narrow different halves of the
+  // same view — the provisional chip picks the rows, the upload chip picks the
+  // readings — so both pressed at once let each quietly overrule the other while
+  // both looked active. Turning either on now releases the other, and a chip with
+  // nothing left to filter (no placeholders, no upload batch) stops applying.
+  const provisionalActive = provisionalOnly && provisionalLimitSpecs.length > 0;
+  const toggleProvisionalOnly = () => {
+    const next = !provisionalOnly;
+    setProvisionalOnly(next);
+    if (next) setUploadedOnly(false);
+  };
+  const toggleUploadedOnly = () => {
+    const next = !uploadedOnly;
+    setUploadedOnly(next);
+    if (next) setProvisionalOnly(false);
+  };
+
   const activeCpkRecords = useMemo(() => {
     if (uploadedOnly && lastUploadBatch) {
       return cpkRecords.filter((r) => r.uploadBatchId === lastUploadBatch.id);
@@ -4377,13 +4394,13 @@ function CpkMasterSpecsView({
     // Only parameters defined as CTQ belong in the capability matrix; rows saved
     // before the flag existed are treated as CTQ so nothing silently disappears.
     const ctqSpecs = masterSpecs.filter((spec) => spec.ctq !== false);
-    if (provisionalOnly) return ctqSpecs.filter((spec) => spec.limitsProvisional === true);
+    if (provisionalActive) return ctqSpecs.filter((spec) => spec.limitsProvisional === true);
     if (uploadedOnly && lastUploadBatch) {
       const idSet = new Set(lastUploadBatch.matchedSpecIds);
       return ctqSpecs.filter((s) => idSet.has(s.id));
     }
     return ctqSpecs;
-  }, [masterSpecs, uploadedOnly, lastUploadBatch, provisionalOnly]);
+  }, [masterSpecs, uploadedOnly, lastUploadBatch, provisionalActive]);
 
   // Transposed matrix: one row per Station > Variable > Spec and one column per
   // measurement context (stage · config · side, read within a model). A cell shows
@@ -4406,7 +4423,7 @@ function CpkMasterSpecsView({
     // Under the provisional filter every placeholder CTQ is in scope, including
     // the ones no upload has reached yet, so their families need a section even
     // when the family carries no reading at all.
-    if (provisionalOnly) {
+    if (provisionalActive) {
       provisionalLimitSpecs.forEach((spec) => {
         const family = familyOf(spec.model);
         if (!byFamily.has(family)) byFamily.set(family, []);
@@ -4433,7 +4450,7 @@ function CpkMasterSpecsView({
         // A provisional CTQ with no reading is the reason this filter exists: it
         // stays listed, with every context showing "—", until a real measurement
         // arrives.
-        if (provisionalOnly) {
+        if (provisionalActive) {
           visibleSpecsForMatrix.forEach((spec) => {
             if (covered.has(spec.id) || familyOf(spec.model) !== family) return;
             addRow(spec);
@@ -4451,7 +4468,7 @@ function CpkMasterSpecsView({
       })
       .filter((section) => section.groups.length > 0)
       .sort((a, b) => cpkFamilyRank(a.family) - cpkFamilyRank(b.family) || a.family.localeCompare(b.family));
-  }, [activeCpkRecords, visibleSpecsForMatrix, provisionalOnly, provisionalLimitSpecs]);
+  }, [activeCpkRecords, visibleSpecsForMatrix, provisionalActive, provisionalLimitSpecs]);
 
   const cpkFamilyOptions = useMemo(
     () => cpkFamilyMatrices.map((section) => section.family),
@@ -4565,7 +4582,7 @@ function CpkMasterSpecsView({
   const filteredSpecs = useMemo(() => {
     const q = search.trim().toLowerCase();
     return masterSpecs.filter((s) => {
-      if (provisionalOnly && s.limitsProvisional !== true) return false;
+      if (provisionalActive && s.limitsProvisional !== true) return false;
       // Specs without a model apply to every model, so they stay visible.
       if (activeSpecModel !== 'ALL' && s.model && s.model !== activeSpecModel) return false;
       if (!q) return true;
@@ -4573,7 +4590,7 @@ function CpkMasterSpecsView({
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q));
     });
-  }, [masterSpecs, search, activeSpecModel, provisionalOnly]);
+  }, [masterSpecs, search, activeSpecModel, provisionalActive]);
 
   // One filter for both tabs: the placeholder CTQs are the few rows that must not
   // fall out of sight while their limits are still unconfirmed. `false` (not null)
@@ -4581,22 +4598,22 @@ function CpkMasterSpecsView({
   const provisionalChip = provisionalLimitSpecs.length > 0 && (
     <button
       type="button"
-      onClick={() => setProvisionalOnly((prev) => !prev)}
-      aria-pressed={provisionalOnly}
+      onClick={toggleProvisionalOnly}
+      aria-pressed={provisionalActive}
       title={
-        provisionalOnly
+        provisionalActive
           ? 'Show every CTQ again'
-          : 'Show only the CTQs whose limits are still placeholders'
+          : 'Show only the CTQs whose limits are still placeholders — replaces the upload filter'
       }
       className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-colors ${
-        provisionalOnly
+        provisionalActive
           ? 'bg-amber-500 text-white border-amber-500'
           : 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900'
       }`}
     >
       <AlertTriangle className="w-3.5 h-3.5" />
       {provisionalLimitSpecs.length} provisional
-      <span className="font-semibold opacity-80">{provisionalOnly ? '· shown' : '· filter'}</span>
+      <span className="font-semibold opacity-80">{provisionalActive ? '· shown' : '· filter'}</span>
     </button>
   );
 
@@ -4695,7 +4712,13 @@ function CpkMasterSpecsView({
                 {lastUploadBatch && (
                   <button
                     type="button"
-                    onClick={() => setUploadedOnly((prev) => !prev)}
+                    onClick={toggleUploadedOnly}
+                    aria-pressed={uploadedOnly}
+                    title={
+                      uploadedOnly
+                        ? 'Show every Cpk reading again'
+                        : `Show only the specs and readings matched from ${lastUploadBatch.fileName || 'the last upload'} — clears the provisional filter`
+                    }
                     className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors ${
                       uploadedOnly
                         ? 'bg-blue-600 text-white border-blue-600'
