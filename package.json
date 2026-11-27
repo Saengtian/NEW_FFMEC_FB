@@ -3,7 +3,7 @@
     "build": "bun tools/build.mjs",
     "preview": "bun tools/preview-server.mjs 5183",
     "state:import": "bun tools/import-state.mjs",
-    "test": "bun tools/test-fy-helpers.mjs && bun tools/test-cpk-freeze.mjs && bun tools/test-sheetjs-bundle.mjs && bun tools/test-review-fixes.mjs && bun tools/test-project-crud.mjs && bun tools/test-state-history.mjs && bun tools/test-signoff-ledger.mjs && bun tools/test-server-permissions.mjs && bun tools/test-state-backup.mjs && bun tools/test-generated-bundle.mjs",
+    "test": "bun tools/test-fy-helpers.mjs && bun tools/test-cpk-freeze.mjs && bun tools/test-sheetjs-bundle.mjs && bun tools/test-review-fixes.mjs && bun tools/test-project-crud.mjs && bun tools/test-state-history.mjs && bun tools/test-signoff-ledger.mjs && bun tools/test-server-permissions.mjs && bun tools/test-state-backup.mjs && bun tools/test-code-js.mjs && bun tools/test-generated-bundle.mjs",
     "deploy": "bun tools/deploy.mjs",
     "deploy:login": "bun tools/deploy.mjs --login"
   },

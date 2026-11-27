@@ -214,11 +214,19 @@ owner, reads the store and never writes to it, so a backup run cannot change a r
 | `test-cpk-freeze` | Provisional limits never produce capability verdicts |
 | `test-sheetjs-bundle` | SheetJS import path and bundle integrity |
 | `test-review-fixes` | Assignment, date formatting, quantiles, product families |
+| `test-project-crud` | Program create/edit/delete pruning only what the program owns |
 | `test-state-history` | Revision list/load/prune behaviour |
+| `test-signoff-ledger` | The append-only ledger's client-side view |
+| `test-server-permissions` | Program ownership, roster ownership and signature rules |
+| `test-state-backup` | Drive backup naming, pruning and the manifest scopes |
+| `test-code-js` | Code.js run against a mocked `SpreadsheetApp`: chunked state read/write, save permissions through the real save path, and the SignOffLog append (including an append that fails after the store committed) |
 | `test-generated-bundle` | `Bundle.html` / `Styles.html` match a fresh build byte for byte |
 
-Tests are Node scripts that read the source files and assert behaviour of pure helpers; there is no
-DOM test yet, so "the page renders" is only proven by the preview or a deploy.
+Most suites are Node scripts that read the source files and assert behaviour of pure helpers. The
+exception is `test-code-js`, which loads `Code.js` — the exact text clasp ships — into a sandbox with
+in-memory sheets, `Session`, `LockService` and `PropertiesService`, so the server is exercised locally
+instead of only in Apps Script. There is still no DOM test, so "the page renders" is only proven by
+the preview or a deploy.
 
 ## 7. Delivery
 
