@@ -147,9 +147,12 @@ function App() {
   const [gateRecords, setGateRecords] = useState(() => createInitialGateRecords());
   const [productionRecords, setProductionRecords] = useState(INITIAL_PRODUCTION_RECORDS);
   const [masterSpecs, setMasterSpecs] = useState(INITIAL_MASTER_SPECS);
-  const [cpkRecords, setCpkRecords] = useState(INITIAL_CPK_RECORDS);
+  const [cpkRecords, setCpkRecords] = useState(() =>
+    migrateCpkRecords(INITIAL_CPK_RECORDS, INITIAL_MASTER_SPECS)
+  );
   const [costProjects, setCostProjects] = useState(INITIAL_COST_PROJECTS);
   const [customerFeedback, setCustomerFeedback] = useState(INITIAL_CUSTOMER_FEEDBACK);
+  const [teamMembers, setTeamMembers] = useState(INITIAL_TEAM_MEMBERS);
   const [selectedProjectId, setSelectedProjectId] = useState('PRJ-X4151');
   const [selectedGateId, setSelectedGateId] = useState('mbo');
   const [selectedLineKey, setSelectedLineKey] = useState('ME11-RHS');
@@ -171,6 +174,7 @@ function App() {
   const [matrixModalState, setMatrixModalState] = useState(null);
   const [deletingMatrixRow, setDeletingMatrixRow] = useState(null);
   const [scheduleOverrides, setScheduleOverrides] = useState({});
+  const [idCounters, setIdCounters] = useState({});
   const [editingScheduleTarget, setEditingScheduleTarget] = useState(null);
   const [activeCpkChartRecord, setActiveCpkChartRecord] = useState(null);
   const [editingMasterSpec, setEditingMasterSpec] = useState(null);
@@ -184,9 +188,15 @@ function App() {
   const [newFeedbackModalOpen, setNewFeedbackModalOpen] = useState(false);
   const [editingFeedback, setEditingFeedback] = useState(null);
   const [deletingFeedback, setDeletingFeedback] = useState(null);
+  const [newTeamMemberModalOpen, setNewTeamMemberModalOpen] = useState(false);
+  const [editingTeamMember, setEditingTeamMember] = useState(null);
+  const [deletingTeamMember, setDeletingTeamMember] = useState(null);
   const [costImportDraft, setCostImportDraft] = useState(null);
   const [feedbackImportDraft, setFeedbackImportDraft] = useState(null);
   const [syncConflict, setSyncConflict] = useState(null);
+  const [stateHistory, setStateHistory] = useState(null);
+  const [specCorrection, setSpecCorrection] = useState(null);
+  const [workspaceExportCopy, setWorkspaceExportCopy] = useState(null);
   const [signOffModal, setSignOffModal] = useState(null);
   const [kpiDrilldown, setKpiDrilldown] = useState(null);
   const [toast, setToast] = useState(null);
@@ -245,22 +255,50 @@ function App() {
     cpkRecords,
     costProjects,
     customerFeedback,
-    scheduleOverrides
+    teamMembers,
+    scheduleOverrides,
+    idCounters
   });
 
   const hydrateFromPayload = (data) => {
-    if (!data || typeof data !== 'object') return;
+    if (!data || typeof data !== 'object') return null;
+    let frozenLimits = 0;
+    let purgedEvidence = 0;
+    let removedFabricated = 0;
     isHydratingRef.current = true;
     try {
       if (Array.isArray(data.projects)) setProjects(data.projects);
       if (Array.isArray(data.tasks)) setTasks(data.tasks.map(normalizeTask));
-      if (data.gateRecords && typeof data.gateRecords === 'object') setGateRecords(data.gateRecords);
+      if (data.gateRecords && typeof data.gateRecords === 'object') {
+        // Stored dossiers can still carry Drive links the old seed invented, which
+        // open a 404. Drop them here so a save writes the cleaned dossiers back.
+        const purged = purgePlaceholderEvidence(data.gateRecords);
+        purgedEvidence = purged.removed;
+        setGateRecords(purged.records);
+      }
       if (Array.isArray(data.productionRecords)) setProductionRecords(data.productionRecords);
-      if (Array.isArray(data.masterSpecs)) setMasterSpecs(data.masterSpecs);
-      if (Array.isArray(data.cpkRecords)) setCpkRecords(data.cpkRecords);
+      const loadedSpecs = Array.isArray(data.masterSpecs)
+        ? applyProvisionalLimitDefaults(data.masterSpecs)
+        : null;
+      if (loadedSpecs) setMasterSpecs(loadedSpecs);
+      if (Array.isArray(data.cpkRecords)) {
+        const specsForCpk = loadedSpecs || masterSpecs;
+        const frozen = migrateCpkRecords(data.cpkRecords, specsForCpk);
+        // Rows saved before limits were frozen stay judged by their own date; the
+        // count lets the loader persist this backfill without waiting for an edit.
+        frozenLimits = frozen.reduce(
+          (count, rec, idx) => count + (rec !== data.cpkRecords[idx] ? 1 : 0),
+          0
+        );
+        const cleanedCpk = stripLegacyFabricatedCpkRows(frozen);
+        removedFabricated = frozen.length - cleanedCpk.length;
+        setCpkRecords(backfillSeedCpkSamples(cleanedCpk));
+      }
       if (Array.isArray(data.costProjects)) setCostProjects(data.costProjects);
       if (Array.isArray(data.customerFeedback)) setCustomerFeedback(data.customerFeedback);
+      if (Array.isArray(data.teamMembers)) setTeamMembers(data.teamMembers);
       if (data.scheduleOverrides && typeof data.scheduleOverrides === 'object') setScheduleOverrides(data.scheduleOverrides);
+      if (data.idCounters && typeof data.idCounters === 'object') setIdCounters(data.idCounters);
     } catch (err) {
       console.error('hydrateFromPayload failed:', err);
       showToast('Failed to apply loaded data: ' + (err && err.message ? err.message : String(err)), 'error');
@@ -270,6 +308,7 @@ function App() {
     setTimeout(() => {
       isHydratingRef.current = false;
     }, 150);
+    return { frozenLimits, purgedEvidence, removedFabricated };
   };
 
   // ---------------------------------------------------------------------------
@@ -393,6 +432,104 @@ function App() {
     showToast(`Loaded the other user's version (Rev #${conflict.revision}).`, 'info');
   };
 
+  // ---------------------------------------------------------------------------
+  // State history: every save archives the copy it replaced. Restoring one loads
+  // it and saves it as the next revision, so the state being replaced stays in
+  // the history too.
+  // ---------------------------------------------------------------------------
+  const closeStateHistory = () => setStateHistory(null);
+
+  const openStateHistory = () => {
+    if (!isGasEnv) {
+      showToast('State history is available once the app is deployed to Google Sheets.', 'info');
+      return;
+    }
+    setStateHistory({
+      loading: true,
+      error: null,
+      limit: 5,
+      current: null,
+      revisions: [],
+      selected: null,
+      data: null,
+      meta: null,
+      loadingRevision: false,
+      restoring: false
+    });
+    window.google.script.run
+      .withSuccessHandler((res) => {
+        setStateHistory((prev) =>
+          prev
+            ? {
+                ...prev,
+                loading: false,
+                limit: Number(res?.limit) || 5,
+                current: res?.current || null,
+                revisions: Array.isArray(res?.revisions) ? res.revisions : [],
+                error: res && res.ok === false ? res.error || 'The saved history could not be read.' : null
+              }
+            : prev
+        );
+      })
+      .withFailureHandler((err) => {
+        const msg = err && err.message ? err.message : String(err || 'The saved history could not be read');
+        setStateHistory((prev) => (prev ? { ...prev, loading: false, error: msg } : prev));
+      })
+      .listStateRevisions();
+  };
+
+  const selectStateHistoryRevision = (revision) => {
+    setStateHistory((prev) =>
+      prev ? { ...prev, selected: revision, data: null, meta: null, loadingRevision: true, error: null } : prev
+    );
+    window.google.script.run
+      .withSuccessHandler((res) => {
+        setStateHistory((prev) => {
+          if (!prev || prev.selected !== revision) return prev;
+          if (!res || res.ok === false) {
+            return { ...prev, loadingRevision: false, error: (res && res.error) || 'That revision could not be read.' };
+          }
+          return {
+            ...prev,
+            loadingRevision: false,
+            data: res.data || null,
+            meta: { lastSavedAt: res.lastSavedAt || null, lastSavedBy: res.lastSavedBy || null }
+          };
+        });
+      })
+      .withFailureHandler((err) => {
+        const msg = err && err.message ? err.message : String(err || 'That revision could not be read');
+        setStateHistory((prev) =>
+          prev && prev.selected === revision ? { ...prev, loadingRevision: false, error: msg } : prev
+        );
+      })
+      .loadStateRevision(revision);
+  };
+
+  const restoreStateHistoryRevision = (revision) => {
+    const panel = stateHistory;
+    if (!panel || !panel.data) return;
+    if (syncConflictRef.current) {
+      showToast('Resolve the save conflict before restoring a revision.', 'info');
+      return;
+    }
+    setStateHistory((prev) => (prev ? { ...prev, restoring: true, error: null } : prev));
+    // Keep any slice the old copy does not carry, then freeze Cpk limits exactly
+    // as a normal load would, so the save and the screen agree.
+    const restored = { ...buildWorkspacePayload(), ...panel.data };
+    if (Array.isArray(restored.cpkRecords)) {
+      restored.cpkRecords = migrateCpkRecords(restored.cpkRecords, restored.masterSpecs || masterSpecs);
+    }
+    hydrateFromPayload(restored);
+    pushToGoogleSheet(`Restored Rev #${revision} from state history`, {
+      toast: true,
+      refreshMirrors: true,
+      expectedRevision: revisionRef.current,
+      payload: restored
+    });
+    setStateHistory(null);
+  };
+
   const loadFromGoogleSheet = (showNotice = false) => {
     if (!isGasEnv) return;
     setCloudSync((prev) => ({ ...prev, status: 'loading', errorMsg: null }));
@@ -410,8 +547,9 @@ function App() {
           return;
         }
         if (res && res.initialized && res.data) {
+          let backfill = { frozenLimits: 0, purgedEvidence: 0, removedFabricated: 0 };
           try {
-            hydrateFromPayload(res.data);
+            backfill = hydrateFromPayload(res.data) || backfill;
           } catch (err) {
             console.error('hydrateFromPayload threw:', err);
             showToast('Failed to apply loaded data: ' + (err && err.message ? err.message : String(err)), 'error');
@@ -428,6 +566,19 @@ function App() {
             sheetUrl: res.sheetUrl || prev.sheetUrl,
             errorMsg: null
           }));
+          // A loaded copy that needed cleaning is saved back without waiting for
+          // an edit, so the next reader never sees the stale rows.
+          const backfillNotes = [];
+          if (backfill.frozenLimits > 0) {
+            backfillNotes.push(`Froze measurement-time Cpk limits on ${backfill.frozenLimits} record(s)`);
+          }
+          if (backfill.purgedEvidence > 0) {
+            backfillNotes.push(`Removed ${backfill.purgedEvidence} placeholder Drive link(s)`);
+          }
+          if (backfill.removedFabricated > 0) {
+            backfillNotes.push(`Removed ${backfill.removedFabricated} fabricated Cpk seed row(s)`);
+          }
+          if (backfillNotes.length > 0) saveSchedulerRef.current.schedule(backfillNotes);
           if (showNotice) showToast(`Reloaded workspace from Google Sheet (Rev #${res.revision || 1})`, 'success');
         } else {
           // First run on an empty Sheet: seed baseline data automatically
@@ -483,7 +634,7 @@ function App() {
     // user's revision is never overwritten by an autosave.
     if (syncConflictRef.current) return;
     saveSchedulerRef.current.schedule(['Auto-sync from FFM NPI Ops']);
-  }, [projects, tasks, gateRecords, productionRecords, masterSpecs, cpkRecords, costProjects, customerFeedback, scheduleOverrides]);
+  }, [projects, tasks, gateRecords, productionRecords, masterSpecs, cpkRecords, costProjects, customerFeedback, teamMembers, scheduleOverrides, idCounters]);
 
   // A pending debounced save must not be lost when the page is closed or hidden
   useEffect(() => {
@@ -517,6 +668,40 @@ function App() {
     a.click();
     URL.revokeObjectURL(url);
     showToast('Exported full workspace JSON backup.', 'success');
+  };
+
+  // The Sheet route is blocked by the Workspace device-trust policy on some
+  // machines, so the loaded state can also be copied straight out of the app
+  // and imported into the local preview (bun run state:import).
+  const buildWorkspaceExport = () => ({
+    app: 'FFM NPI Ops',
+    version: 'v2.1.0-GAS',
+    exportedAt: new Date().toISOString(),
+    revision: Number(cloudSync.revision) || 0,
+    lastSavedAt: cloudSync.lastSavedAt || null,
+    lastSavedBy: cloudSync.lastSavedBy || null,
+    data: buildWorkspacePayload()
+  });
+
+  const handleCopyWorkspaceState = async () => {
+    const revision = Number(cloudSync.revision) || 0;
+    const json = JSON.stringify(buildWorkspaceExport());
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        throw new Error('this browser exposes no clipboard API');
+      }
+      await navigator.clipboard.writeText(json);
+      showToast(`Copied workspace JSON · Rev #${revision} · ${Math.round(json.length / 1024)} KB`, 'success');
+    } catch (err) {
+      // A cross-origin Apps Script frame usually denies clipboard-write, so fall
+      // back to a panel that shows the same text, pre-selected.
+      setWorkspaceExportCopy({
+        json,
+        revision,
+        reason: err && err.message ? err.message : String(err)
+      });
+      showToast('Clipboard is blocked here — copy the JSON from the panel.', 'info');
+    }
   };
 
   const handleImportWorkspaceJson = (e) => {
@@ -938,7 +1123,8 @@ function App() {
   const handleCreateProject = (form) => {
     const modelCode = form.model.toUpperCase();
     // Sequential and never reused: a timestamp suffix repeats within the same second.
-    const newId = nextId(`PRJ-${modelCode.replace(/[^A-Z0-9]/g, '')}-`, projects);
+    const idPrefix = `PRJ-${modelCode.replace(/[^A-Z0-9]/g, '')}-`;
+    const newId = nextId(idPrefix, projects, idCounters[idPrefix] || 0);
     const roster = getSignOffRosterForProject();
     const sideList = getSideList(form.side || 'RHS & LHS');
     const initialMatrix = ['ME11', 'ME12'].flatMap((cfg, cIdx) =>
@@ -1003,6 +1189,7 @@ function App() {
     });
 
     setProjects((prev) => [newProj, ...prev]);
+    setIdCounters((prev) => withIdCounter(prev, idPrefix, Number(newId.slice(idPrefix.length))));
     setGateRecords((prev) => ({ ...prev, [newProj.id]: lineRecords }));
     setSelectedProjectId(newProj.id);
     setSelectedGateId('prep');
@@ -1043,6 +1230,12 @@ function App() {
     const oldKey = originalRow ? `${originalRow.config}-${originalRow.side || 'RHS'}` : null;
     const newKey = `${cleanConfig}-${cleanSide}`;
     const isEditing = Boolean(originalRow);
+
+    // An edit can also issue a higher config (e.g. ME11 -> ME15). Record it too:
+    // withIdCounter is monotonic, so unchanged or lower edits are no-ops.
+    setIdCounters((prev) =>
+      withIdCounter(prev, 'ME:' + projectId, Number(cleanConfig.replace(/^ME/i, '')) || 0)
+    );
 
     setProjects((prev) =>
       prev.map((p) => {
@@ -1113,6 +1306,13 @@ function App() {
     if (!project || !row) return;
     const rowKey = `${row.config}-${row.side || 'RHS'}`;
 
+    // Seeded/imported rows never pass through the add/edit handler, so their
+    // configs have no counter until deletion. Record it before removing the row:
+    // withIdCounter is monotonic, and a deleted config must not be reissued.
+    setIdCounters((prev) =>
+      withIdCounter(prev, 'ME:' + projectId, Number(row.config.replace(/^ME/i, '')) || 0)
+    );
+
     setProjects((prev) =>
       prev.map((p) =>
         p.id === projectId
@@ -1170,15 +1370,47 @@ function App() {
     );
   };
 
+  // Team directory: who is on the program, what they own and how to reach them.
+  // Workload is derived at render time (computeTeamWorkload), never stored.
+  const handleSaveTeamMember = (form, memberId = null) => {
+    if (memberId) {
+      setTeamMembers((prev) => prev.map((m) => (m.id === memberId ? { ...m, ...form } : m)));
+      showToast(`Updated ${form.name}`);
+    } else {
+      const id = nextId('TM-', teamMembers, idCounters['TM-'] || 0);
+      setTeamMembers((prev) => [...prev, { ...form, id }]);
+      setIdCounters((prev) => withIdCounter(prev, 'TM-', Number(id.slice('TM-'.length))));
+      showToast(`Added ${form.name} to the team`);
+    }
+    setNewTeamMemberModalOpen(false);
+    setEditingTeamMember(null);
+  };
+
+  const handleDeleteTeamMember = (memberId) => {
+    const removed = teamMembers.find((m) => m.id === memberId);
+    if (!removed) return;
+    // Reports point at member ids: drop the link rather than leave a dangling manager.
+    setTeamMembers((prev) =>
+      prev
+        .filter((m) => m.id !== memberId)
+        .map((m) => (m.reportsTo === memberId ? { ...m, reportsTo: '' } : m))
+    );
+    setDeletingTeamMember(null);
+    showToast(`Removed ${removed.name} from the team`);
+  };
+
   const handleCreateTask = (form) => {
+    const newId = nextId('TSK-', tasks, idCounters['TSK-'] || 0);
     const newTask = {
-      id: nextId('TSK-', tasks),
+      id: newId,
       projectId: form.projectId,
       gateId: form.gateId,
       processStep: form.processStep,
       category: TASK_CATEGORIES.includes(form.category) ? form.category : TASK_CATEGORIES[0],
       title: form.title,
       owner: form.owner || 'Patcharapong J.',
+      // The roster link survives a rename; the text is the readable fallback.
+      ownerId: form.ownerId || '',
       priority: form.priority || 'High',
       status: 'To Do',
       dueDate: form.dueDate || '2026-12-05',
@@ -1186,6 +1418,7 @@ function App() {
       updates: []
     };
     setTasks((prev) => [newTask, ...prev]);
+    setIdCounters((prev) => withIdCounter(prev, 'TSK-', Number(newId.slice('TSK-'.length))));
     setNewTaskModalOpen(false);
     showToast(`Created task ${newTask.id}`);
   };
@@ -1273,32 +1506,129 @@ function App() {
   };
 
   const handleSaveMasterSpec = (form, existingId = null) => {
-    const cleanSpec = {
-      id: existingId || `SPEC-${form.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}`,
-      code: form.code.toUpperCase().trim(),
-      name: form.name.trim(),
-      model: (form.model || '').trim().toUpperCase(),
-      station: form.station || PRODUCTION_STATIONS[3],
-      unit: form.unit.trim() || 'mm',
+    const effectiveFrom = String(form.effectiveFrom || todayIso()).slice(0, 10);
+    const limits = {
       specType: form.specType || 'two-sided',
       lsl: form.specType === 'upper' ? 0 : Number(form.lsl),
       nominal: Number(form.nominal),
       usl: form.specType === 'lower' ? null : Number(form.usl),
       cpkTarget: Number(form.cpkTarget) || 1.33,
+      // Confirming or un-confirming limits is a limit-status change: it is
+      // revisioned like any other limit edit, so old readings keep their status.
+      limitsProvisional: form.limitsConfirmed === false
+    };
+    const identity = {
+      code: form.code.toUpperCase().trim(),
+      name: form.name.trim(),
+      model: (form.model || '').trim().toUpperCase(),
+      station: form.station || PRODUCTION_STATIONS[3],
+      unit: form.unit.trim() || 'mm',
       metrology: form.metrology.trim() || 'OMM Optical',
       docRef: form.docRef.trim() || 'SPC-FFM-00',
-      samplingPlan: form.samplingPlan.trim() || '32 pcs / Lot'
+      samplingPlan: form.samplingPlan.trim() || '32 pcs / Lot',
+      // Only CTQ parameters are plotted in the Station × Variable matrix.
+      ctq: form.ctq !== false
+    };
+    const stamp = new Date().toISOString();
+    const actor = cloudSync.userEmail || '';
+
+    if (!existingId) {
+      const id = `SPEC-${form.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}`;
+      const spec = {
+        id,
+        ...identity,
+        ...limits,
+        effectiveFrom,
+        revisions: [{ id: `${id}-R1`, effectiveFrom, ...limits, updatedAt: stamp, updatedBy: actor }]
+      };
+      setMasterSpecs((prev) => [...prev, spec]);
+      showToast(`Added Master Specification: ${spec.name} (limits effective ${effectiveFrom})`);
+      setEditingMasterSpec(null);
+      setNewMasterSpecModalOpen(false);
+      return;
+    }
+
+    const existing = masterSpecs.find((s) => s.id === existingId);
+    if (!existing) return;
+
+    // Limit history is append-only: changing limits on an existing effective
+    // date would restate the window used to judge records from that date.
+    const applied = applySpecLimitEdit(existing, limits, effectiveFrom, stamp, actor);
+    if (!applied || applied.rejected) {
+      // Limits for that date are already on file and Cpk records measured under
+      // the revision keep their frozen limits, so correcting it is an explicit
+      // choice that says how many records would be re-frozen.
+      const revision = getSpecRevisions(existing).find((rev) => rev.effectiveFrom === effectiveFrom);
+      const affected = revision ? recordsFrozenToRevision(cpkRecords, existing.id, revision.id) : [];
+      setEditingMasterSpec(null);
+      setNewMasterSpecModalOpen(false);
+      if (revision && affected.length > 0) {
+        setSpecCorrection({
+          spec: existing,
+          revisionId: revision.id,
+          effectiveFrom,
+          limits,
+          affected,
+          previous: specLimitSnapshot(revision)
+        });
+      } else {
+        showToast(
+          `Updated ${existing.name}: limits effective ${effectiveFrom} are already on file — choose another effective date`,
+          'warning'
+        );
+      }
+      return;
+    }
+    const history = applied.history;
+    const latestRevision = history[history.length - 1];
+    const nextSpec = {
+      ...existing,
+      ...identity,
+      ...specLimitSnapshot(latestRevision),
+      effectiveFrom: latestRevision.effectiveFrom,
+      revisions: history
     };
 
-    if (existingId) {
-      setMasterSpecs((prev) => prev.map((s) => (s.id === existingId ? cleanSpec : s)));
-      showToast(`Updated Master Specification: ${cleanSpec.name}`);
+    setMasterSpecs((prev) => prev.map((s) => (s.id === existingId ? nextSpec : s)));
+    if (applied.outcome === 'revision') {
+      showToast(
+        `Updated ${nextSpec.name}: new limit revision effective ${latestRevision.effectiveFrom} (${history.length} on file)`,
+        'warning'
+      );
     } else {
-      setMasterSpecs((prev) => [...prev, cleanSpec]);
-      showToast(`Added Master Specification: ${cleanSpec.name}`);
+      showToast(`Updated ${nextSpec.name} (limits unchanged, effective ${latestRevision.effectiveFrom})`);
     }
     setEditingMasterSpec(null);
     setNewMasterSpecModalOpen(false);
+  };
+
+  const handleApplySpecCorrection = ({ refreeze }) => {
+    const pending = specCorrection;
+    if (!pending) return;
+    const corrected = correctSpecRevision(
+      pending.spec,
+      pending.limits,
+      pending.revisionId,
+      new Date().toISOString(),
+      cloudSync.userEmail || ''
+    );
+    if (!corrected) {
+      showToast('That revision is no longer on file — reopen the Master Spec and try again.', 'error');
+      setSpecCorrection(null);
+      return;
+    }
+    setMasterSpecs((prev) => prev.map((s) => (s.id === corrected.id ? corrected : s)));
+    const count = pending.affected.length;
+    if (refreeze) {
+      setCpkRecords((prev) => refreezeCpkRecordsToRevision(prev, corrected, pending.revisionId));
+      showToast(`Corrected limits effective ${pending.effectiveFrom} — re-froze ${count} Cpk record(s)`);
+    } else {
+      showToast(
+        `Corrected limits effective ${pending.effectiveFrom} — ${count} Cpk record(s) keep their frozen limits`,
+        'warning'
+      );
+    }
+    setSpecCorrection(null);
   };
 
   const handleDeleteMasterSpec = (spec) => {
@@ -1321,30 +1651,21 @@ function App() {
   };
 
   const handleUpdateCpkMeasurement = (recordId, updates) => {
-    setCpkRecords((prev) =>
-      prev.map((r) =>
-        r.id === recordId
-          ? {
-              ...r,
-              mean: Number(updates.mean),
-              stdDev: Math.max(0.0001, Number(updates.stdDev)),
-              sampleSize: Math.max(5, Number(updates.sampleSize) || 32),
-              date: todayIso()
-            }
-          : r
-      )
-    );
-    setActiveCpkChartRecord((prev) =>
-      prev && prev.id === recordId
-        ? {
-            ...prev,
-            mean: Number(updates.mean),
-            stdDev: Math.max(0.0001, Number(updates.stdDev)),
-            sampleSize: Math.max(5, Number(updates.sampleSize) || 32),
-            date: todayIso()
-          }
-        : prev
-    );
+    // The edit re-dates the record to today, so it is judged by today's limits.
+    const measuredAt = todayIso();
+    const refreeze = (r) => {
+      const next = {
+        ...r,
+        mean: Number(updates.mean),
+        stdDev: Math.max(0.0001, Number(updates.stdDev)),
+        sampleSize: Math.max(5, Number(updates.sampleSize) || 32),
+        date: measuredAt
+      };
+      const spec = masterSpecs.find((s) => s.id === next.specId);
+      return spec ? withFrozenSpecLimits(next, spec) : next;
+    };
+    setCpkRecords((prev) => prev.map((r) => (r.id === recordId ? refreeze(r) : r)));
+    setActiveCpkChartRecord((prev) => (prev && prev.id === recordId ? refreeze(prev) : prev));
     showToast('Updated process capability telemetry & recalculated Cpk');
   };
 
@@ -1427,6 +1748,19 @@ function App() {
     showToast(`Set ${taskId} category to ${category}`);
   };
 
+  // Claiming unassigned work: store the roster link and the readable name, so the
+  // task stays owned through a rename and the next free-text edit cannot lose it.
+  const handleAssignTaskOwner = (taskId, memberId) => {
+    const member = teamMembers.find((entry) => entry.id === memberId);
+    if (!member) return;
+    setTasks((prev) =>
+      prev.map((task) =>
+        task.id === taskId ? { ...task, ownerId: member.id, owner: member.name } : task
+      )
+    );
+    showToast(`Assigned ${taskId} to ${member.name}`);
+  };
+
   const handleAddTaskNote = (taskId, text) => {
     if (!text.trim()) return;
     const stamp = `Today ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
@@ -1442,7 +1776,7 @@ function App() {
 
   const handleSaveCostProject = (form, existingId = null) => {
     const clean = {
-      id: existingId || nextId('CI-', costProjects),
+      id: existingId || nextId('CI-', costProjects, idCounters['CI-'] || 0),
       title: form.title.trim(),
       model: form.model.toUpperCase().trim() || 'X4151',
       familyGroup: form.familyGroup || inferFamilyFromModel(form.model),
@@ -1466,6 +1800,7 @@ function App() {
       showToast(`Updated cost initiative ${clean.id}`);
     } else {
       setCostProjects((prev) => [clean, ...prev]);
+      setIdCounters((prev) => withIdCounter(prev, 'CI-', Number(clean.id.slice('CI-'.length))));
       showToast(`Added cost initiative ${clean.id}`);
     }
     setNewCostModalOpen(false);
@@ -1653,29 +1988,30 @@ function App() {
   const handleConfirmCostImport = (mode) => {
     const draft = costImportDraft;
     if (!draft) return;
-    setCostProjects((prev) => {
-      const fieldsById = new Map(draft.updates.map((u) => [u.id, u.fields]));
-      const keptIds = new Set(draft.keptIds || []);
-      const withUpdates = (item) =>
-        fieldsById.has(item.id) ? { ...item, ...fieldsById.get(item.id) } : item;
-      const updated = prev.map(withUpdates);
-      // Numbers stay monotonic across a replace: ids of dropped rows are not
-      // handed to the new ones.
-      const addRecords = (used) => {
-        let pool = used.slice();
-        return draft.adds.map((record) => {
-          const next = { ...record, id: nextId('CI-', pool) };
-          pool = [next, ...pool];
-          return next;
-        });
-      };
-      if (mode === 'replace') {
-        // Every row the file matched is kept, even when no field changed.
-        const kept = updated.filter((item) => keptIds.has(item.id));
-        return [...addRecords(prev), ...kept];
-      }
-      return [...addRecords(updated), ...updated];
-    });
+    const fieldsById = new Map(draft.updates.map((u) => [u.id, u.fields]));
+    const keptIds = new Set(draft.keptIds || []);
+    const withUpdates = (item) =>
+      fieldsById.has(item.id) ? { ...item, ...fieldsById.get(item.id) } : item;
+    const updated = costProjects.map(withUpdates);
+    // Numbers stay monotonic across a replace: ids of dropped rows are not
+    // handed to the new ones.
+    const addRecords = (used) => {
+      let pool = used.slice();
+      return draft.adds.map((record) => {
+        const next = { ...record, id: nextId('CI-', pool, idCounters['CI-'] || 0) };
+        pool = [next, ...pool];
+        return next;
+      });
+    };
+    const adds = addRecords(mode === 'replace' ? costProjects : updated);
+    // Every row the file matched is kept, even when no field changed.
+    const kept = mode === 'replace' ? updated.filter((item) => keptIds.has(item.id)) : updated;
+    setCostProjects([...adds, ...kept]);
+    const lastAdded = adds.reduce(
+      (max, item) => Math.max(max, Number(item.id.slice('CI-'.length)) || 0),
+      0
+    );
+    if (lastAdded) setIdCounters((prev) => withIdCounter(prev, 'CI-', lastAdded));
     setCostImportDraft(null);
     showToast(
       mode === 'replace'
@@ -1696,7 +2032,7 @@ function App() {
     // `no` is the same never-reused sequence as the CF-26- id, so deleting a case
     // cannot hand its number to the next one. An edited case keeps the number it
     // was filed under.
-    const newCaseId = nextId('CF-26-', customerFeedback);
+    const newCaseId = nextId('CF-26-', customerFeedback, idCounters['CF-26-'] || 0);
     const clean = {
       id: existingId || newCaseId,
       no: existingCase ? existingCase.no || caseNoFromId(existingId) : caseNoFromId(newCaseId),
@@ -1734,6 +2070,7 @@ function App() {
       showToast(`Updated customer feedback ${clean.id}`);
     } else {
       setCustomerFeedback((prev) => [clean, ...prev]);
+      setIdCounters((prev) => withIdCounter(prev, 'CF-26-', Number(clean.id.slice('CF-26-'.length))));
       showToast(`Logged customer feedback ${clean.id} (${clean.model})`);
     }
     setNewFeedbackModalOpen(false);
@@ -2020,33 +2357,34 @@ function App() {
   const handleConfirmFeedbackImport = (mode) => {
     const draft = feedbackImportDraft;
     if (!draft) return;
-    setCustomerFeedback((prev) => {
-      const fieldsById = new Map(draft.updates.map((u) => [u.id, u.fields]));
-      const keptIds = new Set(draft.keptIds || []);
-      const withUpdates = (item) =>
-        fieldsById.has(item.id) ? { ...item, ...fieldsById.get(item.id) } : item;
-      const updated = prev.map(withUpdates);
-      const buildRecord = (record, used) => {
-        const id = nextId('CF-26-', used);
-        return { ...record, id, no: caseNoFromId(id) };
-      };
-      // Numbers stay monotonic across a replace: ids of dropped rows are not
-      // handed to the new ones.
-      const addRecords = (used) => {
-        let pool = used.slice();
-        return draft.adds.map((record) => {
-          const next = buildRecord(record, pool);
-          pool = [next, ...pool];
-          return next;
-        });
-      };
-      if (mode === 'replace') {
-        // Every row the file matched is kept, even when no field changed.
-        const kept = updated.filter((item) => keptIds.has(item.id));
-        return [...addRecords(prev), ...kept];
-      }
-      return [...addRecords(updated), ...updated];
-    });
+    const fieldsById = new Map(draft.updates.map((u) => [u.id, u.fields]));
+    const keptIds = new Set(draft.keptIds || []);
+    const withUpdates = (item) =>
+      fieldsById.has(item.id) ? { ...item, ...fieldsById.get(item.id) } : item;
+    const updated = customerFeedback.map(withUpdates);
+    const buildRecord = (record, used) => {
+      const id = nextId('CF-26-', used, idCounters['CF-26-'] || 0);
+      return { ...record, id, no: caseNoFromId(id) };
+    };
+    // Numbers stay monotonic across a replace: ids of dropped rows are not
+    // handed to the new ones.
+    const addRecords = (used) => {
+      let pool = used.slice();
+      return draft.adds.map((record) => {
+        const next = buildRecord(record, pool);
+        pool = [next, ...pool];
+        return next;
+      });
+    };
+    const adds = addRecords(mode === 'replace' ? customerFeedback : updated);
+    // Every row the file matched is kept, even when no field changed.
+    const kept = mode === 'replace' ? updated.filter((item) => keptIds.has(item.id)) : updated;
+    setCustomerFeedback([...adds, ...kept]);
+    const lastAdded = adds.reduce(
+      (max, item) => Math.max(max, Number(item.id.slice('CF-26-'.length)) || 0),
+      0
+    );
+    if (lastAdded) setIdCounters((prev) => withIdCounter(prev, 'CF-26-', lastAdded));
     setFeedbackImportDraft(null);
     showToast(
       mode === 'replace'
@@ -2063,7 +2401,13 @@ function App() {
       const primaryCriteria = projLines[primaryKey]?.[gateId]?.criteria || [];
       const critIdx = primaryCriteria.findIndex((c) => c.id === criterionId);
       if (critIdx < 0) return prev;
-      const nextChecked = !primaryCriteria[critIdx].checked;
+      // A partly ticked scope fills on click: only a criterion already ticked on
+      // every selected line clears. Following one line instead would silently
+      // uncheck the lines that had it ticked.
+      const allTicked = targetKeys.every(
+        (k) => projLines[k]?.[gateId]?.criteria?.[critIdx]?.checked
+      );
+      const nextChecked = !allTicked;
 
       const updatedProjLines = { ...projLines };
       targetKeys.forEach((k) => {
@@ -2324,7 +2668,9 @@ function App() {
         (c) => c.nmbStatus === 'Open' || c.customerStatus === 'Open'
       ).length
     },
-    { id: 'production', label: 'Production Records', icon: Database }
+    { id: 'production', label: 'Production Records', icon: Database },
+    { id: 'team', label: 'Team & Workload', icon: Users },
+    { id: 'reports', label: 'Reports & Snapshots', icon: ClipboardCheck }
   ];
 
   const viewTitles = {
@@ -2336,7 +2682,9 @@ function App() {
     cpk: 'Process Capability (Cpk) & Master Specifications',
     costs: 'FFM Projects & Cost Saving Portfolio (VA/VE · Yield · HC)',
     feedback: 'FFM Customer Feedback, FA & 8D FACA Tracker (Y2026)',
-    production: 'Production Records (Yield, UPH & Efficiency)'
+    production: 'Production Records (Yield, UPH & Efficiency)',
+    team: 'Team Members, Product Assignment & Workload',
+    reports: 'Executive KPI Report & Snapshot Analysis'
   };
 
   return (
@@ -2484,13 +2832,22 @@ function App() {
                   {cloudSync.userEmail}
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-1.5 pt-1">
+              <div className="grid grid-cols-3 gap-1.5 pt-1">
                 <button
                   type="button"
                   onClick={handleExportWorkspaceJson}
+                  title="Download the workspace as a JSON file"
                   className="px-2 py-1 rounded bg-slate-800 dark:bg-slate-600 hover:bg-slate-700 text-slate-300 dark:text-slate-300 text-[10px] font-medium inline-flex items-center justify-center gap-1"
                 >
                   <Download className="w-3 h-3" /> Backup
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCopyWorkspaceState}
+                  title="Copy the loaded workspace as JSON (Rev #, slices) for the local preview"
+                  className="px-2 py-1 rounded bg-slate-800 dark:bg-slate-600 hover:bg-slate-700 text-slate-300 dark:text-slate-300 text-[10px] font-medium inline-flex items-center justify-center gap-1"
+                >
+                  <ClipboardCheck className="w-3 h-3" /> Copy
                 </button>
                 <button
                   type="button"
@@ -2572,6 +2929,16 @@ function App() {
                       className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 disabled:opacity-50"
                     >
                       <RefreshCw className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openStateHistory}
+                      disabled={cloudSync.status === 'saving' || cloudSync.status === 'loading'}
+                      title="Browse recent saved revisions and restore one"
+                      aria-label="State history"
+                      className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 disabled:opacity-50"
+                    >
+                      <Clock className="w-3 h-3" />
                     </button>
                   </>
                 )}
@@ -2712,16 +3079,11 @@ function App() {
                     records={scopedProductionRecords}
                     tasks={scopedTasks}
                     gateRecords={gateRecords}
-                    masterSpecs={masterSpecs}
-                    cpkRecords={scopedCpkRecords}
                     costProjects={costProjects}
                     customerFeedback={customerFeedback}
-                    lastUploadBatch={lastUploadBatch}
                     globalSide={globalSide}
                     onOpenKpiDrilldown={setKpiDrilldown}
                     onOpenGate={navigateToGate}
-                    onOpenCpkChart={(rec) => setActiveCpkChartRecord(rec)}
-                    onOpenCpkImport={() => setCpkImportModalOpen(true)}
                     onSelectTask={(id) => setActiveTaskDrawerId(id)}
                     onSwitchView={setActiveView}
                   />
@@ -2752,6 +3114,9 @@ function App() {
                     scheduleOverrides={scheduleOverrides}
                     onOpenGate={navigateToGate}
                     onEditSchedule={(target) => setEditingScheduleTarget(target)}
+                    onReschedule={({ project, rowKeys, schedule }) =>
+                      handleSaveScheduleOverride(project.id, rowKeys, schedule)
+                    }
                   />
                 );
               case 'tasks':
@@ -2864,6 +3229,42 @@ function App() {
                     onDeleteRecord={(rec) => setDeletingProdRecord(rec)}
                   />
                 );
+              case 'team':
+                return (
+                  <TeamMembersView
+                    members={teamMembers}
+                    projects={projects}
+                    tasks={tasks}
+                    gateRecords={gateRecords}
+                    scheduleOverrides={scheduleOverrides}
+                    onOpenNew={() => setNewTeamMemberModalOpen(true)}
+                    onEdit={(member) => setEditingTeamMember(member)}
+                    onDelete={(member) => setDeletingTeamMember(member)}
+                    onOpenTask={(taskId) => setActiveTaskDrawerId(taskId)}
+                    onAssignTaskOwner={handleAssignTaskOwner}
+                    onOpenGate={(projectId, lineKey, gateId) => navigateToGate(projectId, gateId, lineKey)}
+                  />
+                );
+              case 'reports':
+                return (
+                  <ReportsView
+                    projects={scopedProjects}
+                    records={scopedProductionRecords}
+                    costProjects={scopedCostProjects}
+                    customerFeedback={scopedCustomerFeedback}
+                    gateRecords={gateRecords}
+                    scopeLabel={
+                      [
+                        globalFamily !== 'ALL' ? globalFamily : '',
+                        globalModel !== 'ALL' ? globalModel : '',
+                        globalPhase !== 'ALL' ? globalPhase : '',
+                        globalSide !== 'ALL' ? globalSide : ''
+                      ]
+                        .filter(Boolean)
+                        .join(' · ') || 'All programs'
+                    }
+                  />
+                );
               default:
                 return null;
             }
@@ -2916,6 +3317,7 @@ function App() {
       {newTaskModalOpen && (
         <NewTaskModal
           projects={projects}
+          members={teamMembers}
           onClose={() => setNewTaskModalOpen(false)}
           onSubmit={handleCreateTask}
         />
@@ -2953,6 +3355,7 @@ function App() {
         <BuildMatrixRowModal
           project={matrixModalState.project}
           initialRow={matrixModalState.row}
+          maxSeen={idCounters['ME:' + matrixModalState.project.id] || 0}
           onClose={() => setMatrixModalState(null)}
           onSubmit={(form) =>
             handleSaveBuildMatrixRow(
@@ -3079,6 +3482,31 @@ function App() {
         />
       )}
 
+      {/* Create / Edit Team Member Modal */}
+      {(newTeamMemberModalOpen || editingTeamMember) && (
+        <TeamMemberModal
+          member={editingTeamMember}
+          members={teamMembers}
+          projects={projects}
+          onClose={() => {
+            setNewTeamMemberModalOpen(false);
+            setEditingTeamMember(null);
+          }}
+          onSubmit={(form) => handleSaveTeamMember(form, editingTeamMember?.id || null)}
+        />
+      )}
+
+      {/* Delete Team Member Confirmation Modal */}
+      {deletingTeamMember && (
+        <DeleteTeamMemberModal
+          member={deletingTeamMember}
+          reports={teamMembers.filter((m) => m.reportsTo === deletingTeamMember.id)}
+          workload={computeTeamWorkload(deletingTeamMember, projects, tasks, gateRecords, teamMembers, scheduleOverrides)}
+          onClose={() => setDeletingTeamMember(null)}
+          onConfirm={() => handleDeleteTeamMember(deletingTeamMember.id)}
+        />
+      )}
+
       {/* Cost initiative CSV / Excel import preview (merge or replace) */}
       {costImportDraft && (
         <ImportMergePreviewModal
@@ -3141,6 +3569,48 @@ function App() {
         />
       )}
 
+      {/* Correcting limits on an existing effective date that frozen records used */}
+      {specCorrection && (
+        <SpecCorrectionModal
+          name={specCorrection.spec.name}
+          code={specCorrection.spec.code}
+          unit={specCorrection.spec.unit}
+          effectiveFrom={specCorrection.effectiveFrom}
+          previous={specCorrection.previous}
+          next={specCorrection.limits}
+          affected={specCorrection.affected}
+          onCancel={() => setSpecCorrection(null)}
+          onApply={handleApplySpecCorrection}
+        />
+      )}
+
+      {/* State history: preview a save's per-slice changes and restore it */}
+      {stateHistory && (
+        <StateHistoryPanel
+          current={stateHistory.current}
+          revisions={stateHistory.revisions}
+          limit={stateHistory.limit}
+          loading={stateHistory.loading}
+          error={stateHistory.error}
+          selected={stateHistory.selected}
+          selectedMeta={stateHistory.meta}
+          data={stateHistory.data}
+          loadingRevision={stateHistory.loadingRevision}
+          restoring={stateHistory.restoring}
+          local={buildWorkspacePayload()}
+          blockedReason={
+            syncConflict
+              ? 'Resolve the save conflict first.'
+              : cloudSync.status === 'saving' || cloudSync.status === 'loading'
+              ? 'Wait for the current sync to finish.'
+              : null
+          }
+          onSelect={selectStateHistoryRevision}
+          onRestore={restoreStateHistoryRevision}
+          onClose={closeStateHistory}
+        />
+      )}
+
       {/* Save conflict: local edits are kept until the user picks a version */}
       {syncConflict && (
         <SyncConflictModal
@@ -3152,6 +3622,16 @@ function App() {
           error={syncConflict.error}
           onKeepLocal={handleConflictKeepLocal}
           onUseRemote={handleConflictUseRemote}
+        />
+      )}
+
+      {/* Blocked clipboard: the same export text, pre-selected for a manual copy */}
+      {workspaceExportCopy && (
+        <WorkspaceExportModal
+          json={workspaceExportCopy.json}
+          revision={workspaceExportCopy.revision}
+          reason={workspaceExportCopy.reason}
+          onClose={() => setWorkspaceExportCopy(null)}
         />
       )}
 

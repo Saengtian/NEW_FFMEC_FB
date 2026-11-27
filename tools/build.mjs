@@ -15,17 +15,19 @@ import { join } from "node:path";
 import * as esbuild from "esbuild";
 
 const ROOT = join(import.meta.dir, "..");
-const PARTS = ["Icons", "Part1_Data", "Part2_App", "Part3_ViewsA", "Part4_ViewsB", "Part5_Modules"];
+const PARTS = ["Icons", "Part1_Data", "Part2_App", "Part3_ViewsA", "Part4_ViewsB", "Part5_Modules", "Part6_Reports"];
 const BUNDLE = join(ROOT, "Bundle.html");
 const STYLES = join(ROOT, "Styles.html");
 const CSS_TMP = join(ROOT, "tools/.styles.tmp.css");
 const TAILWIND_CONFIG = join(ROOT, "tools/tailwind.config.cjs");
 const TAILWIND_INPUT = join(ROOT, "tools/tailwind.css");
 
-/** React/ReactDOM come from node_modules, so nothing is fetched at runtime. */
+/** React/ReactDOM/SheetJS come from node_modules, so nothing is fetched at runtime. */
 const PRELUDE = `import React from 'react';
 import ReactDOM from 'react-dom';
+import XLSX from 'xlsx';
 const { useState, useMemo, useEffect, useRef, useCallback } = React;
+window.XLSX = XLSX;
 `;
 
 /** Mounting used to be a second <script type="text/babel"> at the end of Index. */
@@ -65,7 +67,23 @@ async function buildScript() {
   });
 
   // A literal </script> inside the JS would close the inline tag early.
-  const js = result.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
+  // Apps Script's HTML pipeline ALSO strips from a raw `http://` to the end of
+  // that line; on SheetJS's long minified lines that silently deleted ~49 KB
+  // and left an unterminated string (startup SyntaxError). `\/` is a no-op
+  // escape inside JS strings/regexes/templates, so runtime values stay intact.
+  // For the same reason it reads `<?` as the start of a template scriptlet, so
+  // SheetJS's literal "<?xml" declaration needs its delimiter broken — `\?` is
+  // likewise the same character to the running JS.
+  // `https://` is truncated the same way (`//` starts a line comment to the
+  // HTML pipeline), including inside ordinary string literals. The Drive-link
+  // validation message is one such string, and losing the rest of its line
+  // left an unterminated call — the "Invalid or unexpected token" startup
+  // error. Escape its delimiter too.
+  const js = result.outputFiles[0].text
+    .replace(/<\/script/gi, "<\\/script")
+    .replaceAll("http://", "http:\\/\\/")
+    .replaceAll("https://", "https:\\/\\/")
+    .replaceAll("<?", "<\\?");
   writeFileSync(
     BUNDLE,
     `<!-- Built by tools/build.mjs from Icons.html + Part*.html. Do not edit. -->\n<script>\n${js}\n</script>\n`

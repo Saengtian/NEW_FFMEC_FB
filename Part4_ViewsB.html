@@ -3,6 +3,509 @@
 // INTERACTIVE PROCESS CAPABILITY (CPK) CHART MODAL & MASTER SPEC MODAL
 // ============================================================================
 
+// ============================================================================
+// CPK DISTRIBUTION COMPARISON — one Variable x Spec across every
+// Stage x Config x Side build context (box plot + density + summary)
+// ============================================================================
+
+const CPK_CHART_COLORS = {
+  green: { fill: '#34d399', stroke: '#047857' },
+  yellow: { fill: '#fbbf24', stroke: '#b45309' },
+  orange: { fill: '#fb923c', stroke: '#c2410c' },
+  provisional: { fill: '#cbd5e1', stroke: '#64748b' }
+};
+
+function CpkDistributionCompareModal({ spec, groups, onClose }) {
+  if (!spec || !Array.isArray(groups) || groups.length === 0) return null;
+
+  // The chart draws the limits of the newest reading; each row's Cpk still uses
+  // the revision that was in force when that reading was taken.
+  const newest = groups.reduce(
+    (best, g) => (String(g.record?.date || '') > String(best.record?.date || '') ? g : best),
+    groups[0]
+  );
+  const limitSpec = effectiveSpecForRecord(spec, newest.record) || spec;
+  const lsl =
+    limitSpec.specType !== 'upper' && limitSpec.lsl !== null && limitSpec.lsl !== ''
+      ? Number(limitSpec.lsl)
+      : null;
+  const usl =
+    limitSpec.specType !== 'lower' && limitSpec.usl !== null && limitSpec.usl !== ''
+      ? Number(limitSpec.usl)
+      : null;
+  const specLimits = [
+    { label: 'LSL', value: lsl },
+    { label: 'USL', value: usl }
+  ].filter((limit) => limit.value !== null);
+  const provisionalLimits = hasProvisionalLimits(limitSpec);
+
+  let limitsDrift = false;
+  // Past this many points per context the dots overlap into a smear, so draw an
+  // evenly spaced subset instead.
+  const MAX_POINTS = 160;
+  const rows = groups.map((g) => {
+    const limits = effectiveSpecForRecord(spec, g.record) || spec;
+    if ((limits.effectiveFrom || '') !== (limitSpec.effectiveFrom || '')) limitsDrift = true;
+    const stats = computeCapabilityStats(g.record, limits);
+    const rowProvisional = hasProvisionalLimits(limits);
+    const box = cpkBoxSummary(g.record);
+    // A raw box exposes the parsed, sorted readings its quartiles came from, so the
+    // points are exactly those samples; a summary-only row has none.
+    const samples = box.values || [];
+    const step = Math.ceil(samples.length / MAX_POINTS) || 1;
+    // Keep each drawn point's index in the sorted set: jitter keys on it, so a
+    // point holds its x offset between renders instead of dancing.
+    const points = samples
+      .map((value, index) => ({ value, index }))
+      .filter((point) => point.index % step === 0);
+    return {
+      ...g,
+      stats,
+      box,
+      tone: rowProvisional ? getProvisionalLimitTone() : getCpkTone(stats.cpk),
+      samples,
+      points
+    };
+  });
+  const rawCount = rows.filter((r) => r.box.basis === 'raw').length;
+
+  // Individual points can sit beyond the 1.5 × IQR whiskers, so the axis covers
+  // the samples too, not just each box's own extremes.
+  const lows = rows.flatMap((r) => [...r.samples, r.box.low]);
+  const highs = rows.flatMap((r) => [...r.samples, r.box.high]);
+  if (lsl !== null) lows.push(lsl);
+  if (usl !== null) highs.push(usl);
+  const rawLow = Math.min(...lows);
+  const rawHigh = Math.max(...highs);
+  const pad = Math.max(1e-9, (rawHigh - rawLow) * 0.06);
+  const minX = rawLow - pad;
+  const maxX = Math.max(rawLow + 1e-9, rawHigh + pad);
+  const spanX = Math.max(1e-9, maxX - minX);
+  const fmt = (value) => formatSpecNum(value, spec);
+
+  // --- Box plot -------------------------------------------------------------
+  const boxW = 820;
+  const boxH = 300;
+  const boxPadL = 58;
+  const boxPadR = 20;
+  const boxPadT = 22;
+  const boxPadB = 78;
+  const boxPlotW = boxW - boxPadL - boxPadR;
+  const boxPlotH = boxH - boxPadT - boxPadB;
+  const yTo = (value) => boxPadT + (1 - (value - minX) / spanX) * boxPlotH;
+  const slotW = boxPlotW / rows.length;
+  const boxWidth = Math.max(14, Math.min(54, slotW * 0.5));
+  const ticks = Array.from({ length: 5 }, (_, i) => minX + (i / 4) * spanX);
+  // Deterministic jitter keyed on a sample's position in the sorted set, so it
+  // keeps the same x offset on every render.
+  const jitterAt = (i) => {
+    const seed = Math.sin((i + 1) * 12.9898) * 43758.5453;
+    return (seed - Math.floor(seed) - 0.5) * boxWidth * 0.72;
+  };
+
+  // --- Distribution ridges --------------------------------------------------
+  const labelW = 152;
+  const distPlotL = labelW + 8;
+  const distPlotR = boxW - 20;
+  const ridgeH = 46;
+  const distTop = 26;
+  const distH = distTop + rows.length * ridgeH + 34;
+  const xTo = (value) => distPlotL + ((value - minX) / spanX) * (distPlotR - distPlotL);
+  const pdfAt = (mean, sd) => (x) => Math.exp(-0.5 * Math.pow((x - mean) / sd, 2));
+  const curveFor = (mean, sd, baseY) =>
+    Array.from({ length: 73 }, (_, i) => {
+      const x = minX + (i / 72) * spanX;
+      const y = baseY - pdfAt(mean, sd)(x) * (ridgeH * 0.78);
+      return `${xTo(x).toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/55 backdrop-blur-[1px]">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Distribution comparison · ${spec.name}`}
+        className="w-full max-w-5xl max-h-[92vh] flex flex-col bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs"
+      >
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-start justify-between gap-3 shrink-0">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-slate-700 dark:text-slate-300" />
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                Distribution comparison · {spec.name} ({spec.code})
+              </h3>
+              <span className="px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 text-[11px] font-bold text-slate-600 dark:text-slate-300 tabular-nums">
+                {rows.length} build context{rows.length === 1 ? '' : 's'}
+              </span>
+              {provisionalLimits && (
+                <span className="px-2 py-0.5 rounded-md border border-dashed border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950 text-[11px] font-bold text-amber-800 dark:text-amber-200">
+                  Provisional limits
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+              {spec.station} · {lsl !== null ? `LSL ${fmt(lsl)}` : 'no LSL'} /{' '}
+              {usl !== null ? `USL ${fmt(usl)}` : 'no USL'} {spec.unit} · target Cpk ≥{' '}
+              {Number(spec.cpkTarget || 1.33).toFixed(2)} · {spec.metrology}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close distribution comparison"
+            className="p-1.5 -m-1.5 shrink-0 rounded-md text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="p-5 space-y-4 overflow-y-auto flex-1">
+          {provisionalLimits && (
+            <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 px-3 py-2.5 text-[11px] leading-relaxed text-amber-900 dark:text-amber-100">
+              <strong>Provisional limits.</strong> These are draft values, not the released specification.
+              Cpk is shown for reference only and does not count as valid capability until the real limits
+              are entered and confirmed.
+            </div>
+          )}
+          {/* Box plot */}
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/60 p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px]">
+              <span className="font-bold text-slate-700 dark:text-slate-300">
+                Spread by stage · config · side ({spec.unit})
+              </span>
+              <span className="text-slate-500 dark:text-slate-400">
+                {rawCount === rows.length
+                  ? 'Box = P25–P75 of the measured samples · whiskers = 1.5 × IQR · points = individual measurements'
+                  : rawCount > 0
+                  ? 'Boxes with samples = P25–P75 + 1.5 × IQR (points shown) · others = mean ± 1σ / mean ± 3σ'
+                  : 'Box = mean ± 1σ · whiskers = mean ± 3σ (summary upload, no raw samples)'}
+              </span>
+            </div>
+            <svg
+              viewBox={`0 0 ${boxW} ${boxH}`}
+              className="w-full h-auto bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800"
+            >
+              {ticks.map((tick, idx) => (
+                <g key={`tick-${idx}`}>
+                  <line
+                    x1={boxPadL}
+                    y1={yTo(tick)}
+                    x2={boxW - boxPadR}
+                    y2={yTo(tick)}
+                    stroke="currentColor"
+                    className="text-slate-200 dark:text-slate-700"
+                    strokeWidth="1"
+                  />
+                  <text x={boxPadL - 8} y={yTo(tick) + 3} textAnchor="end" fontSize="9" fill="#64748b">
+                    {fmt(tick)}
+                  </text>
+                </g>
+              ))}
+
+              {specLimits.map((limit) => (
+                <g key={limit.label}>
+                  <line
+                    x1={boxPadL}
+                    y1={yTo(limit.value)}
+                    x2={boxW - boxPadR}
+                    y2={yTo(limit.value)}
+                    stroke="#e11d48"
+                    strokeDasharray="5 4"
+                    strokeWidth="1.4"
+                  />
+                  <text x={boxPadL + 4} y={yTo(limit.value) - 4} fontSize="9" fontWeight="700" fill="#be123c">
+                    {limit.label} {fmt(limit.value)}
+                  </text>
+                </g>
+              ))}
+
+              {rows.map((row, idx) => {
+                const cx = boxPadL + slotW * idx + slotW / 2;
+                const color = CPK_CHART_COLORS[row.tone.key];
+                const stroke = color.stroke;
+                const yLow = yTo(row.box.low);
+                const yHigh = yTo(row.box.high);
+                const yQ1 = yTo(row.box.q1);
+                const yQ3 = yTo(row.box.q3);
+                const yMed = yTo(row.box.median);
+                return (
+                  <g key={row.key}>
+                    <title>{`${row.model} ${row.phase} ${row.side} · ${row.config}: Cpk ${row.stats.cpk.toFixed(
+                      2
+                    )}, mean ${fmt(row.record.mean)}, σ ${fmt(row.record.stdDev)}, n ${row.record.sampleSize}`}</title>
+                    <line x1={cx} y1={yLow} x2={cx} y2={yHigh} stroke={stroke} strokeWidth="1.2" />
+                    <line
+                      x1={cx - boxWidth / 2.6}
+                      y1={yLow}
+                      x2={cx + boxWidth / 2.6}
+                      y2={yLow}
+                      stroke={stroke}
+                      strokeWidth="1.6"
+                    />
+                    <line
+                      x1={cx - boxWidth / 2.6}
+                      y1={yHigh}
+                      x2={cx + boxWidth / 2.6}
+                      y2={yHigh}
+                      stroke={stroke}
+                      strokeWidth="1.6"
+                    />
+                    <rect
+                      x={cx - boxWidth / 2}
+                      y={Math.min(yQ1, yQ3)}
+                      width={boxWidth}
+                      height={Math.max(2, Math.abs(yQ1 - yQ3))}
+                      rx="3"
+                      fill={color.fill}
+                      fillOpacity="0.45"
+                      stroke={stroke}
+                      strokeWidth="1.4"
+                    />
+                    <line
+                      x1={cx - boxWidth / 2}
+                      y1={yMed}
+                      x2={cx + boxWidth / 2}
+                      y2={yMed}
+                      stroke={stroke}
+                      strokeWidth="2.4"
+                    />
+                    {row.points.map((point) => (
+                      <circle
+                        key={point.index}
+                        cx={cx + jitterAt(point.index)}
+                        cy={yTo(point.value)}
+                        r="2"
+                        fill="none"
+                        stroke={stroke}
+                        strokeWidth="1"
+                        opacity="0.85"
+                      />
+                    ))}
+                    {[row.model, `${row.phase} · ${row.config}`, row.side].map((text, i) => (
+                      <text
+                        key={i}
+                        x={cx}
+                        y={boxPadT + boxPlotH + 16 + i * 12}
+                        textAnchor="middle"
+                        fontSize="9"
+                        fontWeight={i === 0 ? 700 : 400}
+                        fill={i === 0 ? '#334155' : '#64748b'}
+                      >
+                        {text}
+                      </text>
+                    ))}
+                    <text
+                      x={cx}
+                      y={boxPadT + boxPlotH + 54}
+                      textAnchor="middle"
+                      fontSize="10"
+                      fontWeight="800"
+                      fill={stroke}
+                    >
+                      {row.stats.cpk.toFixed(2)}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+
+          {/* Distribution ridges */}
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/60 p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] mb-3">
+              <span className="font-bold text-slate-700 dark:text-slate-300">
+                Distribution vs specification ({spec.unit})
+              </span>
+              <span className="text-slate-500 dark:text-slate-400">
+                Normal density from each context's mean and σ · shaded red = outside the spec
+              </span>
+            </div>
+            <svg
+              viewBox={`0 0 ${boxW} ${distH}`}
+              className="w-full h-auto bg-white dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-800"
+            >
+              {lsl !== null && (
+                <rect
+                  x={distPlotL}
+                  y={distTop}
+                  width={Math.max(0, xTo(lsl) - distPlotL)}
+                  height={rows.length * ridgeH}
+                  fill="#f43f5e"
+                  fillOpacity="0.08"
+                />
+              )}
+              {usl !== null && (
+                <rect
+                  x={xTo(usl)}
+                  y={distTop}
+                  width={Math.max(0, distPlotR - xTo(usl))}
+                  height={rows.length * ridgeH}
+                  fill="#f43f5e"
+                  fillOpacity="0.08"
+                />
+              )}
+
+              {rows.map((row, idx) => {
+                const baseY = distTop + (idx + 1) * ridgeH - 10;
+                const color = CPK_CHART_COLORS[row.tone.key];
+                const stroke = color.stroke;
+                const path = curveFor(row.record.mean, Math.max(0.00001, row.record.stdDev), baseY);
+                return (
+                  <g key={row.key}>
+                    <title>{`${row.model} ${row.phase} ${row.side} · ${row.config}: mean ${fmt(
+                      row.record.mean
+                    )}, σ ${fmt(row.record.stdDev)}, Cpk ${row.stats.cpk.toFixed(2)}`}</title>
+                    <line
+                      x1={distPlotL}
+                      y1={baseY}
+                      x2={distPlotR}
+                      y2={baseY}
+                      stroke="currentColor"
+                      className="text-slate-200 dark:text-slate-700"
+                      strokeWidth="1"
+                    />
+                    <polyline
+                      points={`${xTo(minX)},${baseY} ${path} ${xTo(maxX)},${baseY}`}
+                      fill={color.fill}
+                      fillOpacity="0.16"
+                      stroke="none"
+                    />
+                    <polyline points={path} fill="none" stroke={stroke} strokeWidth="1.6" />
+                    <line
+                      x1={xTo(row.record.mean)}
+                      y1={baseY}
+                      x2={xTo(row.record.mean)}
+                      y2={baseY - ridgeH * 0.78}
+                      stroke={stroke}
+                      strokeWidth="1"
+                      strokeDasharray="2 2"
+                    />
+                    <text x={6} y={baseY - 12} fontSize="9" fontWeight="700" fill="#334155">
+                      {row.model} {row.phase}
+                    </text>
+                    <text x={6} y={baseY - 1} fontSize="8.5" fill="#64748b">
+                      {row.config} · {row.side} · Cpk {row.stats.cpk.toFixed(2)}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {specLimits.map((limit) => (
+                <g key={limit.label}>
+                  <line
+                    x1={xTo(limit.value)}
+                    y1={distTop}
+                    x2={xTo(limit.value)}
+                    y2={distTop + rows.length * ridgeH}
+                    stroke="#e11d48"
+                    strokeDasharray="5 4"
+                    strokeWidth="1.3"
+                  />
+                  <text
+                    x={xTo(limit.value)}
+                    y={distTop - 6}
+                    textAnchor="middle"
+                    fontSize="9"
+                    fontWeight="700"
+                    fill="#be123c"
+                  >
+                    {limit.label} {fmt(limit.value)}
+                  </text>
+                </g>
+              ))}
+
+              {ticks.map((tick, idx) => (
+                <text
+                  key={`axis-${idx}`}
+                  x={xTo(tick)}
+                  y={distTop + rows.length * ridgeH + 16}
+                  textAnchor="middle"
+                  fontSize="9"
+                  fill="#64748b"
+                >
+                  {fmt(tick)}
+                </text>
+              ))}
+              <text
+                x={boxW / 2}
+                y={distTop + rows.length * ridgeH + 30}
+                textAnchor="middle"
+                fontSize="9"
+                fill="#94a3b8"
+              >
+                {spec.unit} · LSL/USL from limits R{limitSpec.revisionNumber || 1} (
+                {limitSpec.effectiveFrom || 'baseline'})
+                {provisionalLimits ? ' · provisional' : ''}
+              </text>
+            </svg>
+          </div>
+
+          {/* Summary */}
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+            <table className="w-full text-left border-collapse text-[11px] tabular-nums">
+              <thead className="bg-slate-50 dark:bg-slate-800 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                <tr>
+                  <th className="py-2 px-3">Stage · Config · Side</th>
+                  <th className="py-2 px-2 text-right">n</th>
+                  <th className="py-2 px-2 text-right">Mean</th>
+                  <th className="py-2 px-2 text-right">σ</th>
+                  <th className="py-2 px-2 text-right">Cpk</th>
+                  <th className="py-2 px-2 text-right">OOS PPM</th>
+                  <th className="py-2 px-3">Verdict</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {rows.map((row) => (
+                  <tr key={`sum-${row.key}`}>
+                    <td className="py-1.5 px-3 font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                      {row.model} {row.phase} · {row.config} · {row.side}
+                    </td>
+                    <td className="py-1.5 px-2 text-right text-slate-600 dark:text-slate-400">
+                      {row.record.sampleSize}
+                    </td>
+                    <td className="py-1.5 px-2 text-right text-slate-700 dark:text-slate-300">
+                      {fmt(row.record.mean)}
+                    </td>
+                    <td className="py-1.5 px-2 text-right text-slate-700 dark:text-slate-300">
+                      {fmt(row.record.stdDev)}
+                    </td>
+                    <td className="py-1.5 px-2 text-right font-bold text-slate-900 dark:text-slate-100">
+                      {row.stats.cpk.toFixed(2)}
+                      {row.tone.key === 'provisional' && <span className="align-super text-[8px]">*</span>}
+                    </td>
+                    <td
+                      className={`py-1.5 px-2 text-right font-semibold ${
+                        row.stats.ppm > 1350
+                          ? 'text-orange-700 dark:text-orange-300'
+                          : 'text-emerald-700 dark:text-emerald-300'
+                      }`}
+                    >
+                      {row.stats.ppm.toLocaleString()}
+                    </td>
+                    <td className="py-1.5 px-3">
+                      <span className={`px-1.5 py-0.5 rounded border font-bold ${row.tone.badgeClass}`}>
+                        {row.tone.label}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <p className="text-[10px] text-slate-500 dark:text-slate-400">
+            A cell in the matrix is one context's latest reading for this spec.
+            {limitsDrift &&
+              ' Limits changed between these readings, so each Cpk is judged by the revision in force on its date; the charts draw the newest revision.'}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProcessCapabilityChartModal({
   record,
   spec,
@@ -17,6 +520,9 @@ function ProcessCapabilityChartModal({
 
   if (!spec) return null;
 
+  // The limits in force on the measurement date, not the ones in force today.
+  const specInForce = effectiveSpecForRecord(spec, record) || spec;
+
   const liveRec = {
     ...record,
     mean: Number(meanInput) || 0,
@@ -24,20 +530,21 @@ function ProcessCapabilityChartModal({
     sampleSize: Math.max(5, Number(nInput) || 32)
   };
 
-  const stats = computeCapabilityStats(liveRec, spec);
-  const tone = getCpkTone(stats.cpk);
+  const stats = computeCapabilityStats(liveRec, specInForce);
+  const provisionalLimits = hasProvisionalLimits(specInForce);
+  const tone = provisionalLimits ? getProvisionalLimitTone() : getCpkTone(stats.cpk);
 
   // Compute SVG chart coordinate domain covering both ±4σ and LSL/USL
   const mean = liveRec.mean;
   const sd = liveRec.stdDev;
-  const hasLsl = spec.specType !== 'upper' && spec.lsl !== null && spec.lsl !== '';
-  const hasUsl = spec.specType !== 'lower' && spec.usl !== null && spec.usl !== '';
-  const lslVal = hasLsl ? Number(spec.lsl) : 0;
-  const uslVal = hasUsl ? Number(spec.usl) : mean + 4 * sd;
+  const hasLsl = specInForce.specType !== 'upper' && specInForce.lsl !== null && specInForce.lsl !== '';
+  const hasUsl = specInForce.specType !== 'lower' && specInForce.usl !== null && specInForce.usl !== '';
+  const lslVal = hasLsl ? Number(specInForce.lsl) : 0;
+  const uslVal = hasUsl ? Number(specInForce.usl) : mean + 4 * sd;
 
   const domainCandidatesMin = [mean - 4 * sd];
   const domainCandidatesMax = [mean + 4 * sd];
-  if (hasLsl || spec.specType === 'upper') domainCandidatesMin.push(lslVal - 0.5 * sd);
+  if (hasLsl || specInForce.specType === 'upper') domainCandidatesMin.push(lslVal - 0.5 * sd);
   if (hasUsl) domainCandidatesMax.push(uslVal + 0.5 * sd);
 
   const minX = Math.min(...domainCandidatesMin);
@@ -81,7 +588,7 @@ function ProcessCapabilityChartModal({
     }
 
     const outOfSpec =
-      (hasLsl && mid < lslVal) || (hasUsl && mid > uslVal) || (spec.specType === 'upper' && mid < 0);
+      (hasLsl && mid < lslVal) || (hasUsl && mid > uslVal) || (specInForce.specType === 'upper' && mid < 0);
     return { idx, start, end, mid, count, outOfSpec };
   });
 
@@ -114,10 +621,30 @@ function ProcessCapabilityChartModal({
               <span className={`px-2 py-0.5 rounded-md border text-[11px] font-bold ${tone.badgeClass}`}>
                 Cpk {stats.cpk.toFixed(2)} · {tone.label}
               </span>
+              <span
+                title={`Limits of revision ${specInForce.revisionNumber || 1} of ${
+                  specInForce.revisionCount || 1
+                }, in force from ${specInForce.effectiveFrom || 'the recorded baseline'}${
+                  provisionalLimits ? ' — PROVISIONAL, not the released specification' : ''
+                }`}
+                className={`px-2 py-0.5 rounded-md border text-[10px] font-semibold tabular-nums ${
+                  provisionalLimits
+                    ? 'border-dashed border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200'
+                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                Limits R{specInForce.revisionNumber || 1} · {specInForce.effectiveFrom || 'baseline'}
+                {provisionalLimits ? ' · provisional' : ''}
+              </span>
             </div>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
               {record.model} {record.phase} ({record.side} · {record.config}) · {spec.station} ·{' '}
               {spec.metrology} · {spec.docRef}
+              {specInForce.predatesFirstRevision && (
+                <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-800 font-semibold">
+                  Measured before the first recorded limit revision
+                </span>
+              )}
               {record.sourceFile && (
                 <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 font-semibold">
                   Source: {record.sourceFile} ({hasUploadedRaw ? 'Raw Data' : 'Summary'})
@@ -132,6 +659,21 @@ function ProcessCapabilityChartModal({
 
         {/* Body */}
         <div className="p-5 space-y-4 overflow-y-auto flex-1">
+          {provisionalLimits && (
+            <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 px-3 py-2.5 text-[11px] leading-relaxed text-amber-900 dark:text-amber-100 flex flex-wrap items-center justify-between gap-2">
+              <span>
+                <strong>Provisional limits.</strong> These values are placeholders, so this Cpk is not valid
+                capability and is excluded from the matrix share. Enter the confirmed limits to enable it.
+              </span>
+              <button
+                type="button"
+                onClick={() => onEditMasterSpec(spec)}
+                className="px-2 py-1 rounded-md border border-amber-400 dark:border-amber-600 bg-white/70 dark:bg-amber-900/40 hover:bg-white dark:hover:bg-amber-900 text-[10px] font-bold whitespace-nowrap"
+              >
+                Enter real limits →
+              </button>
+            </div>
+          )}
           {/* Statistical Summary Strip */}
           <div className="grid grid-cols-3 sm:grid-cols-6 gap-2.5 tabular-nums text-center">
             <div className={`p-2.5 rounded-lg border ${tone.badgeClass}`}>
@@ -309,23 +851,23 @@ function ProcessCapabilityChartModal({
               {/* Nominal Target Line */}
               <g>
                 <line
-                  x1={xToPx(Number(spec.nominal))}
+                  x1={xToPx(Number(specInForce.nominal))}
                   y1={padT}
-                  x2={xToPx(Number(spec.nominal))}
+                  x2={xToPx(Number(specInForce.nominal))}
                   y2={padT + plotH}
                   stroke="#2563eb"
                   strokeWidth="1.25"
                   strokeDasharray="2 3"
                 />
                 <text
-                  x={xToPx(Number(spec.nominal))}
+                  x={xToPx(Number(specInForce.nominal))}
                   y={svgH - 8}
                   textAnchor="middle"
                   fontSize="10"
                   fontWeight="600"
                   fill="#2563eb"
                 >
-                  Nom {formatSpecNum(spec.nominal, spec)}
+                  Nom {formatSpecNum(specInForce.nominal, specInForce)}
                 </text>
               </g>
 
@@ -358,10 +900,17 @@ function ProcessCapabilityChartModal({
           {/* Master Specification & Interactive Telemetry Simulator */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-800 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
-                  Master Specification
-                </span>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                    Master Specification
+                  </span>
+                  {provisionalLimits && (
+                    <span className="px-1.5 py-0.5 rounded border border-dashed border-amber-400 dark:border-amber-600 bg-amber-50 dark:bg-amber-950 text-[9px] font-bold text-amber-800 dark:text-amber-200">
+                      Provisional
+                    </span>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={() => onEditMasterSpec(spec)}
@@ -374,25 +923,29 @@ function ProcessCapabilityChartModal({
                 <div>
                   <span className="text-slate-400 dark:text-slate-400 block">LSL</span>
                   <strong className="text-slate-800 dark:text-slate-200">
-                    {spec.specType === 'upper' ? '0 (1-sided)' : `${spec.lsl} ${spec.unit}`}
+                    {specInForce.specType === 'upper' ? '0 (1-sided)' : `${specInForce.lsl} ${spec.unit}`}
                   </strong>
                 </div>
                 <div>
                   <span className="text-slate-400 dark:text-slate-400 block">Nominal</span>
                   <strong className="text-blue-700 dark:text-blue-300">
-                    {spec.nominal} {spec.unit}
+                    {specInForce.nominal} {spec.unit}
                   </strong>
                 </div>
                 <div>
                   <span className="text-slate-400 dark:text-slate-400 block">USL</span>
                   <strong className="text-slate-800 dark:text-slate-200">
-                    {spec.specType === 'lower' ? '—' : `${spec.usl} ${spec.unit}`}
+                    {specInForce.specType === 'lower' ? '—' : `${specInForce.usl} ${spec.unit}`}
                   </strong>
                 </div>
               </div>
               <div className="text-[11px] text-slate-500 dark:text-slate-400 pt-1.5 border-t border-slate-200 dark:border-slate-800 flex justify-between">
                 <span>Sampling: {spec.samplingPlan}</span>
-                <span>Target Cpk ≥ {spec.cpkTarget.toFixed(2)}</span>
+                <span>Target Cpk ≥ {Number(specInForce.cpkTarget).toFixed(2)}</span>
+              </div>
+              <div className="text-[10px] text-slate-400 dark:text-slate-500">
+                Limits in force on {record.date || 'the measurement date'} · revision{' '}
+                {specInForce.revisionNumber || 1} of {specInForce.revisionCount || 1}
               </div>
             </div>
 
@@ -490,6 +1043,8 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
           lsl: initialSpec.lsl ?? 0,
           nominal: initialSpec.nominal ?? 0,
           usl: initialSpec.usl ?? 1,
+          ctq: initialSpec.ctq !== false,
+          limitsConfirmed: initialSpec.limitsProvisional !== true,
           cpkTarget: initialSpec.cpkTarget ?? 1.33,
           metrology: initialSpec.metrology || '',
           docRef: initialSpec.docRef || '',
@@ -505,6 +1060,8 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
           lsl: 9.7,
           nominal: 10.0,
           usl: 10.36,
+          ctq: true,
+          limitsConfirmed: true,
           cpkTarget: 1.33,
           metrology: 'Height Gauge / OMM',
           docRef: 'SPC-OQC-02 Rev.A',
@@ -512,10 +1069,21 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
         }
   );
 
+  // New and edited limits take effect on a date the planner chooses, so the
+  // revision history stays truthful instead of rewriting past capability.
+  const [effectiveFrom, setEffectiveFrom] = useState(() => todayIso());
+  const revisionHistory = initialSpec ? getSpecRevisions(initialSpec).slice().reverse() : [];
+  const describeRevisionLimits = (rev) => {
+    const unit = form.unit ? ` ${form.unit}` : '';
+    if (rev.specType === 'upper') return `≤ ${rev.usl}${unit}`;
+    if (rev.specType === 'lower') return `≥ ${rev.lsl}${unit}`;
+    return `${rev.lsl}–${rev.usl}${unit}`;
+  };
+
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!form.code.trim() || !form.name.trim()) return;
-    onSubmit(form);
+    onSubmit({ ...form, effectiveFrom });
   };
 
   return (
@@ -534,6 +1102,13 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
         </div>
 
         <div className="p-5 space-y-3.5">
+          {isEditing && initialSpec.limitsProvisional === true && (
+            <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950 px-3 py-2.5 text-[11px] text-amber-900 dark:text-amber-100">
+              <strong>Provisional limits.</strong> These values are placeholders, so Cpk on this parameter is
+              excluded from the matrix share and is not valid capability. Enter the confirmed specification
+              and tick “Limits confirmed” below.
+            </div>
+          )}
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Param Code *</label>
@@ -646,7 +1221,87 @@ function MasterSpecModal({ initialSpec = null, onClose, onSubmit, modelOptions =
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          {/* Effective dating: a limit change becomes a revision, not an overwrite. */}
+          <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <label className="font-semibold text-slate-700 dark:text-slate-300 block">
+                  Limits effective from *
+                </label>
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                  Applies to LSL / Nominal / USL / Target Cpk. Cpk measured before this date keeps the
+                  limits that were in force then.
+                </p>
+              </div>
+              <input
+                type="date"
+                required
+                value={effectiveFrom}
+                onChange={(e) => setEffectiveFrom(e.target.value)}
+                className="px-2.5 py-1.5 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 tabular-nums"
+              />
+            </div>
+
+            {revisionHistory.length > 0 && (
+              <div className="border-t border-slate-200 dark:border-slate-700 pt-2 space-y-1">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                  Limit revisions ({revisionHistory.length})
+                </div>
+                {revisionHistory.slice(0, 4).map((rev, idx) => (
+                  <div
+                    key={rev.id || rev.effectiveFrom}
+                    className="flex items-center justify-between gap-2 text-[10px] text-slate-600 dark:text-slate-400 tabular-nums"
+                  >
+                    <span className="font-semibold">
+                      {rev.effectiveFrom} · R{revisionHistory.length - idx}
+                      {rev.baseline ? ' (baseline)' : ''}
+                      {rev.limitsProvisional === true ? ' · provisional' : ''}
+                    </span>
+                    <span className="font-mono">{describeRevisionLimits(rev)}</span>
+                  </div>
+                ))}
+                {revisionHistory.length > 4 && (
+                  <div className="text-[10px] text-slate-400 dark:text-slate-500">
+                    +{revisionHistory.length - 4} earlier revision(s)
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <label className="flex items-start gap-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={form.limitsConfirmed}
+              onChange={(e) => setForm({ ...form, limitsConfirmed: e.target.checked })}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="font-semibold text-slate-800 dark:text-slate-200 block">
+                Limits confirmed — count capability
+              </span>
+              <span className="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed block">
+                Leave unticked while the values are placeholders. Cpk against unconfirmed limits is shown for
+                reference only and excluded from the Cpk ≥ 1.33 share and family rollups.
+              </span>
+            </span>
+          </label>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">CTQ Parameter</label>
+              <select
+                value={form.ctq ? 'yes' : 'no'}
+                onChange={(e) => setForm({ ...form, ctq: e.target.value === 'yes' })}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 font-semibold"
+              >
+                <option value="yes">Yes — monitor in Cpk Matrix</option>
+                <option value="no">No — hide from Cpk Matrix</option>
+              </select>
+              <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">
+                Only parameters defined as CTQ appear in the Station × Variable matrix.
+              </p>
+            </div>
             <div>
               <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Target Cpk</label>
               <input
@@ -990,20 +1645,23 @@ function NewProjectModal({ onClose, onSubmit }) {
 /**
  * Next unused ME## config for a project line. Deriving it from the row count
  * reused a deleted line's config, and a config+side pair is the row's identity.
+ * `maxSeen` is that project's persisted high-water mark, so a deleted line's
+ * number is never issued again.
  */
-function nextBuildMatrixConfig(project) {
+function nextBuildMatrixConfig(project, maxSeen) {
   const side = getSideList(project?.side || 'RHS & LHS')[0] || 'RHS';
   const usedKeys = new Set(
     (project?.buildMatrix || []).map(
       (row) => `${String(row.config || '').toUpperCase()}-${row.side || 'RHS'}`
     )
   );
-  let configNo = 11 + (project?.buildMatrix?.length || 0);
+  // Configs start at ME11; maxSeen is the last number issued, not the next one.
+  let configNo = Math.max(11, (maxSeen || 0) + 1);
   while (usedKeys.has(`ME${configNo}-${side}`)) configNo += 1;
   return `ME${configNo}`;
 }
 
-function BuildMatrixRowModal({ project, initialRow = null, onClose, onSubmit }) {
+function BuildMatrixRowModal({ project, initialRow = null, maxSeen = 0, onClose, onSubmit }) {
   const isEditing = Boolean(initialRow);
   const availableSides = getSideList(project?.side || 'RHS & LHS');
   const [form, setForm] = useState(() =>
@@ -1025,7 +1683,7 @@ function BuildMatrixRowModal({ project, initialRow = null, onClose, onSubmit }) 
           fatpMih: initialRow.fatpMih || project?.mihDate || ''
         }
       : {
-          config: nextBuildMatrixConfig(project),
+          config: nextBuildMatrixConfig(project, maxSeen),
           side: availableSides[0] || 'RHS',
           apnRev: '610-00873-03 / Rev.02',
           code7E: `7E-${project?.model || 'X4151'}R-15`,
@@ -1299,17 +1957,23 @@ function DeleteBuildMatrixRowModal({ project, row, onClose, onConfirm }) {
   );
 }
 
-function NewTaskModal({ projects, onClose, onSubmit }) {
-  const [form, setForm] = useState({
-    projectId: projects[0]?.id || 'PRJ-X4151',
-    gateId: projects[0]?.currentGateId || 'mbo',
-    processStep: PROCESS_STEPS[0],
-    category: TASK_CATEGORIES[0],
-    title: '',
-    owner: 'Patcharapong J.',
-    priority: 'High',
-    dueDate: '2026-12-05',
-    description: ''
+function NewTaskModal({ projects, members = [], onClose, onSubmit }) {
+  const [form, setForm] = useState(() => {
+    const owner = 'Patcharapong J.';
+    return {
+      projectId: projects[0]?.id || 'PRJ-X4151',
+      gateId: projects[0]?.currentGateId || 'mbo',
+      processStep: PROCESS_STEPS[0],
+      category: TASK_CATEGORIES[0],
+      title: '',
+      owner,
+      // Preselect the seed name's roster entry, so a new task is personal without
+      // anyone having to notice the picker.
+      ownerId: teamMemberForOwner('', owner, members)?.id || '',
+      priority: 'High',
+      dueDate: '2026-12-05',
+      description: ''
+    };
   });
 
   const handleSubmit = (e) => {
@@ -1408,11 +2072,33 @@ function NewTaskModal({ projects, onClose, onSubmit }) {
           <div className="grid grid-cols-3 gap-2.5">
             <div>
               <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">DRI Owner</label>
-              <input
-                value={form.owner}
-                onChange={(e) => setForm({ ...form, owner: e.target.value })}
-                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
-              />
+              <select
+                value={form.ownerId}
+                onChange={(e) => {
+                  const linked = members.find((member) => member.id === e.target.value) || null;
+                  setForm({
+                    ...form,
+                    ownerId: linked ? linked.id : '',
+                    owner: linked ? linked.name : form.owner
+                  });
+                }}
+                className="w-full px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+              >
+                <option value="">Not on the roster</option>
+                {members.map((member) => (
+                  <option key={member.id} value={member.id}>
+                    {member.name} · {member.role}
+                  </option>
+                ))}
+              </select>
+              {!form.ownerId && (
+                <input
+                  value={form.owner}
+                  onChange={(e) => setForm({ ...form, owner: e.target.value })}
+                  placeholder="e.g. Kanya R."
+                  className="w-full mt-1 px-2.5 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
+                />
+              )}
             </div>
             <div>
               <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Priority</label>
@@ -2343,21 +3029,36 @@ function CpkImportPipelineModal({
     if (!parsedPayload) return;
     const newSpecs = Object.entries(autoGenDrafts)
       .filter(([, d]) => d.enabled && d.code.trim())
-      .map(([header, d], idx) => ({
-        id: `SPEC-AUTO-${d.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}-${idx}`,
-        code: d.code.toUpperCase().trim(),
-        name: d.name.trim() || header,
-        station: 'Final Inspection (OQC)',
-        unit: d.unit.trim() || 'mm',
-        specType: 'two-sided',
-        lsl: Number(d.lsl),
-        nominal: Number(d.nominal),
-        usl: Number(d.usl),
-        cpkTarget: 1.33,
-        metrology: 'Uploaded OMM / Tester',
-        docRef: `AUTO-${parsedPayload.fileName.slice(0, 14)}`,
-        samplingPlan: 'Uploaded Lot'
-      }));
+      .map(([header, d], idx) => {
+        const id = `SPEC-AUTO-${d.code.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-3)}-${idx}`;
+        const limits = {
+          specType: 'two-sided',
+          lsl: Number(d.lsl),
+          nominal: Number(d.nominal),
+          usl: Number(d.usl),
+          cpkTarget: 1.33,
+          // Suggested from the uploaded distribution, not a released limit.
+          limitsProvisional: true
+        };
+        // Generated now from this upload's distribution: effective today.
+        const effectiveFrom = todayIso();
+        return {
+          id,
+          code: d.code.toUpperCase().trim(),
+          name: d.name.trim() || header,
+          station: 'Final Inspection (OQC)',
+          unit: d.unit.trim() || 'mm',
+          ...limits,
+          effectiveFrom,
+          revisions: [
+            { id: `${id}-R1`, effectiveFrom, ...limits, updatedAt: new Date().toISOString(), updatedBy: '' }
+          ],
+          metrology: 'Uploaded OMM / Tester',
+          docRef: `AUTO-${parsedPayload.fileName.slice(0, 14)}`,
+          samplingPlan: 'Uploaded Lot',
+          ctq: true
+        };
+      });
 
     if (newSpecs.length === 0) return;
     const mergedExtra = [...(parsedPayload.extraSpecs || []), ...newSpecs];
@@ -2540,7 +3241,7 @@ function CpkImportPipelineModal({
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 max-w-xl mx-auto">
               Auto-maps columns to Master Spec codes:{' '}
               <span className="font-mono text-slate-700 dark:text-slate-300">
-                {masterSpecs.map((s) => s.code).join(', ')}
+                {Array.from(new Set(masterSpecs.map((s) => s.code))).join(', ')}
               </span>
             </p>
 
@@ -2778,7 +3479,7 @@ function CpkImportPipelineModal({
                       <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
                         {parsedPayload.records.map((rec) => {
                           const spec = effectiveSpecMap[rec.specId];
-                          const stats = computeCapabilityStats(rec, spec);
+                          const stats = computeCapabilityStats(rec, effectiveSpecForRecord(spec, rec));
                           const tone = getCpkTone(stats.cpk);
                           return (
                             <tr key={rec.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/80">
@@ -2789,6 +3490,20 @@ function CpkImportPipelineModal({
                                 <span className="font-bold text-slate-900 dark:text-slate-100">{spec?.name}</span>{' '}
                                 <span className="text-[10px] font-mono text-slate-400 dark:text-slate-400">
                                   ({spec?.code})
+                                </span>
+                                <span
+                                  className={
+                                    spec?.model
+                                      ? 'ml-1.5 px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[10px] font-semibold text-slate-600 dark:text-slate-300'
+                                      : 'ml-1.5 text-[10px] text-slate-400 dark:text-slate-500'
+                                  }
+                                  title={
+                                    spec?.model
+                                      ? `Resolved to the ${spec.model} specification`
+                                      : 'Resolved to the all-models specification'
+                                  }
+                                >
+                                  {spec?.model || 'all models'}
                                 </span>
                               </td>
                               <td className="py-2 px-2.5 text-right text-slate-600 dark:text-slate-400">

@@ -6,6 +6,12 @@
 const PHASE_ORDER = ['P1', 'P2', 'EVT', 'DVT', 'PVT', 'MP'];
 const SIDE_ORDER = ['RHS', 'LHS', 'Single'];
 
+// Position of a value in a known order; anything unknown sorts after the list.
+const orderedRank = (order, value) => {
+  const index = order.indexOf(value);
+  return index === -1 ? order.length : index;
+};
+
 const NPI_GATES = [
   { id: 'prep', code: 'G1', short: 'Preparing', label: 'Preparing (Pre-BBR)' },
   { id: 'bbr', code: 'G2', short: 'BBR', label: 'Before Build Review (BBR)' },
@@ -1003,6 +1009,322 @@ const PROCESS_STEPS = [
 ];
 
 // Tasks & AIL categories — every action item carries one of these.
+// ============================================================================
+// TEAM, PRODUCT ASSIGNMENT & WORKLOAD
+// ============================================================================
+
+// Roles as the PEN-81-0002 org chart uses them. The order is also how a member
+// list reads: management first, then the functions that support the build.
+const TEAM_ROLES = [
+  'Engineering Manager',
+  'Program Leader · Head-section',
+  'Program Leader',
+  'Engineering · Head-section',
+  'NPI Engineer',
+  'Quality Manager',
+  'QNPI',
+  'IPQC',
+  'IQC/SQE',
+  'Production',
+  'Maintenance'
+];
+
+// Seeded from the plant's team sheet: who reports to whom, and which products each
+// person carries. Emails are deliberately blank — they are typed in once, by the
+// owner, rather than invented here. `reportsTo` holds a member id, so renaming a
+// manager never breaks the chain.
+const INITIAL_TEAM_MEMBERS = [
+  { id: 'TM-01', name: 'Horikawa', role: 'Engineering Manager', reportsTo: '', email: '', products: [] },
+  { id: 'TM-02', name: 'Saengtian', role: 'Program Leader · Head-section', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-03', name: 'Piyasak', role: 'Program Leader', reportsTo: 'TM-02', email: '', products: ['MB14"'] },
+  { id: 'TM-04', name: 'Touchakorn', role: 'Program Leader', reportsTo: 'TM-02', email: '', products: ['MB16"'] },
+  { id: 'TM-05', name: 'Umarporn', role: 'Program Leader', reportsTo: 'TM-02', email: '', products: [], externalProducts: ['Desktop'] },
+  { id: 'TM-06', name: 'Teradech', role: 'Engineering · Head-section', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-07', name: 'Chanoknan', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: ['X4152'] },
+  { id: 'TM-08', name: 'Nuengruthai', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: ['X4152'] },
+  { id: 'TM-09', name: 'Phatita', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: [], externalProducts: ['X3439'] },
+  { id: 'TM-10', name: 'Kanpitcha', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: [], externalProducts: ['X3721'] },
+  { id: 'TM-11', name: 'Rungnapa', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: [], externalProducts: ['X3784', 'X2689'] },
+  { id: 'TM-12', name: 'Patcharapong', role: 'NPI Engineer', reportsTo: 'TM-06', email: '', products: ['X4151', 'X4026'] },
+  { id: 'TM-13', name: 'Ronilo', role: 'Quality Manager', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-14', name: 'Panida', role: 'Quality Manager', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-15', name: 'Anakepong', role: 'QNPI', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-16', name: 'Panthong', role: 'QNPI', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-17', name: 'Sasiwimon', role: 'IPQC', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-18', name: 'Arrisara', role: 'IPQC', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-19', name: 'Phatharachai', role: 'IQC/SQE', reportsTo: 'TM-13', email: '', products: [] },
+  { id: 'TM-20', name: 'Suwannee', role: 'Production', reportsTo: 'TM-01', email: '', products: [] },
+  { id: 'TM-21', name: 'Narut', role: 'Maintenance', reportsTo: 'TM-01', email: '', products: [] }
+];
+
+// A free-text owner is written as people write it — "Patcharapong J." — so the
+// trailing initials are dropped before the name is compared with the roster.
+function normalizePersonName(value) {
+  const parts = String(value || '')
+    .toLowerCase()
+    .replace(/[.,]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  while (parts.length > 1 && parts[parts.length - 1].length <= 2) parts.pop();
+  return parts.join(' ');
+}
+
+/**
+ * Who a task belongs to. A stored member id is authoritative; rows that only
+ * carry free text (the seeded `Patcharapong J.`) are matched against the roster
+ * by name. An owner nobody matches — `Kanya R.` is not on the team sheet, and
+ * neither is `NMB Eng` — belongs to no member, so it never inflates a workload.
+ */
+function teamMemberForOwner(ownerId, ownerText, teamMembers) {
+  const roster = Array.isArray(teamMembers) ? teamMembers : [];
+  const linked = roster.find((member) => member && member.id === ownerId);
+  if (linked) return linked;
+  const name = normalizePersonName(ownerText);
+  if (!name) return null;
+  const matches = roster.filter((member) => member && normalizePersonName(member.name) === name);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+/**
+ * Open tasks whose owner resolves to nobody on the roster: a free-text name no
+ * member matches ("Kanya R."), a blank owner, or a task left behind by a removed
+ * member. Workload counts only per member, so none of these appear in anyone's
+ * number — the team board lists them so the work can be claimed. A task whose
+ * stored ownerId names a current member is owned, whatever the free text says.
+ */
+function unassignedOpenTasks(tasks, teamMembers) {
+  return (tasks || []).filter(
+    (task) => task && task.status !== 'Done' && !teamMemberForOwner(task.ownerId, task.owner, teamMembers)
+  );
+}
+
+// One normalisation for a product string. Workload scoping, the picker and the
+// amber flag all compare through it, so padding or casing can never make them
+// disagree about whether a stored product is a real program.
+function normalizeProductKey(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+// What a product list is before anything reads it: trimmed, no blanks, one entry
+// per normalised spelling. Padding or casing can never make one program look like
+// two, whatever field the list came from.
+function distinctProductStrings(values) {
+  const seen = new Set();
+  return (values || [])
+    .map((value) => String(value || '').trim())
+    .filter((value) => {
+      const key = normalizeProductKey(value);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+// The programs a member can carry are the programs that actually exist; the
+// picker offers these, so a model nobody runs cannot be assigned by hand.
+function distinctProgramValues(projects, field) {
+  const values = distinctProductStrings((projects || []).map((project) => project?.[field]));
+  return values.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+/** Program models — what NPI engineers are assigned. */
+function programModels(projects) {
+  return distinctProgramValues(projects, 'model');
+}
+
+/**
+ * Family groups — how program leaders are assigned ("MB14\""). A family is a real
+ * product: it covers every program that belongs to it.
+ */
+function programFamilies(projects) {
+  return distinctProgramValues(projects, 'familyGroup');
+}
+
+/**
+ * Does this product string name this program, by model or by family? This is the
+ * only definition of "a program" — workload scoping, the picker and the typo flag
+ * all go through it, so none of them can disagree. Takes the string as stored.
+ */
+function productMatchesProject(product, project) {
+  const key = normalizeProductKey(product);
+  return (
+    key !== '' &&
+    (normalizeProductKey(project?.model) === key ||
+      normalizeProductKey(project?.familyGroup) === key)
+  );
+}
+
+/**
+ * The programs a member carries that this workspace does not run (a roster that
+ * only builds MB14"/MB16" can still staff `X3439`). They are real assignments,
+ * so they stay on file, but they cover nothing here: no lines, tasks or
+ * signatures. They live in their own field so they can never be read as a typo in
+ * `products` (what the amber flag means) or as no assignment at all (which would
+ * widen the member across the whole portfolio).
+ */
+function memberExternalPrograms(member) {
+  const list = Array.isArray(member?.externalProducts) ? member.externalProducts : [];
+  return distinctProductStrings(list);
+}
+
+/**
+ * Products on file that name no program — a typo (`X4115`). They contribute
+ * nothing, so callers surface them instead of letting the member read as idle. A
+ * program this workspace does not run is not a typo: it belongs in
+ * `externalProducts` (see memberExternalPrograms). Repeats collapse.
+ */
+function unmatchedProducts(products, projects) {
+  // Judged by the same rule workload scopes by, not a second list of names.
+  return distinctProductStrings(products).filter(
+    (product) => !(projects || []).some((project) => productMatchesProject(product, project))
+  );
+}
+
+// The plan date each gate's signature must be cleared by. The four build gates
+// close their own stage (the next stage starts the following day); the review and
+// logistics gates sit on the schedule's own review, ETD, MIH and PBR marks. Every
+// one of these is derived from the sequence that ends at the line's FATP MIH, so a
+// dragged schedule moves its signatures with it.
+const GATE_SIGN_OFF_DUE_KEYS = {
+  prep: 'prepStart',
+  bbr: 'prepStart',
+  brr: 'brrEnd',
+  mbo: 'mboEnd',
+  main: 'mainEnd',
+  oqc: 'oqcEnd',
+  ship: 'etd',
+  mih: 'mih',
+  pbr: 'pbr'
+};
+
+function gateSignOffDueIso(gateId, schedule) {
+  const key = GATE_SIGN_OFF_DUE_KEYS[gateId];
+  return (key && schedule?.[key]) || null;
+}
+
+/**
+ * The plan a line's gates are measured against: a dragged schedule if someone set
+ * one, otherwise the default sequence built back from that row's FATP MIH.
+ */
+function lineGateSchedule(project, lineKey, scheduleOverrides) {
+  const manual = scheduleOverrides?.[`${project?.id}::${lineKey}`];
+  if (manual) return manual;
+  const rows = project?.buildMatrix || [];
+  const row =
+    rows.find((candidate) => `${candidate.config}-${candidate.side || 'RHS'}` === lineKey) ||
+    rows.find((candidate) => candidate.config === String(lineKey || '').split('-')[0]) ||
+    null;
+  return getDefaultScheduleForRow(project, row);
+}
+
+// Closest deadline first, so the drawer opens on what is about to stop a build. A
+// gate with no plan position has no deadline to race and sorts after the rest.
+function compareSignOffsByDue(a, b) {
+  const aDue = a?.dueIso || '9999-12-31';
+  const bDue = b?.dueIso || '9999-12-31';
+  if (aDue !== bDue) return aDue.localeCompare(bDue);
+  const aKey = `${a?.projectModel || ''} ${a?.lineKey || ''} ${a?.gateCode || ''}`;
+  const bKey = `${b?.projectModel || ''} ${b?.lineKey || ''} ${b?.gateCode || ''}`;
+  return aKey.localeCompare(bKey);
+}
+
+/**
+ * A member's workload, derived from the workspace instead of typed in, so the
+ * number cannot drift from the plan: the Config × Side lines behind their
+ * products, the open tasks assigned to them, and the gate dossiers still
+ * waiting for their signature. A task counts for the person it is assigned to,
+ * not for everyone on the program, so two engineers sharing a model do not
+ * share each other's actions. Only a member with nothing on file (a manager, QC
+ * or support function) is measured across the whole portfolio for signatures; a
+ * program this workspace does not run is still an assignment, so it covers no
+ * line instead of widening the member. Approver names can list several people
+ * (`Horikawa / Saengtian`), so each part is matched separately.
+ *
+ * The records themselves come back with the counts, so the board can open what
+ * it is counting: `openTasks` carries enough to open the task drawer and
+ * `signOffs` the program/line/gate the dossier lives on, plus the date the line's
+ * plan needs that signature. Sign-offs come back closest deadline first.
+ */
+function computeTeamWorkload(member, projects, tasks, gateRecords, teamMembers, scheduleOverrides) {
+  const gateOf = (gateId) => {
+    const gate = NPI_GATES.find((g) => g.id === gateId);
+    return { gateCode: gate?.code || '', gateShort: gate?.short || String(gateId || '') };
+  };
+  const assignedProducts = (member?.products || []).filter((product) =>
+    normalizeProductKey(product)
+  );
+  const externalPrograms = memberExternalPrograms(member);
+  // Only a member with nothing at all on file is portfolio-wide. A program this
+  // workspace does not run is still an assignment, so it must neither widen the
+  // scope back to every line nor conjure lines of its own.
+  const portfolioWide = assignedProducts.length === 0 && externalPrograms.length === 0;
+  const scopedProjects = portfolioWide
+    ? projects
+    : projects.filter((project) =>
+        assignedProducts.some((product) => productMatchesProject(product, project))
+      );
+  const projectById = new Map(projects.map((project) => [project.id, project]));
+  const lines = scopedProjects.reduce((sum, project) => sum + (project.buildMatrix || []).length, 0);
+
+  const openTasks = (tasks || [])
+    .filter((task) => task.status !== 'Done' && projectById.has(task.projectId))
+    .filter((task) => {
+      const owner = teamMemberForOwner(task.ownerId, task.owner, teamMembers);
+      return Boolean(member?.id && owner) && owner.id === member.id;
+    })
+    .map((task) => ({
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      dueDate: task.dueDate,
+      projectId: task.projectId,
+      gateId: task.gateId,
+      projectModel: projectById.get(task.projectId).model,
+      ...gateOf(task.gateId)
+    }));
+
+  const name = normalizePersonName(member?.name);
+  const signOffs = [];
+  scopedProjects.forEach((project) => {
+    const projectId = project.id;
+    Object.entries(gateRecords[projectId] || {}).forEach(([lineKey, lineGates]) => {
+      const schedule = lineGateSchedule(project, lineKey, scheduleOverrides);
+      Object.entries(lineGates || {}).forEach(([gateId, dossier]) => {
+        const approvers = Array.isArray(dossier?.approvers) ? dossier.approvers : [];
+        approvers.forEach((approver) => {
+          if (approver?.decision === 'Approved' || approver?.decision === 'Conditional') return;
+          const named = String(approver?.name || '')
+            .split('/')
+            .map(normalizePersonName);
+          if (!name || !named.includes(name)) return;
+          signOffs.push({
+            projectId,
+            projectModel: project.model,
+            lineKey,
+            gateId,
+            // When this line's plan needs the signature to keep its build date.
+            dueIso: gateSignOffDueIso(gateId, schedule),
+            decision: approver.decision || 'Pending',
+            ...gateOf(gateId)
+          });
+        });
+      });
+    });
+  });
+
+  signOffs.sort(compareSignOffsByDue);
+
+  return {
+    lines,
+    openTasks,
+    signOffs,
+    load: openTasks.length + signOffs.length,
+    portfolioWide,
+    externalPrograms
+  };
+}
+
 const TASK_CATEGORIES = ['Yield and Scrap', 'Cost reduction', 'Customer feedback', 'DOE'];
 
 // Items logged before the category field existed stay "Uncategorised" until someone sets them.
@@ -1064,54 +1386,25 @@ const DOWNTIME_CATEGORIES = [
 
 const INITIAL_MASTER_SPECS = [
   {
-    id: 'SPEC-BRG-TIR',
-    code: 'BRG_TIR',
-    name: 'Bearing Runout (TIR)',
-    station: 'Bearing Assy (FDB)',
-    unit: 'mm',
-    specType: 'upper',
-    lsl: 0.0,
-    nominal: 0.005,
-    usl: 0.015,
-    cpkTarget: 1.33,
-    metrology: 'Laser TIR Gauge',
-    docRef: 'SPC-FDB-01 Rev.C',
-    samplingPlan: '100% Inline'
-  },
-  {
-    id: 'SPEC-ROT-IMB',
-    code: 'ROT_IMB',
-    name: 'Static Rotor Imbalance',
-    station: 'Rotor Assembly',
-    unit: 'mg-cm',
-    specType: 'upper',
-    lsl: 0.0,
-    nominal: 1.5,
-    usl: 5.0,
-    cpkTarget: 1.33,
-    metrology: 'Auto-Balancer MC08',
-    docRef: 'SPC-ROT-02 Rev.B',
-    samplingPlan: '100% Inline'
-  },
-  {
-    id: 'SPEC-SLD-HT',
-    code: 'SLD_HT',
-    name: 'Solder Height to Datum -A-',
-    station: 'Pillow Stator Assy',
+    id: 'SPEC-DYN-ZAVG',
+    code: 'ZAVG',
+    name: 'Zavg',
+    station: 'Fan Test & Accessory',
     unit: 'mm',
     specType: 'two-sided',
-    lsl: 0.2,
-    nominal: 0.35,
-    usl: 0.55,
+    lsl: 9.45,
+    nominal: 9.75,
+    usl: 10.05,
     cpkTarget: 1.33,
-    metrology: '3D AOI / OMM',
-    docRef: 'SPC-PIL-04 Rev.A',
-    samplingPlan: '32 pcs / Lot'
+    metrology: 'Dynamic Tester MC104',
+    docRef: 'SPC-DYN-05 Rev.A',
+    samplingPlan: '100% Inline',
+    ctq: true
   },
   {
     id: 'SPEC-DYN-ZMAX',
-    code: 'DYN_ZMAX',
-    name: 'Dynamic Zmax Height',
+    code: 'ZMAX',
+    name: 'Zmax',
     station: 'Fan Test & Accessory',
     unit: 'mm',
     specType: 'two-sided',
@@ -1121,12 +1414,45 @@ const INITIAL_MASTER_SPECS = [
     cpkTarget: 1.33,
     metrology: 'Dynamic Tester MC104',
     docRef: 'SPC-DYN-01 Rev.D',
-    samplingPlan: '100% Inline'
+    samplingPlan: '100% Inline',
+    ctq: true
+  },
+  {
+    id: 'SPEC-DYN-ZMIN',
+    code: 'ZMIN',
+    name: 'Zmin',
+    station: 'Fan Test & Accessory',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 9.45,
+    nominal: 9.65,
+    usl: 9.85,
+    cpkTarget: 1.33,
+    metrology: 'Dynamic Tester MC104',
+    docRef: 'SPC-DYN-03 Rev.D',
+    samplingPlan: '100% Inline',
+    ctq: true
+  },
+  {
+    id: 'SPEC-TIR-W',
+    code: 'TIR_W',
+    name: 'TIR (W)',
+    station: 'Fan Assembly',
+    unit: 'mm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.005,
+    usl: 0.015,
+    cpkTarget: 1.33,
+    metrology: 'Laser TIR Gauge',
+    docRef: 'SPC-FAN-01 Rev.A',
+    samplingPlan: '100% Inline',
+    ctq: true
   },
   {
     id: 'SPEC-DYN-ZPARA',
-    code: 'DYN_ZPARA',
-    name: 'Dynamic Z Parallelism',
+    code: 'ZPARA_T',
+    name: 'Zpara (T)',
     station: 'Fan Test & Accessory',
     unit: 'mm',
     specType: 'upper',
@@ -1136,27 +1462,110 @@ const INITIAL_MASTER_SPECS = [
     cpkTarget: 1.33,
     metrology: 'Dynamic Tester MC104',
     docRef: 'SPC-DYN-02 Rev.D',
-    samplingPlan: '100% Inline'
+    samplingPlan: '100% Inline',
+    ctq: true
   },
   {
-    id: 'SPEC-TAPE-CONC',
-    code: 'TAPE_CONC',
-    name: 'Hub Tape Concentricity',
-    station: 'Rotor Assembly',
+    id: 'SPEC-DYN-WT',
+    code: 'WT',
+    name: 'W+T',
+    station: 'Fan Test & Accessory',
     unit: 'mm',
     specType: 'upper',
     lsl: 0.0,
-    nominal: 0.1,
-    usl: 0.3,
+    nominal: 0.07,
+    usl: 0.2,
     cpkTarget: 1.33,
-    metrology: 'OMM Vision System',
-    docRef: 'SPC-ROT-05 Rev.A',
-    samplingPlan: '32 pcs / Lot'
+    metrology: 'Dynamic Tester MC104',
+    docRef: 'SPC-DYN-04 Rev.C',
+    samplingPlan: '100% Inline',
+    ctq: true
   },
   {
-    id: 'SPEC-COV-GAP',
-    code: 'COV_GAP',
-    name: 'Cover–Impeller Gap',
+    id: 'SPEC-COV-HT-IN',
+    code: 'COV_HT_IN',
+    name: 'Cover inlet height',
+    station: 'Final Inspection (OQC)',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 9.7,
+    nominal: 10.0,
+    usl: 10.36,
+    cpkTarget: 1.33,
+    metrology: 'OMM / Height Gauge',
+    docRef: 'SPC-OQC-01 Rev.C',
+    samplingPlan: '32 pcs / Lot',
+    ctq: true
+  },
+  {
+    id: 'SPEC-COV-HT-OUT',
+    code: 'COV_HT_OUT',
+    name: 'Cover outlet height',
+    station: 'Final Inspection (OQC)',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 9.7,
+    nominal: 10.0,
+    usl: 10.36,
+    cpkTarget: 1.33,
+    metrology: 'OMM / Height Gauge',
+    docRef: 'SPC-OQC-02 Rev.C',
+    samplingPlan: '32 pcs / Lot',
+    ctq: true
+  },
+  {
+    id: 'SPEC-COV-HT-MNT',
+    code: 'COV_HT_MNT',
+    name: 'Cover mounting height',
+    station: 'Final Inspection (OQC)',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 4.8,
+    nominal: 4.95,
+    usl: 5.1,
+    cpkTarget: 1.33,
+    metrology: 'OMM / Height Gauge',
+    docRef: 'SPC-OQC-05 Rev.A (draft)',
+    samplingPlan: '32 pcs / Lot',
+    limitsProvisional: true,
+    ctq: true
+  },
+  {
+    id: 'SPEC-PIL-FLAT-TAB',
+    code: 'PIL_FLAT_TAB',
+    name: 'Pillow flatness with tab',
+    station: 'Pillow Stator Assy',
+    unit: 'mm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.06,
+    usl: 0.2,
+    cpkTarget: 1.33,
+    metrology: 'OMM Optical Flatness',
+    docRef: 'SPC-PIL-06 Rev.A',
+    samplingPlan: '32 pcs / Lot',
+    ctq: true
+  },
+  {
+    id: 'SPEC-PIL-FLAT-NOTAB',
+    code: 'PIL_FLAT_NOTAB',
+    name: 'Pillow flatness without tab',
+    station: 'Pillow Stator Assy',
+    unit: 'mm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.05,
+    usl: 0.15,
+    cpkTarget: 1.33,
+    metrology: 'OMM Optical Flatness',
+    docRef: 'SPC-PIL-07 Rev.A',
+    samplingPlan: '32 pcs / Lot',
+    ctq: true
+  },
+  {
+    id: 'SPEC-COV-PIL-GAP',
+    code: 'COV_PIL_GAP',
+    name: 'Cover-pillow gap',
     station: 'Fan Assembly',
     unit: 'mm',
     specType: 'two-sided',
@@ -1166,24 +1575,119 @@ const INITIAL_MASTER_SPECS = [
     cpkTarget: 1.33,
     metrology: 'Laser Gap Profiler',
     docRef: 'SPC-FAN-03 Rev.B',
-    samplingPlan: '32 pcs / Lot'
+    samplingPlan: '32 pcs / Lot',
+    ctq: true
   },
   {
-    id: 'SPEC-PIL-FOAM',
-    code: 'PIL_FOAM',
-    name: 'Pillow Foam Offset',
-    station: 'Fan Test & Accessory',
+    id: 'SPEC-PIL-COV-GAP',
+    code: 'PIL_COV_GAP',
+    name: 'Pillow cover gap',
+    station: 'Pillow Stator Assy',
     unit: 'mm',
     specType: 'two-sided',
-    lsl: -0.25,
-    nominal: 0.0,
+    lsl: 0.15,
+    nominal: 0.35,
+    usl: 0.55,
+    cpkTarget: 1.33,
+    metrology: 'Feeler Gauge / OMM',
+    docRef: 'SPC-PIL-08 Rev.A (draft)',
+    samplingPlan: '32 pcs / Lot',
+    limitsProvisional: true,
+    ctq: true
+  },
+  {
+    id: 'SPEC-CUR-20',
+    code: 'CUR_20',
+    name: 'Run current @20% duty',
+    station: 'Fan Test & Accessory',
+    unit: 'A',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.1,
     usl: 0.25,
     cpkTarget: 1.33,
-    metrology: 'OMM Optical',
-    docRef: 'SPC-ACC-01 Rev.B',
-    samplingPlan: '32 pcs / Lot'
+    metrology: 'Power Analyzer / EOL Tester',
+    docRef: 'SPC-ELE-01 Rev.A (draft)',
+    samplingPlan: '100% Inline',
+    limitsProvisional: true,
+    ctq: true
+  },
+  {
+    id: 'SPEC-CUR-100',
+    code: 'CUR_100',
+    name: 'Run current @100% duty',
+    station: 'Fan Test & Accessory',
+    unit: 'A',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.45,
+    usl: 0.8,
+    cpkTarget: 1.33,
+    metrology: 'Power Analyzer / EOL Tester',
+    docRef: 'SPC-ELE-02 Rev.A (draft)',
+    samplingPlan: '100% Inline',
+    limitsProvisional: true,
+    ctq: true
+  },
+  {
+    id: 'SPEC-SPD-20',
+    code: 'SPD_20',
+    name: 'Speed (rpm) @20% Duty',
+    station: 'Fan Test & Accessory',
+    unit: 'rpm',
+    specType: 'two-sided',
+    lsl: 1000,
+    nominal: 1500,
+    usl: 2000,
+    cpkTarget: 1.33,
+    metrology: 'Tachometer / EOL Tester',
+    docRef: 'SPC-ELE-03 Rev.A (draft)',
+    samplingPlan: '100% Inline',
+    limitsProvisional: true,
+    ctq: true
+  },
+  {
+    id: 'SPEC-SPD-100',
+    code: 'SPD_100',
+    name: 'Speed (rpm) @100% Duty',
+    station: 'Fan Test & Accessory',
+    unit: 'rpm',
+    specType: 'two-sided',
+    lsl: 3000,
+    nominal: 3600,
+    usl: 4200,
+    cpkTarget: 1.33,
+    metrology: 'Tachometer / EOL Tester',
+    docRef: 'SPC-ELE-04 Rev.A (draft)',
+    samplingPlan: '100% Inline',
+    limitsProvisional: true,
+    ctq: true
   }
 ];
+
+// These defaults ship with invented (draft) limits. They stay flagged until a
+// planner enters the real specification and confirms it, so no capability is
+// reported as valid against a placeholder.
+const PROVISIONAL_LIMIT_SPEC_IDS = [
+  'SPEC-COV-HT-MNT',
+  'SPEC-PIL-COV-GAP',
+  'SPEC-CUR-20',
+  'SPEC-CUR-100',
+  'SPEC-SPD-20',
+  'SPEC-SPD-100'
+];
+
+/** Backfills the flag on workspaces saved before it existed, without
+ *  re-flagging a spec the planner has already confirmed. */
+function applyProvisionalLimitDefaults(specs) {
+  if (!Array.isArray(specs)) return specs;
+  const defaults = new Set(PROVISIONAL_LIMIT_SPEC_IDS);
+  return specs.map((spec) =>
+    spec && spec.limitsProvisional === undefined && defaults.has(spec.id)
+      ? Object.assign({}, spec, { limitsProvisional: true })
+      : spec
+  );
+}
 
 // Extended FFM Standard Master Specification Library for 1-click generation
 const FFM_STANDARD_MASTER_SPEC_LIBRARY = [
@@ -1202,66 +1706,6 @@ const FFM_STANDARD_MASTER_SPEC_LIBRARY = [
     metrology: 'Auto Axial Play Tester',
     docRef: 'SPC-FDB-02 Rev.B',
     samplingPlan: '100% Inline'
-  },
-  {
-    id: 'SPEC-DYN-ZMIN',
-    code: 'DYN_ZMIN',
-    name: 'Dynamic Zmin',
-    station: 'Fan Test & Accessory',
-    unit: 'mm',
-    specType: 'two-sided',
-    lsl: 9.45,
-    nominal: 9.65,
-    usl: 9.85,
-    cpkTarget: 1.33,
-    metrology: 'Dynamic Tester MC104',
-    docRef: 'SPC-DYN-03 Rev.D',
-    samplingPlan: '100% Inline'
-  },
-  {
-    id: 'SPEC-DYN-WT',
-    code: 'DYN_WT',
-    name: 'Dynamic W+T Runout',
-    station: 'Fan Test & Accessory',
-    unit: 'mm',
-    specType: 'upper',
-    lsl: 0.0,
-    nominal: 0.07,
-    usl: 0.2,
-    cpkTarget: 1.33,
-    metrology: 'Dynamic Tester MC104',
-    docRef: 'SPC-DYN-04 Rev.C',
-    samplingPlan: '100% Inline'
-  },
-  {
-    id: 'SPEC-COV-HT-IN',
-    code: 'COV_HT_IN',
-    name: 'Cover Height Inlet',
-    station: 'Final Inspection (OQC)',
-    unit: 'mm',
-    specType: 'two-sided',
-    lsl: 9.7,
-    nominal: 10.0,
-    usl: 10.36,
-    cpkTarget: 1.33,
-    metrology: 'OMM / Height Gauge',
-    docRef: 'SPC-OQC-01 Rev.C',
-    samplingPlan: '32 pcs / Lot'
-  },
-  {
-    id: 'SPEC-COV-HT-OUT',
-    code: 'COV_HT_OUT',
-    name: 'Cover Height Outlet',
-    station: 'Final Inspection (OQC)',
-    unit: 'mm',
-    specType: 'two-sided',
-    lsl: 9.7,
-    nominal: 10.0,
-    usl: 10.36,
-    cpkTarget: 1.33,
-    metrology: 'OMM / Height Gauge',
-    docRef: 'SPC-OQC-02 Rev.C',
-    samplingPlan: '32 pcs / Lot'
   },
   {
     id: 'SPEC-FAN-FLAT',
@@ -1307,6 +1751,66 @@ const FFM_STANDARD_MASTER_SPEC_LIBRARY = [
     metrology: 'Universal Load Tester',
     docRef: 'SPC-PIL-01 Rev.A',
     samplingPlan: '5 pcs / Lot'
+  },
+  {
+    id: 'SPEC-ROT-IMB',
+    code: 'ROT_IMB',
+    name: 'Static Rotor Imbalance',
+    station: 'Rotor Assembly',
+    unit: 'mg-cm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 1.5,
+    usl: 5.0,
+    cpkTarget: 1.33,
+    metrology: 'Auto-Balancer MC08',
+    docRef: 'SPC-ROT-02 Rev.B',
+    samplingPlan: '100% Inline'
+  },
+  {
+    id: 'SPEC-SLD-HT',
+    code: 'SLD_HT',
+    name: 'Solder Height to Datum -A-',
+    station: 'Pillow Stator Assy',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: 0.2,
+    nominal: 0.35,
+    usl: 0.55,
+    cpkTarget: 1.33,
+    metrology: '3D AOI / OMM',
+    docRef: 'SPC-PIL-04 Rev.A',
+    samplingPlan: '32 pcs / Lot'
+  },
+  {
+    id: 'SPEC-TAPE-CONC',
+    code: 'TAPE_CONC',
+    name: 'Hub Tape Concentricity',
+    station: 'Rotor Assembly',
+    unit: 'mm',
+    specType: 'upper',
+    lsl: 0.0,
+    nominal: 0.1,
+    usl: 0.3,
+    cpkTarget: 1.33,
+    metrology: 'OMM Vision System',
+    docRef: 'SPC-ROT-05 Rev.A',
+    samplingPlan: '32 pcs / Lot'
+  },
+  {
+    id: 'SPEC-PIL-FOAM',
+    code: 'PIL_FOAM',
+    name: 'Pillow Foam Offset',
+    station: 'Fan Test & Accessory',
+    unit: 'mm',
+    specType: 'two-sided',
+    lsl: -0.25,
+    nominal: 0.0,
+    usl: 0.25,
+    cpkTarget: 1.33,
+    metrology: 'OMM Optical',
+    docRef: 'SPC-ACC-01 Rev.B',
+    samplingPlan: '32 pcs / Lot'
   }
 ];
 
@@ -1640,40 +2144,123 @@ function computeProductionMetrics(rec) {
 // GANTT TIMELINE HELPERS & SIDE-PRIORITY / READINESS SEQUENCING
 // ============================================================================
 
+// The stage cue lives with the stage it describes: gate sign-off owns a bar's fill,
+// so each stage keeps a coded edge and glyph that stay readable on a clipped bar.
 const GANTT_STAGES = [
   {
     id: 'prep',
     label: 'Prep / BBR / BRR',
+    shortLabel: 'Prep',
+    glyph: '▸',
+    edgeClass: 'bg-sky-600 dark:bg-sky-400',
     startKey: 'prepStart',
     endKey: 'brrEnd',
-    gateId: 'brr',
-    barClass: 'bg-slate-700 text-white border-slate-800'
+    gateId: 'brr'
   },
   {
     id: 'mbo',
     label: 'MBO & OK2B',
+    shortLabel: 'MBO',
+    glyph: '◆',
+    edgeClass: 'bg-violet-600 dark:bg-violet-400',
     startKey: 'mboStart',
     endKey: 'mboEnd',
-    gateId: 'mbo',
-    barClass: 'bg-amber-500 text-white border-amber-600'
+    gateId: 'mbo'
   },
   {
     id: 'main',
     label: 'Main Build',
+    shortLabel: 'Main',
+    glyph: '■',
+    edgeClass: 'bg-fuchsia-600 dark:bg-fuchsia-400',
     startKey: 'mainStart',
     endKey: 'mainEnd',
-    gateId: 'main',
-    barClass: 'bg-blue-600 text-white border-blue-700'
+    gateId: 'main'
   },
   {
     id: 'oqc',
     label: 'Final OQC',
+    shortLabel: 'OQC',
+    glyph: '●',
+    edgeClass: 'bg-teal-600 dark:bg-teal-400',
     startKey: 'oqcStart',
     endKey: 'oqcEnd',
-    gateId: 'oqc',
-    barClass: 'bg-indigo-600 text-white border-indigo-700'
+    gateId: 'oqc'
   }
 ];
+
+// A Gantt bar is coloured by the gate it delivers against, not by its stage, so a
+// glance answers "is this stage cleared to run?". The list runs best to worst, which
+// is both the legend order and the severity a row with several lines compares
+// against. Each text/background pair keeps the 10px bar text readable in both themes.
+const GANTT_GATE_TONES = [
+  {
+    status: 'Approved',
+    label: 'Approved',
+    barClass:
+      'bg-emerald-700 text-white border-emerald-900 dark:bg-emerald-500 dark:text-emerald-950 dark:border-emerald-300',
+    swatchClass:
+      'bg-emerald-700 border-emerald-900 dark:bg-emerald-500 dark:border-emerald-300'
+  },
+  {
+    status: 'Conditional',
+    label: 'Conditional',
+    barClass:
+      'bg-orange-300 text-orange-950 border-orange-600 dark:bg-orange-400 dark:text-orange-950 dark:border-orange-200',
+    swatchClass:
+      'bg-orange-300 border-orange-600 dark:bg-orange-400 dark:border-orange-200'
+  },
+  {
+    status: 'In Review',
+    label: 'In Review',
+    barClass:
+      'bg-amber-300 text-amber-950 border-amber-600 dark:bg-amber-400 dark:text-amber-950 dark:border-amber-200',
+    swatchClass:
+      'bg-amber-300 border-amber-600 dark:bg-amber-400 dark:border-amber-200'
+  },
+  {
+    status: 'Pending',
+    label: 'Not signed off',
+    barClass:
+      'bg-slate-200 text-slate-800 border-slate-500 dark:bg-slate-700 dark:text-slate-100 dark:border-slate-500',
+    swatchClass: 'bg-slate-200 border-slate-500 dark:bg-slate-700 dark:border-slate-500'
+  },
+  {
+    status: 'Blocked',
+    label: 'Blocked',
+    barClass:
+      'bg-rose-700 text-white border-rose-900 dark:bg-rose-400 dark:text-rose-950 dark:border-rose-300',
+    swatchClass: 'bg-rose-700 border-rose-900 dark:bg-rose-400 dark:border-rose-300'
+  }
+];
+
+// A gate with no dossier, and any status this list does not know, reads as unsigned.
+const GANTT_GATE_UNSIGNED_TONE = GANTT_GATE_TONES.find((tone) => tone.status === 'Pending');
+
+function ganttGateTone(status) {
+  return GANTT_GATE_TONES.find((tone) => tone.status === status) || GANTT_GATE_UNSIGNED_TONE;
+}
+
+// The tone a stage bar is painted with, and the line that tone came from. A row
+// with several lines (a Compact Config row spans both sides) takes its weakest
+// line, so a combined bar is never more optimistic than its worst line; that same
+// line is the one a click opens, otherwise the bar and its dossier disagree. With
+// no line to judge, the gate is unsigned. `differs` reports that the row's lines
+// disagree, so a tooltip can name the line that decided the colour.
+function ganttStageGateDriver(projGateLines, rowKeys, gateId) {
+  const keys = rowKeys || [];
+  if (keys.length === 0) return { tone: GANTT_GATE_UNSIGNED_TONE, lineKey: null, differs: false };
+  const tones = keys.map((key) => ganttGateTone(projGateLines?.[key]?.[gateId]?.status));
+  let worst = 0;
+  tones.forEach((tone, idx) => {
+    if (GANTT_GATE_TONES.indexOf(tone) > GANTT_GATE_TONES.indexOf(tones[worst])) worst = idx;
+  });
+  return {
+    tone: tones[worst],
+    lineKey: keys[worst],
+    differs: new Set(tones.map((tone) => tone.status)).size > 1
+  };
+}
 
 function parseIsoDate(iso) {
   const [y, m, d] = (iso || todayIso()).split('-').map(Number);
@@ -1694,11 +2281,34 @@ function diffDaysIso(startIso, endIso) {
   return Math.round(ms / 86400000);
 }
 
+/**
+ * The parts of a usable ISO date: `YYYY-MM-DD` (a trailing time is ignored), and
+ * one that survives a UTC round trip. parseIsoDate is deliberately forgiving —
+ * it fills in missing parts so scheduling still produces a plan — so formatters
+ * have to reject what it invented rather than print a filled-in or rolled-over
+ * value as if it were the stored date (`2026-13-40` parses as 2027-02-09).
+ */
+function isoDateParts(iso) {
+  const match = String(iso || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  if (parseIsoDate(match[0]).toISOString().slice(0, 10) !== match[0]) return null;
+  return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+}
+
 function formatShortDate(iso) {
-  if (!iso) return '—';
-  const dt = parseIsoDate(iso);
+  const parts = isoDateParts(iso);
+  if (!parts) return '—';
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  return `${months[dt.getUTCMonth()]} ${dt.getUTCDate()}`;
+  return `${months[parts.month - 1]} ${parts.day}`;
+}
+
+// MM/DD for plan dates: the sign-off dashboard reads the near-term plan at a
+// glance, and the year is already implied by the program. Zero-padded so dates
+// line up in a column.
+function formatMonthDay(iso) {
+  const parts = isoDateParts(iso);
+  if (!parts) return '—';
+  return `${String(parts.month).padStart(2, '0')}/${String(parts.day).padStart(2, '0')}`;
 }
 
 function getDefaultScheduleForRow(project, row) {
@@ -1727,6 +2337,42 @@ function getDefaultScheduleForRow(project, row) {
     mih,
     pbr
   };
+}
+
+/**
+ * Why a stage's proposed dates cannot be the plan, or null when they can. A stage
+ * may move, but not out of order: it cannot begin before the stage it follows has
+ * finished, cannot finish after the stage that follows it has begun, and cannot
+ * run past the line's FATP MIH. Bar dates are inclusive, so a stage starts at
+ * least the day after its predecessor ends. The board refuses the drop instead of
+ * writing a schedule the build could never run.
+ */
+function stageMoveConflict(schedule, stageId) {
+  const idx = GANTT_STAGES.findIndex((stage) => stage.id === stageId);
+  if (idx < 0) return null;
+  const stage = GANTT_STAGES[idx];
+  const startIso = schedule?.[stage.startKey];
+  const endIso = schedule?.[stage.endKey];
+  if (!startIso || !endIso) return null;
+
+  const previous = GANTT_STAGES[idx - 1];
+  const previousEnd = previous ? schedule[previous.endKey] : null;
+  if (previousEnd && diffDaysIso(previousEnd, startIso) < 1) {
+    return { stageId, kind: 'before-previous', stage, other: previous, limitIso: previousEnd };
+  }
+
+  const next = GANTT_STAGES[idx + 1];
+  const nextStart = next ? schedule[next.startKey] : null;
+  if (nextStart && diffDaysIso(endIso, nextStart) < 1) {
+    return { stageId, kind: 'after-next', stage, other: next, limitIso: nextStart };
+  }
+
+  const mih = schedule?.mih;
+  if (mih && diffDaysIso(mih, endIso) > 0) {
+    return { stageId, kind: 'after-mih', stage, other: null, limitIso: mih };
+  }
+
+  return null;
 }
 
 function getLineReadinessInfo(lineGates = {}) {
@@ -2336,45 +2982,99 @@ const INITIAL_PROJECTS = [
 
 const INITIAL_CPK_RECORDS = [
   // X4151 EVT RHS
-  { id: 'CPK-4151R-TIR', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-BRG-TIR', mean: 0.0052, stdDev: 0.00202, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151R-IMB', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-ROT-IMB', mean: 1.72, stdDev: 0.72, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151R-SLD', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-SLD-HT', mean: 0.41, stdDev: 0.056, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151R-TIR', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-TIR-W', mean: 0.0052, stdDev: 0.00202, sampleSize: 64, date: '2026-11-20' },
   { id: 'CPK-4151R-ZMAX', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.89, stdDev: 0.049, sampleSize: 64, date: '2026-11-20' },
   { id: 'CPK-4151R-ZPARA', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.095, stdDev: 0.041, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151R-TAPE', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-TAPE-CONC', mean: 0.14, stdDev: 0.057, sampleSize: 32, date: '2026-11-20' },
-  { id: 'CPK-4151R-GAP', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-COV-GAP', mean: 0.36, stdDev: 0.035, sampleSize: 32, date: '2026-11-20' },
-  { id: 'CPK-4151R-FOAM', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-PIL-FOAM', mean: 0.06, stdDev: 0.072, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151R-GAP', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-COV-PIL-GAP', mean: 0.36, stdDev: 0.035, sampleSize: 32, date: '2026-11-20' },
 
   // X4151 EVT LHS
-  { id: 'CPK-4151L-TIR', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-BRG-TIR', mean: 0.0055, stdDev: 0.00201, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151L-IMB', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-ROT-IMB', mean: 1.95, stdDev: 0.85, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151L-SLD', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-SLD-HT', mean: 0.36, stdDev: 0.044, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151L-TIR', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-TIR-W', mean: 0.0055, stdDev: 0.00201, sampleSize: 64, date: '2026-11-20' },
   { id: 'CPK-4151L-ZMAX', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.86, stdDev: 0.041, sampleSize: 64, date: '2026-11-20' },
   { id: 'CPK-4151L-ZPARA', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.088, stdDev: 0.036, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4151L-TAPE', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-TAPE-CONC', mean: 0.155, stdDev: 0.058, sampleSize: 32, date: '2026-11-20' },
-  { id: 'CPK-4151L-GAP', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-COV-GAP', mean: 0.35, stdDev: 0.032, sampleSize: 32, date: '2026-11-20' },
-  { id: 'CPK-4151L-FOAM', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-PIL-FOAM', mean: 0.03, stdDev: 0.059, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4151L-GAP', model: 'X4151', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-COV-PIL-GAP', mean: 0.35, stdDev: 0.032, sampleSize: 32, date: '2026-11-20' },
 
   // X4152 EVT RHS
-  { id: 'CPK-4152R-TIR', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-BRG-TIR', mean: 0.0049, stdDev: 0.0020, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4152R-IMB', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-ROT-IMB', mean: 1.60, stdDev: 0.68, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4152R-SLD', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-SLD-HT', mean: 0.35, stdDev: 0.042, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4152R-TIR', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-TIR-W', mean: 0.0049, stdDev: 0.0020, sampleSize: 64, date: '2026-11-20' },
   { id: 'CPK-4152R-ZMAX', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.85, stdDev: 0.038, sampleSize: 64, date: '2026-11-20' },
   { id: 'CPK-4152R-ZPARA', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.082, stdDev: 0.034, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4152R-TAPE', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-TAPE-CONC', mean: 0.11, stdDev: 0.041, sampleSize: 32, date: '2026-11-20' },
-  { id: 'CPK-4152R-GAP', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-COV-GAP', mean: 0.34, stdDev: 0.033, sampleSize: 32, date: '2026-11-20' },
-  { id: 'CPK-4152R-FOAM', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-PIL-FOAM', mean: 0.01, stdDev: 0.052, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4152R-GAP', model: 'X4152', familyGroup: 'MB16"', phase: 'EVT', side: 'RHS', config: 'ME11', specId: 'SPEC-COV-PIL-GAP', mean: 0.34, stdDev: 0.033, sampleSize: 32, date: '2026-11-20' },
 
   // X4026 EVT LHS
-  { id: 'CPK-4026L-TIR', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-BRG-TIR', mean: 0.0051, stdDev: 0.00205, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4026L-IMB', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-ROT-IMB', mean: 2.1, stdDev: 0.91, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4026L-SLD', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-SLD-HT', mean: 0.42, stdDev: 0.052, sampleSize: 32, date: '2026-11-20' },
+  { id: 'CPK-4026L-TIR', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-TIR-W', mean: 0.0051, stdDev: 0.00205, sampleSize: 64, date: '2026-11-20' },
   { id: 'CPK-4026L-ZMAX', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZMAX', mean: 9.86, stdDev: 0.042, sampleSize: 64, date: '2026-11-20' },
   { id: 'CPK-4026L-ZPARA', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-DYN-ZPARA', mean: 0.085, stdDev: 0.036, sampleSize: 64, date: '2026-11-20' },
-  { id: 'CPK-4026L-TAPE', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-TAPE-CONC', mean: 0.12, stdDev: 0.044, sampleSize: 32, date: '2026-11-20' },
-  { id: 'CPK-4026L-GAP', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-COV-GAP', mean: 0.35, stdDev: 0.031, sampleSize: 32, date: '2026-11-20' },
-  { id: 'CPK-4026L-FOAM', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-PIL-FOAM', mean: 0.02, stdDev: 0.056, sampleSize: 32, date: '2026-11-20' }
+  { id: 'CPK-4026L-GAP', model: 'X4026', familyGroup: 'MB14"', phase: 'EVT', side: 'LHS', config: 'ME11', specId: 'SPEC-COV-PIL-GAP', mean: 0.35, stdDev: 0.031, sampleSize: 32, date: '2026-11-20' },
 ];
+
+// These seed rows were re-pointed from older imbalance / tape / foam / solder
+// parameters, so they claimed capability for CTQs that were never measured.
+// Identify them by row id (and only when no upload produced them) so a saved
+// workspace drops the invented demo rows without touching a real reading.
+const LEGACY_FABRICATED_CPK_IDS = new Set([
+  'CPK-4151R-IMB', 'CPK-4151L-IMB', 'CPK-4152R-IMB', 'CPK-4026L-IMB',
+  'CPK-4151R-SLD', 'CPK-4151L-SLD', 'CPK-4152R-SLD', 'CPK-4026L-SLD',
+  'CPK-4151R-TAPE', 'CPK-4151L-TAPE', 'CPK-4152R-TAPE', 'CPK-4026L-TAPE',
+  'CPK-4151R-FOAM', 'CPK-4151L-FOAM', 'CPK-4152R-FOAM', 'CPK-4026L-FOAM'
+]);
+
+function stripLegacyFabricatedCpkRows(records) {
+  if (!Array.isArray(records)) return records;
+  return records.filter(
+    (record) =>
+      !record ||
+      !LEGACY_FABRICATED_CPK_IDS.has(record.id) ||
+      Boolean(record.uploadBatchId) ||
+      Boolean(record.sourceFile)
+  );
+}
+
+/**
+ * Raw readings for a seeded Cpk row, so the box plot can show the individual
+ * measurements (and their real quartiles) before anyone uploads a file. Values
+ * are drawn from a deterministic normal-ish stream seeded by the record id — the
+ * same row always produces the same samples — and scaled to the row's own mean
+ * and σ. The absolute value keeps thickness-type parameters non-negative.
+ */
+function seededSampleValues(seedText, mean, stdDev, count) {
+  let hash = 2166136261;
+  const text = String(seedText || 'cpk');
+  for (let i = 0; i < text.length; i += 1) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+  const nextRandom = () => {
+    hash = (hash + 0x6d2b79f5) | 0;
+    let t = Math.imul(hash ^ (hash >>> 15), 1 | hash);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const values = [];
+  for (let i = 0; i < count; i += 1) {
+    // Sum of three uniforms is roughly normal; recentre to mean 0, scale to 1σ.
+    const z = (nextRandom() + nextRandom() + nextRandom() - 1.5) * 2;
+    values.push(Number(Math.abs(mean + z * stdDev).toPrecision(4)));
+  }
+  return values.sort((a, b) => a - b);
+}
+
+INITIAL_CPK_RECORDS.forEach((record) => {
+  record.rawValues = seededSampleValues(record.id, record.mean, record.stdDev, record.sampleSize || 32);
+});
+
+const SEED_CPK_SAMPLES = new Map(INITIAL_CPK_RECORDS.map((record) => [record.id, record.rawValues]));
+
+/**
+ * Workspaces saved before the individual plot existed hold the seeded rows
+ * without samples. Give them the seed's readings so the points appear without an
+ * upload, while leaving rows that already carry real uploaded samples alone.
+ */
+function backfillSeedCpkSamples(records) {
+  if (!Array.isArray(records)) return records;
+  let changed = false;
+  const next = records.map((record) => {
+    if (!record || Array.isArray(record.rawValues) || !SEED_CPK_SAMPLES.has(record.id)) return record;
+    changed = true;
+    return Object.assign({}, record, { rawValues: SEED_CPK_SAMPLES.get(record.id).slice() });
+  });
+  return changed ? next : records;
+}
 
 function normalCdf(z) {
   const t = 1 / (1 + 0.2316419 * Math.abs(z));
@@ -2442,6 +3142,21 @@ function getCpkTone(cpk) {
   };
 }
 
+function hasProvisionalLimits(spec) {
+  return Boolean(spec && spec.limitsProvisional === true);
+}
+
+// Deliberately neutral, never green/yellow/orange: an unconfirmed limit cannot
+// make a process look capable or incapable.
+function getProvisionalLimitTone() {
+  return {
+    key: 'provisional',
+    label: 'Provisional limits',
+    cellClass: 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-300 dark:border-slate-600 border-dashed hover:bg-slate-200 dark:hover:bg-slate-700',
+    badgeClass: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-600'
+  };
+}
+
 function formatSpecNum(val, spec) {
   const num = Number(val);
   if (!Number.isFinite(num)) return '—';
@@ -2449,6 +3164,52 @@ function formatSpecNum(val, spec) {
   if (spec?.unit === 'N') return num.toFixed(1);
   if (abs > 0 && abs < 0.05) return num.toFixed(4);
   return num.toFixed(3);
+}
+
+// Distribution summary for the Cpk comparison charts. Raw measurements give a
+// true box plot; a summary-only upload carries just mean/σ, so the box falls back
+// to ±1σ with ±3σ whiskers and the modal says which basis it used.
+function sampleQuantile(sortedValues, p) {
+  if (!Array.isArray(sortedValues) || sortedValues.length === 0) return NaN;
+  if (sortedValues.length === 1) return sortedValues[0];
+  const pos = (sortedValues.length - 1) * Math.min(1, Math.max(0, p));
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  const frac = pos - lo;
+  return sortedValues[lo] + (sortedValues[hi] - sortedValues[lo]) * frac;
+}
+
+function cpkBoxSummary(rec) {
+  const mean = Number(rec && rec.mean) || 0;
+  const sd = Math.max(0.00001, Number(rec && rec.stdDev) || 0.00001);
+  const raw = (Array.isArray(rec && rec.rawValues) ? rec.rawValues : [])
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
+
+  if (raw.length >= 8) {
+    const q1 = sampleQuantile(raw, 0.25);
+    const median = sampleQuantile(raw, 0.5);
+    const q3 = sampleQuantile(raw, 0.75);
+    const iqr = q3 - q1;
+    const lowFence = q1 - 1.5 * iqr;
+    const highFence = q3 + 1.5 * iqr;
+    const inFence = raw.filter((v) => v >= lowFence && v <= highFence);
+    const pickLow = (inFence.length ? inFence : raw).reduce((a, b) => Math.min(a, b));
+    const pickHigh = (inFence.length ? inFence : raw).reduce((a, b) => Math.max(a, b));
+    // `values` is the parsed, sorted sample set the box was computed from, so a
+    // caller drawing individual measurements uses exactly those same readings.
+    return { basis: 'raw', values: raw, low: pickLow, q1, median, q3, high: pickHigh };
+  }
+
+  return {
+    basis: 'normal',
+    low: mean - 3 * sd,
+    q1: mean - sd,
+    median: mean,
+    q3: mean + sd,
+    high: mean + 3 * sd
+  };
 }
 
 function parseCsvText(text) {
@@ -2496,18 +3257,10 @@ function parseCsvText(text) {
 }
 
 async function loadSheetJsLib() {
+  // Bundled by tools/build.mjs from the pinned xlsx dependency (window.XLSX).
+  if (typeof XLSX !== 'undefined') return XLSX;
   if (typeof window !== 'undefined' && window.XLSX) return window.XLSX;
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js';
-    script.async = true;
-    script.onload = () => {
-      if (window.XLSX) resolve(window.XLSX);
-      else reject(new Error('Excel parser failed to initialize.'));
-    };
-    script.onerror = () => reject(new Error('Unable to load Excel (.xlsx) parser. Please upload a .csv file.'));
-    document.head.appendChild(script);
-  });
+  throw new Error('Excel parser is missing from this build. Please upload a .csv file.');
 }
 
 async function parseUploadedTabularFile(file) {
@@ -2540,19 +3293,296 @@ async function parseUploadedTabularFile(file) {
   throw new Error('Unsupported file type. Please upload .xlsx, .xls, or .csv.');
 }
 
-function findMatchingSpec(colHeader, masterSpecs) {
+/**
+ * Resolves an uploaded parameter column/name to a Master Spec.
+ *
+ * The same parameter can exist once per model plus once as an all-models spec,
+ * so a plain "first match wins" would bind a X3082 upload to a X4151 limit.
+ * Candidates are therefore ranked: the record's own model, then the all-models
+ * spec, and only as a last resort another model's spec.
+ */
+function findMatchingSpec(colHeader, masterSpecs, model) {
   const norm = String(colHeader || '')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
   if (!norm) return null;
+  const modelKey = String(model || '').toUpperCase().trim();
+
+  const candidates = masterSpecs.filter((s) => {
+    const codeNorm = s.code.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const nameNorm = s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return norm === codeNorm || norm === nameNorm || norm.includes(codeNorm);
+  });
+  if (!candidates.length) return null;
 
   return (
-    masterSpecs.find((s) => {
-      const codeNorm = s.code.toLowerCase().replace(/[^a-z0-9]/g, '');
-      const nameNorm = s.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-      return norm === codeNorm || norm === nameNorm || norm.includes(codeNorm);
-    }) || null
+    candidates.find((s) => modelKey && String(s.model || '').toUpperCase() === modelKey) ||
+    candidates.find((s) => !s.model) ||
+    candidates[0]
   );
+}
+
+// ============================================================================
+// EFFECTIVE-DATED MASTER SPECIFICATION REVISIONS
+// ----------------------------------------------------------------------------
+// A limit is only true for the window it was in force. Every spec therefore
+// keeps its limit history, and a Cpk is computed with the revision whose
+// `effectiveFrom` is the latest one on or before the record's measured date —
+// so tightening a limit today cannot restate yesterday's capability.
+// ============================================================================
+
+const SPEC_LIMIT_FIELDS = ['specType', 'lsl', 'nominal', 'usl', 'cpkTarget', 'limitsProvisional'];
+// Revision-less specs (everything saved before limit history existed) read as
+// one baseline revision that predates every measurement.
+const SPEC_BASELINE_EFFECTIVE = '2000-01-01';
+
+function specLimitSnapshot(source) {
+  const snapshot = {};
+  SPEC_LIMIT_FIELDS.forEach(function (field) {
+    // Normalise the provisional flag so a spec saved without the field (false)
+    // never looks like a limit change against one saved with it.
+    snapshot[field] =
+      field === 'limitsProvisional' ? Boolean(source && source[field] === true) : source ? source[field] : undefined;
+  });
+  return snapshot;
+}
+
+/** Limit revisions, oldest first. Always returns at least one entry for a spec. */
+function getSpecRevisions(spec) {
+  if (!spec) return [];
+  const stored = Array.isArray(spec.revisions) ? spec.revisions : [];
+  const usable = stored.filter(
+    (rev) => rev && typeof rev.effectiveFrom === 'string' && rev.effectiveFrom
+  );
+  if (usable.length === 0) {
+    return [
+      Object.assign(
+        {
+          id: `${spec.id}-R0`,
+          effectiveFrom: spec.effectiveFrom || SPEC_BASELINE_EFFECTIVE,
+          updatedAt: null,
+          updatedBy: null,
+          baseline: true
+        },
+        specLimitSnapshot(spec)
+      )
+    ];
+  }
+  // A provisional spec's older revisions inherit the flag so confirming the
+  // spec later cannot make their placeholder-limit readings look valid. Normal
+  // specs keep their stored shape (undefined already means confirmed).
+  const provisionalFallback = spec.limitsProvisional === true ? true : undefined;
+  return usable
+    .slice()
+    .map((rev) =>
+      rev.limitsProvisional === undefined && provisionalFallback !== undefined
+        ? Object.assign({}, rev, { limitsProvisional: provisionalFallback })
+        : rev
+    )
+    .sort((a, b) => String(a.effectiveFrom).localeCompare(String(b.effectiveFrom)));
+}
+
+/** The revision in force on a date: the latest `effectiveFrom` on or before it. */
+function resolveSpecAt(spec, isoDate) {
+  const revisions = getSpecRevisions(spec);
+  if (revisions.length === 0) return null;
+  const date = typeof isoDate === 'string' ? isoDate.slice(0, 10) : '';
+  let inForce = null;
+  revisions.forEach((rev) => {
+    if (!date || String(rev.effectiveFrom) <= date) inForce = rev;
+  });
+  return {
+    revision: inForce || revisions[0],
+    revisions,
+    // Measured before any recorded revision: the earliest limits are the honest
+    // best guess, and the UI says so rather than pretending it is exact.
+    predatesFirstRevision: !inForce
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Cpk limit freeze: every Cpk record keeps the limits it was judged against, so
+// correcting or revising a Master Spec later cannot change a result that has
+// already been reported.
+// ---------------------------------------------------------------------------
+
+/** True when a record already carries the limits it was measured against. */
+function hasFrozenSpecLimits(record) {
+  return Boolean(record && record.specRevisionId && record.specType);
+}
+
+/** A copy of the record with the limits in force on its measurement date baked in. */
+function withFrozenSpecLimits(record, spec) {
+  if (!record) return record;
+  const resolved = resolveSpecAt(spec, record.date);
+  if (!resolved) return record;
+  const revision = resolved.revision;
+  return Object.assign({}, record, specLimitSnapshot(revision), {
+    specRevisionId: revision.id,
+    specEffectiveFrom: revision.effectiveFrom,
+    specRevisionNumber: resolved.revisions.indexOf(revision) + 1,
+    // Kept on the record too: resolving it later would guess differently once
+    // the spec gains a revision that predates this measurement.
+    specPredatesFirstRevision: resolved.predatesFirstRevision
+  });
+}
+
+/**
+ * Backfills rows saved before limits were frozen on them. Each row is frozen
+ * against the revision in force on its own measurement date — exactly the
+ * revision the app was already displaying for it — so no visible number moves.
+ */
+function migrateCpkRecords(records, specs) {
+  if (!Array.isArray(records)) return records;
+  const byId = new Map((Array.isArray(specs) ? specs : []).map((spec) => [spec.id, spec]));
+  return records.map((record) => {
+    const spec = byId.get(record && record.specId);
+    if (hasFrozenSpecLimits(record)) {
+      // Older frozen rows predate the provisional flag. Resolve it from the
+      // revision they were measured against so confirming a spec later cannot
+      // retroactively make placeholder-limit Cpk look valid.
+      if (!spec || record.limitsProvisional !== undefined) return record;
+      const revision = (spec.revisions || []).find((rev) => rev.id === record.specRevisionId);
+      const flag = revision && revision.limitsProvisional !== undefined
+        ? revision.limitsProvisional
+        : spec.limitsProvisional;
+      if (flag === undefined || flag === record.limitsProvisional) return record;
+      return Object.assign({}, record, { limitsProvisional: flag === true });
+    }
+    return spec ? withFrozenSpecLimits(record, spec) : record;
+  });
+}
+
+/**
+ * A spec merged with the limits the record was measured against.
+ *
+ * A frozen record wins over the spec's history: it keeps the limits and revision
+ * captured at measurement time, even after that revision is corrected or a newer
+ * one takes effect. Only legacy rows without a snapshot fall back to resolving
+ * the revision from their date.
+ */
+function effectiveSpecForRecord(spec, record) {
+  if (!spec) return null;
+  const revisions = getSpecRevisions(spec);
+  if (hasFrozenSpecLimits(record)) {
+    const frozen = {};
+    SPEC_LIMIT_FIELDS.forEach(function (field) {
+      if (record[field] !== undefined) frozen[field] = record[field];
+    });
+    return Object.assign({}, spec, frozen, {
+      effectiveFrom: record.specEffectiveFrom || '',
+      revisionNumber: Number(record.specRevisionNumber) || 1,
+      revisionCount: revisions.length,
+      predatesFirstRevision: Boolean(record.specPredatesFirstRevision)
+    });
+  }
+  const resolved = resolveSpecAt(spec, record && record.date);
+  if (!resolved) return spec;
+  return Object.assign({}, spec, specLimitSnapshot(resolved.revision), {
+    effectiveFrom: resolved.revision.effectiveFrom,
+    revisionNumber: resolved.revisions.indexOf(resolved.revision) + 1,
+    revisionCount: resolved.revisions.length,
+    predatesFirstRevision: resolved.predatesFirstRevision
+  });
+}
+
+/** Cpk records whose frozen snapshot came from one specific spec revision. */
+function recordsFrozenToRevision(records, specId, revisionId) {
+  if (!Array.isArray(records) || !specId || !revisionId) return [];
+  return records.filter(
+    (record) => record && record.specId === specId && record.specRevisionId === revisionId
+  );
+}
+
+/**
+ * Re-freezes the records measured under one revision onto its current limits.
+ * Records from other revisions, and every other field, are left untouched.
+ */
+function refreezeCpkRecordsToRevision(records, spec, revisionId) {
+  if (!Array.isArray(records) || !spec) return records;
+  const revision = getSpecRevisions(spec).find((rev) => rev.id === revisionId);
+  if (!revision) return records;
+  const snapshot = specLimitSnapshot(revision);
+  return records.map((record) => {
+    if (!record || record.specId !== spec.id || record.specRevisionId !== revisionId) return record;
+    return Object.assign({}, record, snapshot);
+  });
+}
+
+/**
+ * Replaces one revision's limits in place — the explicit "fix a mistake on this
+ * effective date" path, used only after the user confirms it. Every other
+ * revision keeps its own limits, and the revision keeps its id and date.
+ */
+function correctSpecRevision(spec, limits, revisionId, stamp, actor) {
+  if (!spec) return null;
+  const history = getSpecRevisions(spec).map((rev) => ({ ...rev }));
+  const index = history.findIndex((rev) => rev.id === revisionId);
+  if (index === -1) return null;
+  history[index] = Object.assign({}, history[index], limits, {
+    id: history[index].id,
+    effectiveFrom: history[index].effectiveFrom,
+    updatedAt: stamp,
+    updatedBy: actor
+  });
+  const latest = history[history.length - 1];
+  return Object.assign({}, spec, specLimitSnapshot(latest), {
+    effectiveFrom: latest.effectiveFrom,
+    revisions: history
+  });
+}
+
+/** True when two limit snapshots differ (form values arrive as strings). */
+function specLimitsDiffer(a, b) {
+  const left = a || {};
+  const right = b || {};
+  return SPEC_LIMIT_FIELDS.some((field) => {
+    if (field === 'limitsProvisional') return Boolean(left[field]) !== Boolean(right[field]);
+    return String(left[field] === null ? '' : left[field]) !== String(right[field] === null ? '' : right[field]);
+  });
+}
+
+/**
+ * Apply an edit to a spec's limit history without rewriting the past.
+ *
+ * A different limit on a date already on file is rejected: correcting an older
+ * entry would restate the window that Cpk records from that date were judged
+ * against. Metadata-only edits add nothing, and a genuinely new effective date
+ * appends one revision. The caller owns the identity fields and the resulting
+ * spec; this helper only decides what happens to the revision history.
+ */
+function applySpecLimitEdit(spec, limits, effectiveFrom, stamp, actor) {
+  if (!spec) return null;
+  const history = getSpecRevisions(spec).map((rev) => ({ ...rev }));
+  const sameDay = history.find((rev) => rev.effectiveFrom === effectiveFrom);
+  const latest = history[history.length - 1];
+  if (sameDay && specLimitsDiffer(sameDay, limits)) return { rejected: true, history };
+  if (!sameDay && specLimitsDiffer(latest, limits)) {
+    history.push({
+      id: `${spec.id}-R${history.length + 1}`,
+      effectiveFrom,
+      ...limits,
+      updatedAt: stamp,
+      updatedBy: actor
+    });
+    history.sort((a, b) => String(a.effectiveFrom).localeCompare(String(b.effectiveFrom)));
+    return { rejected: false, outcome: 'revision', history };
+  }
+  return { rejected: false, outcome: 'metadata', history };
+}
+
+/** "2026-11-25 · R3", or the recorded baseline, for tables and tooltips. */
+function describeSpecLimits(spec) {
+  const revisions = getSpecRevisions(spec);
+  const latest = revisions[revisions.length - 1];
+  if (!latest) return { count: 0, effectiveFrom: '', label: '—' };
+  return {
+    count: revisions.length,
+    effectiveFrom: latest.effectiveFrom,
+    label: latest.baseline
+      ? `baseline (${latest.effectiveFrom})`
+      : `${latest.effectiveFrom} · R${revisions.length}`
+  };
 }
 
 function inferFamilyFromModel(model) {
@@ -2562,6 +3592,44 @@ function inferFamilyFromModel(model) {
   if (m === 'X3784') return 'MacMini';
   if (m === 'X2689') return 'Display';
   return 'MB14"';
+}
+
+/**
+ * Reads a measurement date from an imported cell. Only unambiguous formats are
+ * accepted (ISO, YYYY/MM/DD, DD-MMM-YYYY, a Date, an Excel serial, or D/M/Y
+ * when the positions cannot be confused). Anything else is refused rather than
+ * guessed: a wrong date would bind the record to the wrong limit revision.
+ */
+function toIsoDate(value) {
+  const pad = (n) => String(n).padStart(2, '0');
+  if (value === null || value === undefined || value === '') return '';
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value > 20000 && value < 80000) {
+    const dt = new Date(Math.round((value - 25569) * 86400000));
+    return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
+  }
+  const text = String(value).trim();
+  let m = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (m) return `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+  m = text.match(/^(\d{1,2})[- ]([A-Za-z]{3,})[- ](\d{4})$/);
+  if (m) {
+    const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const mi = months.indexOf(m[2].slice(0, 3).toLowerCase());
+    if (mi >= 0) return `${m[3]}-${pad(mi + 1)}-${pad(m[1])}`;
+  }
+  m = text.match(/^(\d{1,2})[\/](\d{1,2})[\/](\d{4})$/);
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    // 4/11/2026 is either 4 Nov or 11 Apr: refuse instead of guessing.
+    if (a > 12 && b <= 12) return `${m[3]}-${pad(b)}-${pad(a)}`;
+    if (b > 12 && a <= 12) return `${m[3]}-${pad(a)}-${pad(b)}`;
+    return '';
+  }
+  if (/^\d{5}$/.test(text)) return toIsoDate(Number(text));
+  return '';
 }
 
 function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) {
@@ -2584,15 +3652,24 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
   const meanCol = findCol(['mean', 'avg', 'average']);
   const stdCol = findCol(['stddev', 'stdev', 'sigma', 'std']);
   const nCol = findCol(['samplesize', 'count', 'qty', 'n']);
+  const dateCol = findCol(['measureddate', 'testdate', 'inspectiondate', 'date']);
+  let undatedRows = 0;
 
   // Format 1: Pre-aggregated Summary Sheet (ParamCode + Mean + StdDev)
   if (paramCol && meanCol && stdCol) {
     const records = [];
     rows.forEach((r, idx) => {
-      const spec = findMatchingSpec(r[paramCol], masterSpecs);
+      // Resolve the model first: the same parameter code may exist per model.
+      const model = String(r[modelCol] || defaults.model || 'X4151').toUpperCase().trim();
+      const spec = findMatchingSpec(r[paramCol], masterSpecs, model);
       if (!spec) {
         warnings.push(`Row ${idx + 2}: Parameter "${r[paramCol]}" did not match any Master Spec.`);
         return;
+      }
+      if (spec.model && spec.model.toUpperCase() !== model) {
+        warnings.push(
+          `Row ${idx + 2}: No ${model} specification for "${r[paramCol]}"; resolved to ${spec.code} (${spec.model}).`
+        );
       }
       const mean = Number(r[meanCol]);
       const sd = Number(r[stdCol]);
@@ -2600,27 +3677,39 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
         warnings.push(`Row ${idx + 2}: Invalid Mean/StdDev for ${spec.code}.`);
         return;
       }
-      const model = String(r[modelCol] || defaults.model || 'X4151').toUpperCase().trim();
       const phase = String(r[phaseCol] || defaults.phase || 'EVT').toUpperCase().trim();
       const side = String(r[sideCol] || defaults.side || 'RHS').toUpperCase().trim();
       const config = String(r[configCol] || defaults.config || 'ME11').toUpperCase().trim();
       const sampleSize = Math.max(5, Number(r[nCol]) || 32);
+      const measuredAt = toIsoDate(dateCol ? r[dateCol] : '');
+      if (dateCol && !measuredAt) undatedRows += 1;
 
-      records.push({
-        id: `CPK-IMP-${model}-${side}-${spec.code}-${idx}`,
-        model,
-        familyGroup: inferFamilyFromModel(model),
-        phase,
-        side,
-        config,
-        specId: spec.id,
-        mean,
-        stdDev: sd,
-        sampleSize,
-        date: todayIso(),
-        sourceFile: fileName
-      });
+      records.push(
+        withFrozenSpecLimits(
+          {
+            id: `CPK-IMP-${model}-${side}-${spec.code}-${idx}`,
+            model,
+            familyGroup: inferFamilyFromModel(model),
+            phase,
+            side,
+            config,
+            specId: spec.id,
+            mean,
+            stdDev: sd,
+            sampleSize,
+            date: measuredAt || todayIso(),
+            sourceFile: fileName
+          },
+          spec
+        )
+      );
     });
+
+    if (undatedRows > 0) {
+      warnings.push(
+        `${undatedRows} row(s) had no readable measurement date; they are dated ${todayIso()} and use that day's limits.`
+      );
+    }
 
     return {
       format: `Pre-Aggregated Summary (${rows.length} rows)`,
@@ -2638,17 +3727,19 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
       phaseCol,
       sideCol,
       configCol,
-      findCol(['serial', 'sn', 'unit', 'sample', 'no', 'id', 'date', 'time'])
+      dateCol,
+      findCol(['serial', 'sn', 'unit', 'sample', 'no', 'id', 'time'])
     ].filter(Boolean)
   );
-  const specColMap = [];
+  // Headers that name a known parameter. The spec itself is resolved per row
+  // group below, because the same header can mean a different model's limits.
+  const specHeaders = [];
   const unmappedColumns = [];
 
   headers.forEach((h) => {
     if (metaCols.has(h)) return;
-    const spec = findMatchingSpec(h, masterSpecs);
-    if (spec) {
-      specColMap.push({ header: h, spec });
+    if (findMatchingSpec(h, masterSpecs)) {
+      specHeaders.push(h);
     } else {
       const numericVals = rows
         .map((r) => r[h])
@@ -2681,7 +3772,7 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
     }
   });
 
-  if (specColMap.length === 0) {
+  if (specHeaders.length === 0) {
     warnings.push(
       'No columns matched existing Master Spec codes. Use the Auto-Generate Master Spec panel below to register uploaded columns.'
     );
@@ -2708,9 +3799,29 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
     grouped.get(gKey).rows.push(r);
   });
 
+  // A group is one measurement run; its date is the latest readable one, so a
+  // multi-day export resolves against the limits in force when it finished.
+  const groupDate = (groupRows) => {
+    if (!dateCol) return todayIso();
+    const dates = groupRows
+      .map((r) => toIsoDate(r[dateCol]))
+      .filter(Boolean)
+      .sort();
+    if (dates.length) return dates[dates.length - 1];
+    undatedRows += 1;
+    return todayIso();
+  };
+
   const records = [];
   grouped.forEach((grp) => {
-    specColMap.forEach(({ header, spec }) => {
+    specHeaders.forEach((header) => {
+      const spec = findMatchingSpec(header, masterSpecs, grp.model);
+      if (!spec) return;
+      if (spec.model && spec.model.toUpperCase() !== grp.model) {
+        warnings.push(
+          `Column "${header}": no ${grp.model} specification; resolved to ${spec.code} (${spec.model}).`
+        );
+      }
       const vals = grp.rows
         .map((r) => r[header])
         .filter((v) => v !== '' && v !== null && v !== undefined)
@@ -2723,27 +3834,38 @@ function analyzeUploadedCpkRows(headers, rows, masterSpecs, defaults, fileName) 
       const variance = vals.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / (n - 1);
       const sd = Math.max(0.0001, Math.sqrt(variance));
 
-      records.push({
-        id: `CPK-RAW-${grp.model}-${grp.side}-${grp.config}-${spec.code}`,
-        model: grp.model,
-        familyGroup: inferFamilyFromModel(grp.model),
-        phase: grp.phase,
-        side: grp.side,
-        config: grp.config,
-        specId: spec.id,
-        mean: Number(mean.toFixed(5)),
-        stdDev: Number(sd.toFixed(5)),
-        sampleSize: n,
-        rawValues: vals,
-        date: todayIso(),
-        sourceFile: fileName
-      });
+      records.push(
+        withFrozenSpecLimits(
+          {
+            id: `CPK-RAW-${grp.model}-${grp.side}-${grp.config}-${spec.code}`,
+            model: grp.model,
+            familyGroup: inferFamilyFromModel(grp.model),
+            phase: grp.phase,
+            side: grp.side,
+            config: grp.config,
+            specId: spec.id,
+            mean: Number(mean.toFixed(5)),
+            stdDev: Number(sd.toFixed(5)),
+            sampleSize: n,
+            rawValues: vals,
+            date: groupDate(grp.rows),
+            sourceFile: fileName
+          },
+          spec
+        )
+      );
     });
   });
 
+  if (undatedRows > 0) {
+    warnings.push(
+      `${undatedRows} group(s) had no readable measurement date; they are dated ${todayIso()} and use that day's limits.`
+    );
+  }
+
   return {
-    format: `Wide Raw Measurements (${rows.length} units · ${specColMap.length} matched params)`,
-    matchedSpecs: specColMap.map((s) => s.spec.id),
+    format: `Wide Raw Measurements (${rows.length} units · ${specHeaders.length} matched params)`,
+    matchedSpecs: Array.from(new Set(records.map((r) => r.specId))),
     unmappedColumns,
     records,
     warnings
@@ -2766,11 +3888,12 @@ function csvText(value) {
  *
  * The number is the highest suffix already in use + 1, so deleting a record can
  * never hand its ID to a new one (a reused ID would silently merge the new
- * record with stale gate/import references). The candidate is also checked
- * against the full ID set to catch suffixes the numeric scan cannot see
- * (e.g. `CI-12B`).
+ * record with stale gate/import references). A persisted high-water mark keeps
+ * the number even after the record itself is deleted; the numeric scan is only
+ * its floor. The candidate is also checked against the full ID set to catch
+ * suffixes the numeric scan cannot see (e.g. `CI-12B`).
  */
-function nextId(prefix, items) {
+function nextId(prefix, items, maxSeen) {
   const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(`^${escaped}(\\d+)$`);
   const used = new Set(
@@ -2783,13 +3906,26 @@ function nextId(prefix, items) {
     const match = id.match(pattern);
     if (match) highest = Math.max(highest, Number(match[1]));
   });
-  let seq = highest + 1;
+  let seq = Math.max(maxSeen || 0, highest) + 1;
   let candidate = `${prefix}${String(seq).padStart(2, '0')}`;
   while (used.has(candidate)) {
     seq += 1;
     candidate = `${prefix}${String(seq).padStart(2, '0')}`;
   }
   return candidate;
+}
+
+/**
+ * Returns a new counter map with `prefix` raised to at least `number`. Callers
+ * invoke it in the same handler that adds the record, so a later deletion cannot
+ * hand that number to a new record. Existing keys and the input are untouched.
+ */
+function withIdCounter(counters, prefix, number) {
+  const current = counters && typeof counters === 'object' ? counters : {};
+  return {
+    ...current,
+    [prefix]: Math.max(current[prefix] || 0, number)
+  };
 }
 
 /**
@@ -2839,7 +3975,9 @@ const PAYLOAD_SLICE_LABELS = {
   cpkRecords: 'Cpk measurements',
   costProjects: 'Cost initiatives',
   customerFeedback: 'Customer feedback',
-  scheduleOverrides: 'Schedule overrides'
+  scheduleOverrides: 'Schedule overrides',
+  teamMembers: 'Team members',
+  idCounters: 'ID counters'
 };
 
 function payloadRecordLabel(slice, key, item) {
@@ -2851,6 +3989,7 @@ function payloadRecordLabel(slice, key, item) {
     if (slice === 'customerFeedback') {
       return `${item.id || key} · ${item.model || ''} · ${item.issueItem || ''}`.trim();
     }
+    if (slice === 'teamMembers') return `${item.id || key} · ${item.name || ''}`.trim();
     if (item.id) return String(item.id);
   }
   return String(key);
@@ -2907,9 +4046,14 @@ function diffWorkspacePayloads(local, remote) {
   return slices;
 }
 
+// UTF-8 BOM so Excel shows Thai text and the ฿ sign instead of mojibake.
+// Shared by every CSV download path, including the KPI deep-dive export.
+function csvDownloadText(csv) {
+  return '\uFEFF' + csv;
+}
+
 function triggerCsvDownload(filename, csv) {
-  // UTF-8 BOM so Excel shows Thai text and the ฿ sign instead of mojibake.
-  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const blob = new Blob([csvDownloadText(csv)], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -2924,16 +4068,16 @@ function buildSampleCpkCsv(mode = 'wide') {
   if (mode === 'summary') {
     return [
       'Model,Phase,Side,Config,ParamCode,Mean,StdDev,SampleSize',
-      'X4151,EVT,RHS,ME11,BRG_TIR,0.0051,0.0018,64',
-      'X4151,EVT,RHS,ME11,ROT_IMB,1.75,0.65,64',
-      'X4151,EVT,RHS,ME11,SLD_HT,0.37,0.042,32',
-      'X4151,EVT,LHS,ME11,DYN_ZMAX,9.86,0.039,64',
-      'X4151,EVT,LHS,ME11,COV_GAP,0.355,0.031,32'
+      'X4151,EVT,RHS,ME11,TIR_W,0.0051,0.0018,64',
+      'X4151,EVT,RHS,ME11,ZAVG,9.82,0.045,64',
+      'X4151,EVT,RHS,ME11,PIL_COV_GAP,0.37,0.042,32',
+      'X4151,EVT,LHS,ME11,ZMAX,9.86,0.039,64',
+      'X4151,EVT,LHS,ME11,COV_PIL_GAP,0.355,0.031,32'
     ].join('\n');
   }
 
   // Generate 64 realistic OMM / Dynamic Tester rows for X4151 EVT RHS & LHS
-  const header = 'SerialNo,Model,Phase,Side,Config,BRG_TIR,ROT_IMB,SLD_HT,DYN_ZMAX,DYN_ZPARA,COV_GAP,FAN_FLAT';
+  const header = 'SerialNo,Model,Phase,Side,Config,TIR_W,ZAVG,PIL_COV_GAP,ZMAX,ZPARA_T,COV_PIL_GAP,PIL_FLAT_TAB';
   const lines = [header];
   const pseudoNorm = (seed) => {
     const u1 = Math.max(0.001, ((Math.sin(seed * 12.9898) * 43758.5453) % 1 + 1) % 1);
@@ -2945,14 +4089,14 @@ function buildSampleCpkCsv(mode = 'wide') {
     for (let i = 1; i <= 32; i++) {
       const seed = (sIdx + 1) * 100 + i;
       const tir = Math.max(0.001, 0.0051 + pseudoNorm(seed + 1) * 0.0018).toFixed(4);
-      const imb = Math.max(0.2, (side === 'RHS' ? 1.75 : 1.95) + pseudoNorm(seed + 2) * 0.65).toFixed(3);
+      const zavg = ((side === 'RHS' ? 9.82 : 9.79) + pseudoNorm(seed + 2) * 0.045).toFixed(3);
       const sld = (0.37 + pseudoNorm(seed + 3) * 0.042).toFixed(3);
       const zmax = (9.86 + pseudoNorm(seed + 4) * 0.039).toFixed(3);
       const zpara = Math.max(0.01, 0.088 + pseudoNorm(seed + 5) * 0.032).toFixed(3);
       const gap = (0.355 + pseudoNorm(seed + 6) * 0.031).toFixed(3);
       const flat = Math.max(0.01, 0.072 + pseudoNorm(seed + 7) * 0.024).toFixed(3);
       lines.push(
-        `SN-4151${side[0]}-${String(i).padStart(3, '0')},X4151,EVT,${side},ME11,${tir},${imb},${sld},${zmax},${zpara},${gap},${flat}`
+        `SN-4151${side[0]}-${String(i).padStart(3, '0')},X4151,EVT,${side},ME11,${tir},${zavg},${sld},${zmax},${zpara},${gap},${flat}`
       );
     }
   });
@@ -2960,10 +4104,13 @@ function buildSampleCpkCsv(mode = 'wide') {
 }
 
 function exportMasterSpecsCsv(masterSpecs) {
-  const header = 'Code,ParameterName,Model,Station,SpecType,LSL,Nominal,USL,Unit,TargetCpk,Metrology,ControlPlanDoc,SamplingPlan';
-  const rows = masterSpecs.map((s) =>
-    [
+  const header =
+    'Code,CTQ,ParameterName,Model,Station,SpecType,LSL,Nominal,USL,Unit,TargetCpk,Metrology,ControlPlanDoc,SamplingPlan,LimitsEffectiveFrom,LimitRevisionCount,LimitsStatus';
+  const rows = masterSpecs.map((s) => {
+    const limits = describeSpecLimits(s);
+    return [
       csvText(s.code),
+      s.ctq === false ? 'No' : 'Yes',
       csvText(s.name),
       csvText(s.model || ''),
       csvText(s.station),
@@ -2975,9 +4122,12 @@ function exportMasterSpecsCsv(masterSpecs) {
       s.cpkTarget,
       csvText(s.metrology),
       csvText(s.docRef),
-      csvText(s.samplingPlan)
-    ].join(',')
-  );
+      csvText(s.samplingPlan),
+      csvText(limits.effectiveFrom),
+      limits.count,
+      s.limitsProvisional === true ? 'Provisional' : 'Confirmed'
+    ].join(',');
+  });
   triggerCsvDownload('FFM_Master_Specifications.csv', [header, ...rows].join('\n'));
 }
 
@@ -3160,6 +4310,36 @@ function fiscalYearWindow(fyStartYear) {
     .toISOString()
     .slice(0, 10);
   return { start, end };
+}
+
+/**
+ * One fiscal-year test for every KPI tile. The MIH tile has always measured against
+ * the FY window above; claims and cost saving read the same window (and fiscal-year
+ * tag) so "FY2026" cannot mean two different twelve-month periods on one scorecard.
+ */
+function isInKpiFiscalYear(iso, fiscalYear = KPI_FISCAL_YEAR) {
+  const day = String(iso || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  const { start, end } = fiscalYearWindow(fiscalYear);
+  return day >= start && day <= end;
+}
+
+// Cost-saving initiatives carry a fiscal-year tag rather than a date; untagged
+// records keep the historical default of the current KPI fiscal year.
+function isKpiFiscalYearTag(fyTarget, fiscalYear = KPI_FISCAL_YEAR) {
+  return String(fyTarget || `FY${fiscalYear}`).trim().toUpperCase() === `FY${fiscalYear}`;
+}
+
+/** One fiscal window for the scorecard tile and every drill-down that explains it. */
+function kpiFiscalScopeLabel(suffix) {
+  const { start, end } = fiscalYearWindow(KPI_FISCAL_YEAR);
+  const window = `FY${KPI_FISCAL_YEAR} ${start} to ${end}`;
+  return suffix ? `All programs · ${window} · ${suffix}` : `All programs · ${window}`;
+}
+
+/** The only fields a committed stage drag sends to the schedule updater. */
+function stageDragReschedulePayload(drag) {
+  return { project: drag.project, rowKeys: drag.rowKeys, schedule: drag.schedule };
 }
 
 /**
@@ -3391,37 +4571,10 @@ function createSingleGateDossier(project, gate, variant, initialStatus, leaderNa
     },
   ];
 
-  // Evidence is append-only: the Google Drive links that back a gate decision stay
-  // attached to the dossier (and its audit trail) for later retrieval.
-  const evidenceFolder = `https://drive.google.com/drive/folders/1FFM-PEN81-${project.id.replace('PRJ-', '')}-${variant.key}-${gate.code}`;
-  const baseEvidence = isPast
-    ? [
-        {
-          id: `${project.id}-${variant.key}-${gate.id}-ev1`,
-          label: `${gate.code} ${gate.short} · signed gate pack (PDF)`,
-          url: `https://drive.google.com/file/d/1${project.id.replace('PRJ-', '')}${gate.code}RevB/view`,
-          addedBy: roster.em.options[0],
-          addedAt: '2026-11-20 15:00'
-        },
-        {
-          id: `${project.id}-${variant.key}-${gate.id}-ev2`,
-          label: `${gate.code} ${gate.short} · build matrix & MO SPP evidence`,
-          url: evidenceFolder,
-          addedBy: roster.qa.options[0],
-          addedAt: '2026-11-20 15:05'
-        }
-      ]
-    : isActive
-    ? [
-        {
-          id: `${project.id}-${variant.key}-${gate.id}-ev1`,
-          label: `${gate.code} ${gate.short} · gate evidence (in progress)`,
-          url: evidenceFolder,
-          addedBy: roster.em.options[0],
-          addedAt: '2026-11-21 09:20'
-        }
-      ]
-    : [];
+  // Evidence is append-only and hand-attached: a dossier is seeded with no Drive
+  // links, because an invented folder or file id opens a 404 instead of the data.
+  // Reviewers attach the real link in the sign-off centre, and it stays with the
+  // dossier (and its audit trail) from then on.
 
   const gateIdx = NPI_GATES.findIndex((g) => g.id === gate.id);
   return {
@@ -3430,7 +4583,7 @@ function createSingleGateDossier(project, gate, variant, initialStatus, leaderNa
     targetDate: customOverride.targetDate || `2026-12-${String(Math.min(28, 2 + gateIdx * 3)).padStart(2, '0')}`,
     criteria: customOverride.criteria || baseCriteria,
     approvers: customOverride.approvers || baseApprovers,
-    evidence: customOverride.evidence || baseEvidence,
+    evidence: customOverride.evidence || [],
     auditLog:
       customOverride.auditLog ||
       (isPast
@@ -3444,6 +4597,44 @@ function createSingleGateDossier(project, gate, variant, initialStatus, leaderNa
           ]
         : [])
   };
+}
+
+/**
+ * Drive links on a gate dossier are evidence someone attached by hand, so only a
+ * real https:// URL is worth showing. Seeds written before links were attached
+ * by hand carried placeholder ids (…/folders/1FFM-PEN81-… and
+ * …/file/d/1<project><gate>RevB) that Google answers with 404, so they are
+ * recognised here and dropped instead of being rendered as clickable dead ends.
+ */
+const PLACEHOLDER_EVIDENCE_URL = /^https?:\/\/drive\.google\.com\/(?:drive\/folders\/1FFM-|file\/d\/[^/]+RevB\/view)/;
+
+function isOpenableEvidenceUrl(url) {
+  const value = String(url || '').trim();
+  return /^https?:\/\//i.test(value) && !PLACEHOLDER_EVIDENCE_URL.test(value);
+}
+
+/** Drop placeholder Drive links from stored gate dossiers; returns the count. */
+function purgePlaceholderEvidence(gateRecords) {
+  let removed = 0;
+  const records = {};
+  Object.entries(gateRecords || {}).forEach(([projectId, lines]) => {
+    records[projectId] = {};
+    Object.entries(lines || {}).forEach(([lineKey, gates]) => {
+      records[projectId][lineKey] = {};
+      Object.entries(gates || {}).forEach(([gateId, dossier]) => {
+        if (!dossier) return;
+        const evidence = Array.isArray(dossier.evidence) ? dossier.evidence : null;
+        const kept = evidence ? evidence.filter((ev) => isOpenableEvidenceUrl(ev && ev.url)) : null;
+        if (!kept || kept.length === evidence.length) {
+          records[projectId][lineKey][gateId] = dossier;
+          return;
+        }
+        removed += evidence.length - kept.length;
+        records[projectId][lineKey][gateId] = { ...dossier, evidence: kept };
+      });
+    });
+  });
+  return { records, removed };
 }
 
 function createInitialGateRecords() {

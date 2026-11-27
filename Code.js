@@ -16,6 +16,10 @@
  *    timestamp of the last rebuild are kept in script properties and shown
  *    in the menu, so a stale mirror is visible rather than silent.
  *  - AuditLog is appended on every save.
+ *  - SignOffLog is the append-only gate decision ledger: one immutable row per
+ *    changed gate decision (program, line, gate, approver, decision, timestamp,
+ *    signed-in email), written inside the same save lock, so "who approved what"
+ *    is answered from its own tab instead of from the mutable gateRecords JSON.
  *  - Concurrency safe via LockService.getScriptLock().
  *  - Runs as the accessing user (executeAs USER_ACCESSING), so the AuditLog can
  *    attribute every save and sign-off to the signed-in Google account. Saves
@@ -28,10 +32,34 @@ const CONFIG = {
   WEB_APP_URL: 'https://script.google.com/a/macros/minebea.co.th/s/AKfycbz6y_8byEXlOxSWq6y5_azvp129b7CmlIfqhuNGA2BX-LrKTHVnmQdgHwylvx7yFE4C/exec',
   APP_TITLE: 'FFM NPI Ops — NMB-Minebea Thai Ltd.',
   STATE_SHEET: '_FFM_STATE_STORE',
+  STATE_HISTORY_SHEET: '_FFM_STATE_HISTORY',
   AUDIT_SHEET: 'AuditLog',
+  SIGN_OFF_SHEET: 'SignOffLog',
   CHUNK_SIZE: 40000,
+  // How many replaced copies of the state store to keep, oldest dropped first.
+  HISTORY_LIMIT: 5,
   MIRROR_REVISION_PROP: 'FFM_MIRROR_REVISION',
   MIRROR_REFRESHED_PROP: 'FFM_MIRROR_REFRESHED_AT'
+};
+
+const SIGN_OFF_LEDGER_HEADERS = [
+  'Timestamp', 'Revision', 'ProgramID', 'Program', 'Line', 'Gate',
+  'Approver', 'Role', 'Decision', 'Remark', 'SignedInEmail'
+];
+
+// Gate names for the ledger only. The web app keeps its own NPI_GATES constant,
+// which the server cannot read, so the same nine ids are repeated here to write a
+// readable gate instead of a bare id.
+const GATE_LEDGER_LABELS = {
+  prep: 'G1 Preparing',
+  bbr: 'G2 BBR',
+  brr: 'G3 BRR',
+  mbo: 'G4 MBO & OK2B',
+  main: 'G5 Main Build',
+  oqc: 'G6 Final Insp.',
+  ship: 'G7 Shipment',
+  mih: 'G8 FATP MIH',
+  pbr: 'G9 PBR'
 };
 
 const PERSISTED_SLICES = [
@@ -43,7 +71,9 @@ const PERSISTED_SLICES = [
   'cpkRecords',
   'costProjects',
   'customerFeedback',
-  'scheduleOverrides'
+  'scheduleOverrides',
+  'teamMembers',
+  'idCounters'
 ];
 
 /**
@@ -143,6 +173,18 @@ function getExecutorEmail_() {
 }
 
 /**
+ * Resolve the AuditLog identity for a save. A missing Google identity is
+ * recorded as `unknown` instead of refusing the save; the executor email is
+ * kept separately for diagnostics and must never replace the actor label.
+ */
+function saveIdentity_(userEmail, executorEmail) {
+  return {
+    actorLabel: userEmail || 'unknown',
+    executorEmail: executorEmail || ''
+  };
+}
+
+/**
  * Neutralizes spreadsheet formula injection: a text cell whose trimmed value
  * starts with =, +, -, @, tab or CR would otherwise be evaluated as a formula
  * when written with setValues/appendRow. Non-string values pass through so
@@ -195,6 +237,18 @@ function ensureAllTabs_() {
     // Migrate an older 5-column AuditLog in place; existing rows keep their values.
     auditSheet.getRange(1, 6).setValue('Executor').setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
   }
+  const ledgerSheet = getOrCreateSheet_(ss, CONFIG.SIGN_OFF_SHEET);
+  if (ledgerSheet.getLastRow() === 0) {
+    ledgerSheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setValues([SIGN_OFF_LEDGER_HEADERS]);
+    ledgerSheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
+    ledgerSheet.setFrozenRows(1);
+  }
+  const historySheet = getOrCreateSheet_(ss, CONFIG.STATE_HISTORY_SHEET);
+  if (historySheet.getLastRow() === 0) {
+    historySheet.getRange(1, 1, 1, 7).setValues([['SliceKey', 'Revision', 'ChunkIndex', 'ChunkCount', 'SavedAt', 'PayloadChunk', 'SavedBy']]);
+    historySheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
+    historySheet.setFrozenRows(1);
+  }
   ['Projects', 'Tasks', 'ProductionRecords', 'MasterSpecs', 'CpkRecords', 'CostProjects', 'CustomerFeedback'].forEach(function(tab) {
     getOrCreateSheet_(ss, tab);
   });
@@ -215,6 +269,8 @@ function protectManagedTabs_(ss, force) {
     'FFM NPI Ops — authoritative state store. Do not edit by hand; the web app rewrites this tab on every save.', force);
   protectManagedTab_(ss, CONFIG.AUDIT_SHEET,
     'FFM NPI Ops — append-only audit trail. Do not edit by hand.', force);
+  protectManagedTab_(ss, CONFIG.SIGN_OFF_SHEET,
+    'FFM NPI Ops — append-only gate sign-off ledger. Do not edit by hand.', force);
 }
 
 function protectManagedTab_(ss, tabName, description, force) {
@@ -276,6 +332,27 @@ function getServerInfo() {
  * Loads the complete workspace state from `_FFM_STATE_STORE`.
  * Returns { initialized: false } if the Sheet has not been seeded yet.
  */
+/**
+ * Reassembles one slice from its stored chunks.
+ *
+ * `missing` distinguishes "this slice was never stored" from "the stored chunks
+ * are incomplete or invalid": only the latter means the copy must not be used.
+ */
+function parseChunkGroup_(chunks) {
+  if (!chunks || !chunks.length) return { ok: false, missing: true };
+  chunks.sort(function(a, b) { return a.idx - b.idx; });
+  const declared = chunks[0].count;
+  if (!declared || chunks.length !== declared ||
+      chunks.some(function(c, i) { return c.count !== declared || c.idx !== i; })) {
+    return { ok: false, missing: false };
+  }
+  try {
+    return { ok: true, value: JSON.parse(chunks.map(function(c) { return c.text; }).join('')) };
+  } catch (e) {
+    return { ok: false, missing: false };
+  }
+}
+
 function loadWorkspaceState() {
   const ss = getSpreadsheet_();
   const stateSheet = ss.getSheetByName(CONFIG.STATE_SHEET);
@@ -320,21 +397,9 @@ function loadWorkspaceState() {
   }
 
   const parseKey = function(key) {
-    const chunks = grouped[key];
-    if (!chunks || !chunks.length) return undefined;
-    chunks.sort(function(a, b) { return a.idx - b.idx; });
-    const declared = chunks[0].count;
-    if (!declared || chunks.length !== declared ||
-        chunks.some(function(c, i) { return c.count !== declared || c.idx !== i; })) {
-      corrupted = true;
-      return undefined;
-    }
-    try {
-      return JSON.parse(chunks.map(function(c) { return c.text; }).join(''));
-    } catch (e) {
-      corrupted = true;
-      return undefined;
-    }
+    const result = parseChunkGroup_(grouped[key]);
+    if (!result.ok && !result.missing) corrupted = true;
+    return result.ok ? result.value : undefined;
   };
 
   const meta = parseKey('__META__') || {};
@@ -394,15 +459,8 @@ function initializeDatabase(payloadJson) {
  * debounced autosave cheap.
  */
 function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirrors) {
-  // Reject unauthenticated saves server-side: the web app runs as the accessing
-  // user, and a save with no identity could not be attributed or defended.
   const userEmail = getActiveUserEmail_();
-  if (!userEmail) {
-    throw new Error(
-      'Save refused: FFM NPI Ops could not read your Google Workspace identity. ' +
-      'Sign in with your Minebea account, grant the requested permissions, and reload.'
-    );
-  }
+  const identity = saveIdentity_(userEmail, getExecutorEmail_());
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
@@ -415,22 +473,40 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
     const stateSheet = getOrCreateSheet_(ss, CONFIG.STATE_SHEET);
     const payload = typeof payloadJson === 'string' ? JSON.parse(payloadJson) : payloadJson;
     const nowIso = new Date().toISOString();
-    const actorLabel = userEmail;
-    const executorEmail = getExecutorEmail_();
+    const actorLabel = identity.actorLabel;
+    const executorEmail = identity.executorEmail;
 
-    // Read current revision if present
+    // Read current revision, keeping the rows so the copy being replaced can
+    // be archived before the store is rewritten.
     let prevRevision = 0;
+    let previousRows = [];
     if (stateSheet.getLastRow() >= 2) {
       const existing = stateSheet.getDataRange().getValues();
-      for (let i = 1; i < existing.length; i++) {
-        if (String(existing[i][0]) === '__META__') {
+      previousRows = existing.slice(1).filter(function(row) {
+        return String(row[0] || '').trim();
+      });
+      for (let i = 0; i < previousRows.length; i++) {
+        if (String(previousRows[i][0]) === '__META__') {
           try {
-            const m = JSON.parse(String(existing[i][4] || '{}'));
+            const m = JSON.parse(String(previousRows[i][4] || '{}'));
             prevRevision = Number(m.revision) || 0;
           } catch (e) {}
           break;
         }
       }
+    }
+
+    // The gate decisions already on file, so the ledger records only what this
+    // save actually changed — a save that carries dossiers forward writes nothing.
+    let previousGateRecords = null;
+    if (previousRows.length > 0) {
+      const gateChunks = [];
+      previousRows.forEach(function(row) {
+        if (String(row[0] || '') !== 'gateRecords') return;
+        gateChunks.push({ idx: Number(row[1]) || 0, count: Number(row[2]) || 0, text: String(row[4] || '') });
+      });
+      const parsedGates = parseChunkGroup_(gateChunks);
+      if (parsedGates.ok) previousGateRecords = parsedGates.value;
     }
 
     // Reject a stale client instead of silently overwriting another user's save.
@@ -469,6 +545,11 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       }
     });
 
+    // Keep the copy being replaced: every save is undoable from the history tab.
+    if (prevRevision > 0 && previousRows.length > 0) {
+      archiveStateRevision_(ss, prevRevision, previousRows);
+    }
+
     // Rewrite _FFM_STATE_STORE cleanly
     stateSheet.clearContents();
     stateSheet.getRange(1, 1, 1, 5).setValues([['SliceKey', 'ChunkIndex', 'ChunkCount', 'UpdatedAt', 'PayloadChunk']]);
@@ -493,6 +574,16 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       executorEmail
     ]);
 
+    // Append-only gate decision ledger, written under the same lock as the store
+    // it describes. Nothing in this path edits or deletes an existing row.
+    if (previousGateRecords && payload.gateRecords && typeof payload.gateRecords === 'object') {
+      appendSignOffLedger_(ss, signOffLedgerRows(previousGateRecords, payload.gateRecords, payload.projects, {
+        timestamp: nowIso,
+        revision: nextRevision,
+        userEmail: userEmail
+      }));
+    }
+
     return {
       ok: true,
       revision: nextRevision,
@@ -503,6 +594,230 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Rows for the gate decisions this save changed. Only a change of decision is a
+ * new event: an unchanged dossier produces nothing, so replaying or retrying a
+ * save cannot duplicate history. A gate that did not exist before is skipped too
+ * — creating a program seeds sample decisions, which is not somebody approving.
+ * With no previous store (the very first seed) there is nothing to compare and
+ * nothing is written. Approval and rejection are recorded with the signed-in
+ * email of the person who saved, and with the approver named on the dossier.
+ */
+function signOffLedgerRows(previousGateRecords, nextGateRecords, projects, meta) {
+  if (!previousGateRecords || !nextGateRecords) return [];
+  const DECISIONS = { Approved: true, Conditional: true, Rejected: true };
+  const models = {};
+  (projects || []).forEach(function(project) {
+    if (project && project.id) models[project.id] = String(project.model || '');
+  });
+
+  const rows = [];
+  Object.keys(nextGateRecords).forEach(function(projectId) {
+    const nextLines = nextGateRecords[projectId] || {};
+    const previousLines = previousGateRecords[projectId] || {};
+    Object.keys(nextLines).forEach(function(lineKey) {
+      const nextGates = nextLines[lineKey] || {};
+      const previousGates = previousLines[lineKey] || {};
+      Object.keys(nextGates).forEach(function(gateId) {
+        const dossier = nextGates[gateId];
+        const before = previousGates[gateId];
+        if (!dossier || typeof dossier !== 'object' || !before || typeof before !== 'object') return;
+
+        // Approvers are matched by name: the name is what the signature carries.
+        const previousDecisions = {};
+        (Array.isArray(before.approvers) ? before.approvers : []).forEach(function(approver) {
+          previousDecisions[String((approver && approver.name) || '')] = String((approver && approver.decision) || '');
+        });
+
+        (Array.isArray(dossier.approvers) ? dossier.approvers : []).forEach(function(approver) {
+          if (!approver) return;
+          const decision = String(approver.decision || '');
+          if (!DECISIONS[decision]) return;
+          const name = String(approver.name || '');
+          if (previousDecisions[name] === decision) return;
+          rows.push([
+            meta.timestamp,
+            meta.revision,
+            projectId,
+            models[projectId] || '',
+            lineKey,
+            GATE_LEDGER_LABELS[gateId] || gateId,
+            name,
+            String(approver.role || ''),
+            decision,
+            String(approver.remark || ''),
+            meta.userEmail
+          ]);
+        });
+      });
+    });
+  });
+  return rows;
+}
+
+/** Appends ledger rows; never rewrites the tab, never touches earlier rows. */
+function appendSignOffLedger_(ss, rows) {
+  if (!rows || rows.length === 0) return 0;
+  const sheet = getOrCreateSheet_(ss, CONFIG.SIGN_OFF_SHEET);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setValues([SIGN_OFF_LEDGER_HEADERS]);
+    sheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
+    sheet.setFrozenRows(1);
+  }
+  sheet
+    .getRange(sheet.getLastRow() + 1, 1, rows.length, SIGN_OFF_LEDGER_HEADERS.length)
+    .setValues(rows.map(safeSheetRow_));
+  return rows.length;
+}
+
+/**
+ * Builds one history row per persisted state row. Payload chunks are user text,
+ * so every cell goes through safeSheetRow_ before it reaches setValues.
+ */
+function stateHistoryRows_(rows, revision, savedBy) {
+  return rows.map(function(row) {
+    return [
+      String(row[0] || ''), revision, Number(row[1]) || 0, Number(row[2]) || 0,
+      String(row[3] || ''), String(row[4] || ''), savedBy
+    ];
+  }).map(safeSheetRow_);
+}
+
+/**
+ * Copies the state rows that are about to be overwritten into
+ * `_FFM_STATE_HISTORY`, so a save can be undone. Only the newest
+ * CONFIG.HISTORY_LIMIT revisions are kept.
+ */
+function archiveStateRevision_(ss, revision, rows) {
+  const sheet = getOrCreateSheet_(ss, CONFIG.STATE_HISTORY_SHEET);
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, 7).setValues([['SliceKey', 'Revision', 'ChunkIndex', 'ChunkCount', 'SavedAt', 'PayloadChunk', 'SavedBy']]);
+    sheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
+    sheet.setFrozenRows(1);
+  }
+
+  let savedBy = '';
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0]) === '__META__' && Number(rows[i][1]) === 0) {
+      try {
+        savedBy = String(JSON.parse(String(rows[i][4] || '{}')).lastSavedBy || '');
+      } catch (e) {}
+      break;
+    }
+  }
+
+  const out = stateHistoryRows_(rows, revision, savedBy);
+  if (out.length === 0) return;
+  sheet.getRange(sheet.getLastRow() + 1, 1, out.length, 7).setValues(out);
+  pruneStateHistory_(sheet, CONFIG.HISTORY_LIMIT);
+}
+
+/**
+ * Revision keys to delete when more than `keep` are stored. Snapshots are
+ * archived oldest first, so only the oldest block(s) are ever dropped.
+ */
+function historyRevisionsToDrop_(order, keep) {
+  const list = Array.isArray(order) ? order : [];
+  const excess = list.length - Math.max(1, Number(keep) || 1);
+  return excess > 0 ? list.slice(0, excess) : [];
+}
+
+function pruneStateHistory_(sheet, keep) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const revisions = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+  const order = [];
+  revisions.forEach(function(cell) {
+    const key = String(cell[0] || '');
+    if (key && order.indexOf(key) === -1) order.push(key);
+  });
+  const drop = historyRevisionsToDrop_(order, keep);
+  if (drop.length === 0) return;
+  // History is append-only and oldest-first, so the dropped rows are a prefix.
+  let count = 0;
+  while (count < revisions.length && drop.indexOf(String(revisions[count][0] || '')) !== -1) {
+    count += 1;
+  }
+  if (count > 0) sheet.deleteRows(2, count);
+}
+
+/**
+ * Revision list for the History panel: the live revision plus the archived ones,
+ * newest first. Reads only the small metadata columns, never the payloads.
+ */
+function listStateRevisions() {
+  const current = loadWorkspaceState();
+  const sheet = getSpreadsheet_().getSheetByName(CONFIG.STATE_HISTORY_SHEET);
+  const revisions = [];
+  if (sheet && sheet.getLastRow() >= 2) {
+    const count = sheet.getLastRow() - 1;
+    const keys = sheet.getRange(2, 2, count, 1).getValues();
+    const times = sheet.getRange(2, 5, count, 1).getValues();
+    const bys = sheet.getRange(2, 7, count, 1).getValues();
+    for (let i = 0; i < count; i++) {
+      const revision = Number(keys[i][0]) || 0;
+      if (!revision || revisions.some(function(r) { return r.revision === revision; })) continue;
+      revisions.push({
+        revision: revision,
+        lastSavedAt: times[i][0] ? String(times[i][0]) : null,
+        lastSavedBy: bys[i][0] ? String(bys[i][0]) : null
+      });
+    }
+  }
+  return {
+    ok: true,
+    limit: CONFIG.HISTORY_LIMIT,
+    current: current.initialized
+      ? { revision: current.revision, lastSavedAt: current.lastSavedAt, lastSavedBy: current.lastSavedBy }
+      : null,
+    revisions: revisions.sort(function(a, b) { return b.revision - a.revision; })
+  };
+}
+
+/**
+ * One archived revision, reassembled exactly like the live store. Read-only:
+ * restoring is a normal save of this payload, so it becomes a new revision and
+ * the state it replaces stays in history.
+ */
+function loadStateRevision(revision) {
+  const target = Number(revision);
+  if (!target) return { ok: false, error: 'No revision number was supplied.' };
+  const sheet = getSpreadsheet_().getSheetByName(CONFIG.STATE_HISTORY_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) {
+    return { ok: false, error: 'No archived revisions yet.' };
+  }
+
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 7).getValues();
+  const grouped = {};
+  let savedAt = null;
+  let savedBy = null;
+  values.forEach(function(row) {
+    if (Number(row[1]) !== target) return;
+    const key = String(row[0] || '').trim();
+    if (!key) return;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push({ idx: Number(row[2]) || 0, count: Number(row[3]) || 0, text: String(row[5] || '') });
+    if (!savedAt && row[4]) savedAt = String(row[4]);
+    if (!savedBy && row[6]) savedBy = String(row[6]);
+  });
+
+  const data = {};
+  let corrupted = false;
+  PERSISTED_SLICES.forEach(function(slice) {
+    const result = parseChunkGroup_(grouped[slice]);
+    if (result.ok) data[slice] = result.value;
+    else if (!result.missing) corrupted = true;
+  });
+
+  if (Object.keys(data).length === 0) {
+    return { ok: false, error: 'Revision ' + target + ' is no longer in the history.' };
+  }
+  if (corrupted) {
+    return { ok: false, error: 'Revision ' + target + ' is stored incompletely and was not loaded.' };
+  }
+  return { ok: true, revision: target, lastSavedAt: savedAt, lastSavedBy: savedBy, data: data };
 }
 
 /**
@@ -651,22 +966,25 @@ function syncMirrorSheets_(ss, payload) {
 
   if (Array.isArray(payload.masterSpecs)) {
     const rows = payload.masterSpecs.map(function(s) {
+      const revisions = Array.isArray(s.revisions) ? s.revisions : [];
       return [
         s.id || '', s.code || '', s.name || '', s.unit || '',
-        s.lsl ?? '', s.nominal ?? '', s.usl ?? '', s.category || '', s.model || ''
+        s.lsl ?? '', s.nominal ?? '', s.usl ?? '', s.category || '', s.model || '',
+        s.effectiveFrom || '', revisions.length || 1
       ];
     });
-    writeTable('MasterSpecs', ['ID', 'ParamCode', 'Parameter', 'Unit', 'LSL', 'Nominal', 'USL', 'Category', 'Model'], rows);
+    writeTable('MasterSpecs', ['ID', 'ParamCode', 'Parameter', 'Unit', 'LSL', 'Nominal', 'USL', 'Category', 'Model', 'LimitsEffectiveFrom', 'LimitRevisions'], rows);
   }
 
   if (Array.isArray(payload.cpkRecords)) {
     const rows = payload.cpkRecords.map(function(c) {
       return [
         c.id || '', c.model || '', c.phase || '', c.side || '', c.config || '',
-        c.specId || '', c.mean ?? '', c.stdDev ?? '', c.sampleSize ?? '', c.date || ''
+        c.specId || '', c.mean ?? '', c.stdDev ?? '', c.sampleSize ?? '', c.date || '',
+        c.lsl ?? '', c.usl ?? '', c.cpkTarget ?? '', c.specRevisionId || ''
       ];
     });
-    writeTable('CpkRecords', ['ID', 'Model', 'Phase', 'Side', 'Config', 'ParamCode', 'Mean', 'StdDev', 'SampleSize', 'MeasuredDate'], rows);
+    writeTable('CpkRecords', ['ID', 'Model', 'Phase', 'Side', 'Config', 'ParamCode', 'Mean', 'StdDev', 'SampleSize', 'MeasuredDate', 'LSL', 'USL', 'CpkTarget', 'SpecRevision'], rows);
   }
 
   if (Array.isArray(payload.costProjects)) {

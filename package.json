@@ -1,12 +1,16 @@
 {
   "scripts": {
     "build": "bun tools/build.mjs",
-    "preview": "bun .preview/serve.mjs 5183"
+    "preview": "bun tools/preview-server.mjs 5183",
+    "state:import": "bun tools/import-state.mjs",
+    "test": "bun tools/test-fy-helpers.mjs && bun tools/test-cpk-freeze.mjs && bun tools/test-sheetjs-bundle.mjs && bun tools/test-review-fixes.mjs && bun tools/test-state-history.mjs && bun tools/test-generated-bundle.mjs && bun tools/test-spec-gap-fixes.mjs",
+    "deploy": "bun run build && clasp push -f && DESC=\"deploy $(git rev-parse --short HEAD)\" && V=$(clasp version \"$DESC\" | bun tools/parse-version.mjs) && echo \"Updating deployment to version $V ($DESC)\" && clasp update-deployment AKfycbz6y_8byEXlOxSWq6y5_azvp129b7CmlIfqhuNGA2BX-LrKTHVnmQdgHwylvx7yFE4C -V \"$V\" -d \"$DESC\""
   },
   "devDependencies": {
     "esbuild": "0.24.2",
     "react": "18.2.0",
     "react-dom": "18.2.0",
-    "tailwindcss": "3.4.17"
+    "tailwindcss": "3.4.17",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.2/xlsx-0.20.2.tgz"
   }
 }
