@@ -3493,7 +3493,7 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun, activeKey, onSelect }
             onClick={interactive ? () => onSelect(row) : undefined}
             aria-pressed={interactive ? active : undefined}
             title={interactive ? `Show the production records behind ${row.label}` : undefined}
-            className={`w-full text-left flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2 text-[11px] break-inside-avoid rounded-md ${
+            className={`w-full text-left flex flex-col gap-1 text-[11px] break-inside-avoid rounded-md ${
               active
                 ? 'bg-blue-50 dark:bg-blue-950/60 ring-1 ring-blue-300 dark:ring-blue-800 px-1.5 py-1 -mx-1.5'
                 : interactive
@@ -3501,37 +3501,38 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun, activeKey, onSelect }
                 : ''
             }`}
           >
-            {/* The label gets the full width on its own line below sm: the modal is
-                310px wide at a 375px viewport, and side-by-side every failure mode
-                was cut at 105px while the bar kept a 48px floor. */}
-            <span
-              className={`min-w-0 sm:w-44 truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
-              title={row.label}
-            >
-              {row.label}
-            </span>
-            <span className="flex w-full min-w-0 items-center gap-2 sm:flex-1">
+            {/* Label and numbers share the top line; the bar gets the full width
+                below. At 1280 the two-column deep dive leaves each chart 449px,
+                and an inline label plus all three numeric columns squeezed the
+                track to 48px. */}
+            <span className="flex w-full min-w-0 items-center gap-2">
               <span
-                className="block flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden"
-                title={row.isOthers ? 'Others is a group of smaller contributors; its bar uses the same scale as the other rows' : undefined}
+                className={`min-w-0 flex-1 truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
+                title={row.label}
               >
-                <span
-                  className={`block h-full ${row.isOthers ? 'bg-slate-400 dark:bg-slate-600' : vital ? 'bg-rose-500' : 'bg-rose-300 dark:bg-rose-800'}`}
-                  style={{ width: `${Math.max(1, Math.min(100, barShare))}%` }}
-                />
+                {row.label}
               </span>
               <span className={`w-14 sm:w-20 shrink-0 text-right font-semibold tabular-nums ${row.isOthers ? 'text-slate-500 dark:text-slate-400' : 'text-slate-700 dark:text-slate-300'}`}>
                 {Math.round(row.value).toLocaleString()} {unit}
               </span>
               <span className="w-9 sm:w-12 shrink-0 text-right tabular-nums text-slate-500 dark:text-slate-400">{share.toFixed(0)}%</span>
-              {/* Below sm the cumulative column is dropped so the bar keeps its
-                  width; the footer stops promising it there. */}
+              {/* Below sm the cumulative column is dropped to leave room for the
+                  label and value; the footer stops promising it there. */}
               <span
                 className={`hidden sm:inline-block w-16 shrink-0 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}
                 title="cumulative share"
               >
                 {cumulative.toFixed(0)}%
               </span>
+            </span>
+            <span
+              className="block w-full min-w-0 h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden"
+              title={row.isOthers ? 'Others is a group of smaller contributors; its bar uses the same scale as the other rows' : undefined}
+            >
+              <span
+                className={`block h-full ${row.isOthers ? 'bg-slate-400 dark:bg-slate-600' : vital ? 'bg-rose-500' : 'bg-rose-300 dark:bg-rose-800'}`}
+                style={{ width: `${Math.max(1, Math.min(100, barShare))}%` }}
+              />
             </span>
           </Row>
         );
