@@ -3469,11 +3469,11 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun, activeKey, onSelect }
         ])
       : shown;
 
-  // Bars read as a decline: the largest single mode fills the track. The
-  // percentage columns below still use the whole-range total, so the shape and
-  // the share-of-loss reading stay separate. Others is an aggregate, so its bar
-  // is capped at the same width and explained on hover.
-  const barMax = rows.reduce((max, row) => Math.max(max, row.value), 0);
+  // Bars read as a decline and the longest bar fills the track. Include the
+  // folded Others aggregate in the scale: when the tail is larger than the top
+  // mode, capping Others at the top mode's width makes the two look tied. The
+  // percentage columns still use the whole-range total.
+  const barMax = displayRows.reduce((max, row) => Math.max(max, row.value), 0);
   let cumulative = 0;
 
   return (
@@ -3513,7 +3513,7 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun, activeKey, onSelect }
             <span className="flex w-full min-w-0 items-center gap-2 sm:flex-1">
               <span
                 className="block flex-1 min-w-[3rem] h-2.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden"
-                title={row.isOthers ? 'Others is a group of smaller contributors; its bar is capped at the largest mode' : undefined}
+                title={row.isOthers ? 'Others is a group of smaller contributors; its bar uses the same scale as the other rows' : undefined}
               >
                 <span
                   className={`block h-full ${row.isOthers ? 'bg-slate-400 dark:bg-slate-600' : vital ? 'bg-rose-500' : 'bg-rose-300 dark:bg-rose-800'}`}
@@ -3538,8 +3538,8 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun, activeKey, onSelect }
       })}
       <div className="text-[10px] text-slate-400 dark:text-slate-400 pt-1">
         {tail.length > 0
-          ? `Showing the top ${shown.length} of ${rows.length} contributors — bars are scaled to the largest mode; solid bars cover the vital few (first 80% of loss)`
-          : 'Bars are scaled to the largest mode; solid bars are the vital few — the modes/categories making up the first 80% of total loss'}
+          ? `Showing the top ${shown.length} of ${rows.length} contributors — bars are scaled to the largest row (including Others); solid bars cover the vital few (first 80% of loss)`
+          : 'Bars are scaled to the largest row; solid bars are the vital few — the modes/categories making up the first 80% of total loss'}
         <span className="hidden sm:inline">; percentages are share of total and the last column is cumulative</span>
         {tail.length > 0 ? `; the remaining ${tail.length} are grouped as Others.` : '.'}
       </div>
