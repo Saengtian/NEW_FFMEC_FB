@@ -656,20 +656,17 @@ function GateWorkstreamMatrix({ projects, gateRecords, globalSide, scheduleOverr
 
     const prevGate = gateIdx > 0 ? NPI_GATES[gateIdx - 1] : null;
     const prevApproved = !prevGate || lineGates[prevGate.id]?.status === 'Approved';
-    const isDepLocked = status === 'Pending' && !prevApproved;
+    // The label and the owed-signature list read the same rule (gateStatusPrefix).
+    const label = gateStatusPrefix(status, prevApproved);
 
     let styleClass = 'bg-slate-50 dark:bg-slate-800 text-slate-400 dark:text-slate-400 border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800';
-    let label = isDepLocked ? 'Dep.' : 'Pending';
 
     if (status === 'Approved') {
       styleClass = 'bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 dark:hover:bg-emerald-900 font-bold';
-      label = 'Pass';
     } else if (status === 'Blocked') {
       styleClass = 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800 hover:bg-rose-100 dark:hover:bg-rose-900 font-bold';
-      label = 'Hold';
     } else if (status === 'In Review' || status === 'Conditional') {
       styleClass = 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-700 hover:bg-amber-100 dark:hover:bg-amber-900 font-bold';
-      label = status === 'Conditional' ? 'Cond.' : 'Active';
     }
 
     return (
@@ -1114,10 +1111,9 @@ function SignOffLedgerView({ gateRecords, projects }) {
                   <span className="text-amber-700 dark:text-amber-300">{entry.line}</span>
                   <span className="text-amber-700 dark:text-amber-300">{entry.gate}</span>
                   <span>{entry.approver}</span>
-                  <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${decisionChip(entry.decision)}`}>
-                    {entry.decision}
+                  <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold tabular-nums ${decisionChip(entry.decision)}`}>
+                    {gateStatusPrefix(entry.decision)} {formatMonthDay(entry.at)}
                   </span>
-                  {entry.at && <span className="text-amber-700 dark:text-amber-300">{entry.at}</span>}
                 </div>
               ))}
               {reconciliation.missingFromLedger.length > 40 && (
@@ -1146,12 +1142,10 @@ function SignOffLedgerView({ gateRecords, projects }) {
                   <span className="text-amber-700 dark:text-amber-300">{entry.line}</span>
                   <span className="text-amber-700 dark:text-amber-300">{entry.gate}</span>
                   <span>{entry.approver}</span>
-                  <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${decisionChip(entry.decision)}`}>
-                    {entry.decision}
+                  <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold tabular-nums ${decisionChip(entry.decision)}`}>
+                    {gateStatusPrefix(entry.decision)} {formatMonthDay(entry.at)}
                   </span>
-                  <span className="text-amber-700 dark:text-amber-300">
-                    {entry.at} · Rev #{entry.revision}
-                  </span>
+                  <span className="text-amber-700 dark:text-amber-300">Rev #{entry.revision}</span>
                 </div>
               ))}
             </div>
@@ -1246,8 +1240,13 @@ function SignOffLedgerView({ gateRecords, projects }) {
                       {row.role}
                     </td>
                     <td className="py-2 px-2.5 whitespace-nowrap">
-                      <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-bold ${decisionChip(row.decision)}`}>
-                        {row.decision}
+                      {/* Same prefix + mm/dd shape as the matrix cells, so the
+                          ledger scans the same way: Pass 11/21. */}
+                      <span
+                        className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-bold tabular-nums ${decisionChip(row.decision)}`}
+                        title={`${row.decision} · ${String(row.timestamp).replace('T', ' ').slice(0, 16)}`}
+                      >
+                        {gateStatusPrefix(row.decision)} {formatMonthDay(row.timestamp)}
                       </span>
                     </td>
                     <td className="py-2 px-3 max-w-[280px] text-[11px] text-slate-600 dark:text-slate-300">

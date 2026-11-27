@@ -4484,8 +4484,10 @@ function TeamWorkloadDrawer({ member, workload, focus, onClose, onOpenTask, onOp
               }`}
             >
               {nextDeadline.count} signature{nextDeadline.count === 1 ? '' : 's'} blocking{' '}
-              {nextDeadline.first.projectModel} · {nextDeadline.first.lineKey}, due{' '}
-              {formatShortDate(nextDeadline.first.dueIso)}
+              {nextDeadline.first.projectModel} · {nextDeadline.first.lineKey},{' '}
+              <span className="tabular-nums">
+                {nextDeadline.first.gateStatus || 'Pending'} {formatMonthDay(nextDeadline.first.dueIso)}
+              </span>
               <div className="font-normal mt-0.5">
                 {nextDeadline.daysLeft < 0
                   ? `${Math.abs(nextDeadline.daysLeft)} day${Math.abs(nextDeadline.daysLeft) === 1 ? '' : 's'} past the plan date`
@@ -4545,11 +4547,22 @@ function TeamWorkloadDrawer({ member, workload, focus, onClose, onOpenTask, onOp
                           : 'text-slate-500 dark:text-slate-400'
                       }`}
                     >
-                      {item.dueIso
-                        ? diffDaysIso(todayIso(), item.dueIso) < 0
-                          ? `Overdue since ${formatShortDate(item.dueIso)}`
-                          : `Sign by ${formatShortDate(item.dueIso)}`
-                        : 'No plan date for this gate'}
+                      {/* The matrix's own prefix + mm/dd, so the same gate reads the
+                          same here: Dep. 01/03, Active 12/28, Pending 12/05. */}
+                      <span className="font-semibold tabular-nums">
+                        {item.dueIso
+                          ? `${item.gateStatus || 'Pending'} ${formatMonthDay(item.dueIso)}`
+                          : 'No plan date'}
+                      </span>
+                      {item.dueIso && (
+                        <span className="ml-1 tabular-nums opacity-90">
+                          {diffDaysIso(todayIso(), item.dueIso) < 0
+                            ? `· ${Math.abs(diffDaysIso(todayIso(), item.dueIso))}d overdue`
+                            : diffDaysIso(todayIso(), item.dueIso) === 0
+                              ? '· due today'
+                              : `· ${diffDaysIso(todayIso(), item.dueIso)}d left`}
+                        </span>
+                      )}
                       {' · '}
                       {item.decision === 'Rejected' ? 'rejected — must be re-signed' : 'awaiting the signature'}
                     </div>

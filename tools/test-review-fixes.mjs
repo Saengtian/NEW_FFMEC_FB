@@ -86,6 +86,7 @@ const DECLARATIONS = [
   /function unmatchedProducts\([\s\S]*?\n}/,
   /const GATE_SIGN_OFF_DUE_KEYS = \{[\s\S]*?\n\};/,
   /function gateSignOffDueIso\([\s\S]*?\n}/,
+  /function gateStatusPrefix\([\s\S]*?\n}/,
   /function lineGateSchedule\([\s\S]*?\n}/,
   /function compareSignOffsByDue\([\s\S]*?\n}/,
   /function computeTeamWorkload\([\s\S]*?\n}/,
@@ -102,7 +103,7 @@ const pieces = DECLARATIONS.map((pattern) => {
 
 const api = new Function(
   `"use strict";\n${pieces.join("\n")}\n` +
-    "return { currentFiscalYear, fiscalYearWindow, applySpecLimitEdit, kpiFiscalScopeLabel, stageDragReschedulePayload, isOpenableEvidenceUrl, purgePlaceholderEvidence, ganttStageGateDriver, ganttGateTone, GANTT_GATE_TONES, GANTT_GATE_UNSIGNED_TONE, stageMoveConflict, normalizePersonName, teamMemberForOwner, unassignedOpenTasks, distinctProductStrings, programModels, programFamilies, productMatchesProject, memberExternalPrograms, unmatchedProducts, formatShortDate, formatMonthDay, sampleQuantile, cpkBoxSummary, getDefaultScheduleForRow, gateSignOffDueIso, lineGateSchedule, compareSignOffsByDue, computeTeamWorkload };"
+    "return { currentFiscalYear, fiscalYearWindow, applySpecLimitEdit, kpiFiscalScopeLabel, stageDragReschedulePayload, isOpenableEvidenceUrl, purgePlaceholderEvidence, ganttStageGateDriver, ganttGateTone, GANTT_GATE_TONES, GANTT_GATE_UNSIGNED_TONE, stageMoveConflict, normalizePersonName, teamMemberForOwner, unassignedOpenTasks, distinctProductStrings, programModels, programFamilies, productMatchesProject, memberExternalPrograms, unmatchedProducts, formatShortDate, formatMonthDay, sampleQuantile, cpkBoxSummary, getDefaultScheduleForRow, gateSignOffDueIso, gateStatusPrefix, lineGateSchedule, compareSignOffsByDue, computeTeamWorkload };"
 )();
 
 // The gate decision ledger is written in Code.js, so its row builder is read out
@@ -585,6 +586,20 @@ check('the gate sequence runs forward from prep to PBR and ends past MIH', () =>
   });
   equal(dates[order.indexOf('mih')], schedule.mih);
 });
+check('one prefix rule names a gate state everywhere it is listed', () => {
+  equal(api.gateStatusPrefix('Approved'), 'Pass');
+  equal(api.gateStatusPrefix('Rejected'), 'Rej.');
+  equal(api.gateStatusPrefix('Blocked'), 'Hold');
+  equal(api.gateStatusPrefix('In Review'), 'Active');
+  equal(api.gateStatusPrefix('Conditional'), 'Cond.');
+  equal(api.gateStatusPrefix('Pending'), 'Pending');
+  // A pending gate whose predecessor has not cleared is blocked by the sequence,
+  // which reads differently from "next thing to do".
+  equal(api.gateStatusPrefix('Pending', false), 'Dep.');
+  equal(api.gateStatusPrefix(undefined, false), 'Dep.');
+  equal(api.gateStatusPrefix(undefined, true), 'Pending');
+});
+
 check('a signature carries its deadline and the override moves it', () => {
   const member = { id: 'TM-99', name: 'Saengtian', products: [] };
   const load = api.computeTeamWorkload(member, TEAM_PROJECTS, TEAM_TASKS, TEAM_GATES, TEAM_MEMBERS, {});

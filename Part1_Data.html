@@ -1204,6 +1204,23 @@ function gateSignOffDueIso(gateId, schedule) {
 }
 
 /**
+ * The short prefix that goes in front of a date, wherever a gate is listed: the
+ * matrix cell, the ledger's decision chip, the signatures-owed list. One rule, so a
+ * scanner reads the same word for the same state everywhere — `Pass` once approved,
+ * `Hold` when blocked, `Active` while in review, `Dep.` while an earlier gate has
+ * not cleared, `Pending` when it is simply next.
+ */
+function gateStatusPrefix(status, dependencyMet = true) {
+  const value = String(status || 'Pending');
+  if (value === 'Approved') return 'Pass';
+  if (value === 'Rejected') return 'Rej.';
+  if (value === 'Blocked') return 'Hold';
+  if (value === 'In Review') return 'Active';
+  if (value === 'Conditional') return 'Cond.';
+  return dependencyMet ? 'Pending' : 'Dep.';
+}
+
+/**
  * The plan a line's gates are measured against: a dragged schedule if someone set
  * one, otherwise the default sequence built back from that row's FATP MIH.
  */
@@ -1298,11 +1315,18 @@ function computeTeamWorkload(member, projects, tasks, gateRecords, teamMembers, 
             .split('/')
             .map(normalizePersonName);
           if (!name || !named.includes(name)) return;
+          // The gate's own state, not just the approver's, so the owed list can
+          // say `Dep. 01/03` the way the matrix does: blocked by an earlier gate
+          // reads differently from the next thing to do.
+          const gateIdx = NPI_GATES.findIndex((gate) => gate.id === gateId);
+          const previousGate = gateIdx > 0 ? NPI_GATES[gateIdx - 1] : null;
+          const dependencyMet = !previousGate || lineGates[previousGate.id]?.status === 'Approved';
           signOffs.push({
             projectId,
             projectModel: project.model,
             lineKey,
             gateId,
+            gateStatus: gateStatusPrefix(dossier?.status || 'Pending', dependencyMet),
             // When this line's plan needs the signature to keep its build date.
             dueIso: gateSignOffDueIso(gateId, schedule),
             decision: approver.decision || 'Pending',
