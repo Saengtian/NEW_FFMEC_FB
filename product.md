@@ -38,7 +38,8 @@ The app answers those, and refuses to answer the rest with invented numbers.
 2. **A limit that is not real capability.** Six CTQs still carry placeholder limits. They are
    flagged provisional, render neutral, and never count as capable.
 3. **Every gate decision is attributable.** Approvals record who, when, role, decision, remark and
-   the signed-in email; the ledger is append-only.
+   the signed-in email; decision rows are append-only, and a commit marker distinguishes them from rows
+   left by a save whose state write failed.
 4. **One scope, everywhere.** A single Global Scope (family · model · phase · side · process) narrows
    every view, the KPI tiles, the deep dives and the report.
 5. **The report is the app, printed.** The KPI deck is generated from the same model the screen uses;
@@ -117,6 +118,8 @@ whole app crosses into the next fiscal year together on 1 April rather than on a
    people saving at once end in a revision conflict rather than a merge.
 3. The sign-off ledger records only decisions changed by a save, and is appended before the state
    write; a ledger failure refuses the save rather than committing a signature without its audit row.
+   A row from a state write that failed remains uncommitted and is reported by reconciliation, not
+   silently re-baselined.
    The next app load still repairs legacy gaps (the client calls `reconcileSignOffLedger()`, which
    appends only the missing decisions), but only while the two revisions that bracket the legacy gap
    are still in history — five saves deep.

@@ -4659,10 +4659,10 @@ function buildSampleCpkCsv(mode = 'wide') {
 
 // ---------------------------------------------------------------- sign-off ledger
 //
-// `SignOffLog` is the append-only gate decision ledger. A save appends to it
-// before the state store commits, so a committed signature cannot be missing
-// from the ledger. These helpers read it back, export it, and name where a legacy
-// gap or hand edit disagrees with the state.
+// `SignOffLog` keeps append-only gate decision rows; each save attempt stamps
+// their commit marker after the state store commits, so a failed write leaves a
+// distinguishable uncommitted row. These helpers read it back, export it, and
+// name where a legacy gap or hand edit disagrees with the state.
 
 const SIGN_OFF_LEDGER_DECISIONS = ['Approved', 'Conditional', 'Rejected'];
 

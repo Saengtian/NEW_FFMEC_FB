@@ -92,6 +92,20 @@ function createToastController(options) {
   };
 }
 
+/**
+ * Stable id for one logical save. The same payload at the same revision reuses
+ * the id after a failure, so the server can recognise its uncommitted ledger
+ * rows instead of appending them again.
+ */
+function makeSaveAttemptId() {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return 'SA-' + crypto.randomUUID();
+    }
+  } catch (e) {}
+  return 'SA-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
 /** Interpret a saveWorkspaceState response, including a stale-client conflict. */
 function resolveSaveResult(res, currentRevision) {
   if (res && res.ok === false && res.conflict) {
@@ -281,6 +295,7 @@ function App() {
   const isHydratingRef = useRef(false);
   const revisionRef = useRef(0);
   const pushRef = useRef(null);
+  const saveAttemptRef = useRef(null);
   const saveSchedulerRef = useRef(null);
   const restoreInputRef = useRef(null);
   const syncConflictRef = useRef(null);
@@ -438,12 +453,22 @@ function App() {
     setCloudSync((prev) => ({ ...prev, status: 'saving', errorMsg: null }));
     const payloadJson = JSON.stringify(payload || buildWorkspacePayload());
     const expectedRevision = expectedRevisionOption !== undefined ? expectedRevisionOption : revisionRef.current;
+    const saveAttemptKey = `${expectedRevision}\u0000${payloadJson}`;
+    const previousAttempt = saveAttemptRef.current;
+    const attemptId = previousAttempt && previousAttempt.key === saveAttemptKey
+      ? previousAttempt.id
+      : makeSaveAttemptId();
+    saveAttemptRef.current = { id: attemptId, key: saveAttemptKey };
     window.google.script.run
       .withSuccessHandler((res) => {
         const outcome = resolveSaveResult(res, revisionRef.current);
         if (outcome.conflict) {
+          saveAttemptRef.current = null;
           openSyncConflict(outcome.revision);
           return;
+        }
+        if (saveAttemptRef.current && saveAttemptRef.current.id === attemptId) {
+          saveAttemptRef.current = null;
         }
         revisionRef.current = outcome.revision;
         setCloudSync((prev) => ({
@@ -466,7 +491,7 @@ function App() {
         setCloudSync((prev) => ({ ...prev, status: 'error', errorMsg: msg }));
         showToast(`Sheet sync error: ${msg}`, 'error');
       })
-      .saveWorkspaceState(payloadJson, summaryText, expectedRevision, refreshMirrors);
+      .saveWorkspaceState(payloadJson, summaryText, expectedRevision, refreshMirrors, attemptId);
   };
   pushRef.current = pushToGoogleSheet;
 
@@ -671,12 +696,17 @@ function App() {
 
           // Self-healing SignOffLog: the save path refuses to commit when the
           // ledger append fails, so a new save cannot leave a missing row. This
-          // reconciliation still repairs legacy gaps from archived revisions. The
-          // server answers from two small reads when the ledger is in sync and
-          // only replays the archived revisions when the row count disagrees.
+          // reconciliation still repairs legacy gaps from archived revisions and
+          // reports rows left behind by a failed state write as uncommitted.
           window.google.script.run
             .withSuccessHandler((repair) => {
-              if (repair && repair.appended > 0) {
+              if (repair && repair.uncommittedCount > 0) {
+                showToast(
+                  repair.reason ||
+                    `${repair.uncommittedCount} sign-off ledger row(s) were written by a save that did not commit.`,
+                  'error'
+                );
+              } else if (repair && repair.appended > 0) {
                 showToast(
                   `Restored ${repair.appended} gate decision${repair.appended === 1 ? '' : 's'} missing from the sign-off ledger.`,
                   'success'

@@ -16,11 +16,11 @@
  *    timestamp of the last rebuild are kept in script properties and shown
  *    in the menu, so a stale mirror is visible rather than silent.
  *  - AuditLog is appended on every committed save.
- *  - SignOffLog is the append-only gate decision ledger: one immutable row per
+ *  - SignOffLog keeps append-only gate decision rows: one immutable row per
  *    changed gate decision (program, line, gate, approver, decision, timestamp,
  *    signed-in email), written inside the same save lock and before the mutable
- *    store commits, so "who approved what" is answered from its own tab instead
- *    of from the mutable gateRecords JSON.
+ *    store commits. A SaveAttemptID and CommittedAt marker distinguish a row
+ *    left by a failed state write from a committed decision.
  *  - Concurrency safe via LockService.getScriptLock().
  *  - Runs as the accessing user (executeAs USER_ACCESSING), so the AuditLog can
  *    attribute every save and sign-off to the signed-in Google account. Saves
@@ -63,7 +63,8 @@ const BACKUP_HANDLER = 'exportStateBackup';
 
 const SIGN_OFF_LEDGER_HEADERS = [
   'Timestamp', 'Revision', 'ProgramID', 'Program', 'Line', 'Gate',
-  'Approver', 'Role', 'Decision', 'Remark', 'SignedInEmail'
+  'Approver', 'Role', 'Decision', 'Remark', 'SignedInEmail',
+  'SaveAttemptID', 'CommittedAt'
 ];
 
 // Gate names for the ledger only. The web app keeps its own NPI_GATES constant,
@@ -257,6 +258,22 @@ function ensureAllTabs_() {
     ledgerSheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setValues([SIGN_OFF_LEDGER_HEADERS]);
     ledgerSheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
     ledgerSheet.setFrozenRows(1);
+  } else {
+    // Migrate an older 11-column SignOffLog in place: existing decision rows keep
+    // their values and are treated as committed legacy rows (blank attempt id).
+    if (typeof ledgerSheet.getMaxColumns === 'function' &&
+        ledgerSheet.getMaxColumns() < SIGN_OFF_LEDGER_HEADERS.length) {
+      ledgerSheet.insertColumnsAfter(
+        ledgerSheet.getMaxColumns(),
+        SIGN_OFF_LEDGER_HEADERS.length - ledgerSheet.getMaxColumns()
+      );
+    }
+    const ledgerHeader = ledgerSheet.getRange(1, 1, 1, SIGN_OFF_LEDGER_HEADERS.length).getValues()[0] || [];
+    if (String(ledgerHeader[11] || '') !== SIGN_OFF_LEDGER_HEADERS[11] ||
+        String(ledgerHeader[12] || '') !== SIGN_OFF_LEDGER_HEADERS[12]) {
+      ledgerSheet.getRange(1, 12, 1, 2).setValues([[SIGN_OFF_LEDGER_HEADERS[11], SIGN_OFF_LEDGER_HEADERS[12]]]);
+      ledgerSheet.getRange(1, 12, 1, 2).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
+    }
   }
   const historySheet = getOrCreateSheet_(ss, CONFIG.STATE_HISTORY_SHEET);
   if (historySheet.getLastRow() === 0) {
@@ -285,7 +302,7 @@ function protectManagedTabs_(ss, force) {
   protectManagedTab_(ss, CONFIG.AUDIT_SHEET,
     'FFM NPI Ops — append-only audit trail. Do not edit by hand.', force);
   protectManagedTab_(ss, CONFIG.SIGN_OFF_SHEET,
-    'FFM NPI Ops — append-only gate sign-off ledger. Do not edit by hand.', force);
+    'FFM NPI Ops — append-only gate sign-off decisions; the app stamps their commit marker after a successful save. Do not edit by hand.', force);
 }
 
 function protectManagedTab_(ss, tabName, description, force) {
@@ -364,8 +381,8 @@ function getSignOffLedger() {
   return { ok: true, rows: readSignOffLedgerRows_(ss), sheetUrl: sheetUrl, readAt: readAt, userEmail: userEmail };
 }
 
-/** The ledger tab as plain objects. Read-only: never creates the tab or a lock. */
-function readSignOffLedgerRows_(ss) {
+/** The ledger tab including attempt metadata. Internal: the public view stays 11 columns. */
+function readSignOffLedgerRecords_(ss) {
   const sheet = ss.getSheetByName(CONFIG.SIGN_OFF_SHEET);
   if (!sheet || sheet.getLastRow() < 2) return [];
   const values = sheet
@@ -392,10 +409,31 @@ function readSignOffLedgerRows_(ss) {
       role: cell(7),
       decision: cell(8),
       remark: cell(9),
-      signedInEmail: cell(10)
+      signedInEmail: cell(10),
+      attemptId: cell(11),
+      committedAt: cell(12)
     });
   }
   return rows;
+}
+
+/** The ledger tab as plain decision objects. Read-only: never creates the tab or a lock. */
+function readSignOffLedgerRows_(ss) {
+  return readSignOffLedgerRecords_(ss).map(function(row) {
+    return {
+      timestamp: row.timestamp,
+      revision: row.revision,
+      programId: row.programId,
+      program: row.program,
+      line: row.line,
+      gate: row.gate,
+      approver: row.approver,
+      role: row.role,
+      decision: row.decision,
+      remark: row.remark,
+      signedInEmail: row.signedInEmail
+    };
+  });
 }
 
 /** Rows the ledger holds, header excluded. */
@@ -1228,13 +1266,23 @@ function foreignSignOffEdits_(previousGateRecords, nextGateRecords, actorName, a
   });
 }
 
+/** Safe, retry-stable identifier for one logical save. */
+function newSaveAttemptId_() {
+  try {
+    if (typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function') {
+      return 'SA-' + Utilities.getUuid();
+    }
+  } catch (e) {}
+  return 'SA-' + new Date().getTime().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
 /**
  * Persists all workspace slices to `_FFM_STATE_STORE`, the single authoritative
  * copy of the workspace. Mirror tabs are derived reports and are only rebuilt
  * when `refreshMirrors` is true (explicit manual save or seed), which keeps the
  * debounced autosave cheap.
  */
-function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirrors) {
+function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirrors, saveAttemptId) {
   // Reject unauthenticated saves server-side: the web app runs as the accessing
   // user, and a save with no identity could not be attributed or defended.
   const userEmail = getActiveUserEmail_();
@@ -1336,6 +1384,7 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
     }
 
     const nextRevision = prevRevision + 1;
+    const attemptId = (String(saveAttemptId || '').trim() || newSaveAttemptId_()).slice(0, 80);
     const metaObj = {
       revision: nextRevision,
       lastSavedAt: nowIso,
@@ -1370,16 +1419,18 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
         timestamp: nowIso,
         revision: nextRevision,
         userEmail: userEmail,
-        actorRole: permissions.actorRole
+        actorRole: permissions.actorRole,
+        saveAttemptId: attemptId
       });
     }
 
     // The ledger is the audit trail, so write it before the mutable store. If
     // this append fails the save is refused while the old state is still intact:
-    // a signature can never be committed without its immutable ledger row. The
-    // append checks ledger identity, so retrying a save after a later failure
-    // cannot duplicate a decision. Keep any legacy count gap across this save so
-    // a later reconcile can still see it.
+    // a signature can never be committed without its immutable ledger row. A row
+    // carries the save attempt id but starts without a commit marker; retrying
+    // the same attempt cannot duplicate it, and a failed state write leaves it
+    // visibly uncommitted. Keep any legacy count gap across this save so a later
+    // reconcile can still see it.
     const ledgerBefore = ledgerRowCount_(ss);
     const ledgerGap = Math.max(0, readLedgerExpectation_() - ledgerBefore);
     let ledgerAppended = 0;
@@ -1427,6 +1478,19 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       );
     }
 
+    // State is committed. Stamp the attempt's ledger rows in one range so a
+    // retry that appended nothing is also marked. A marker failure is reported
+    // but cannot undo the commit; reconciliation will surface those rows.
+    let commitMarkerError = '';
+    if (signOffRows.length > 0) {
+      try {
+        markSignOffAttemptCommitted_(ss, attemptId, nowIso);
+      } catch (markerErr) {
+        commitMarkerError = errorMessage_(markerErr);
+        console.error('SignOffLog commit marker could not be set: ' + commitMarkerError);
+      }
+    }
+
     // Mirror tabs are derived reports: rebuild them only on an explicit save.
     if (refreshMirrors) {
       syncMirrorSheets_(ss, payload);
@@ -1449,14 +1513,23 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
     // instead of hiding it behind this successful save.
     markLedgerExpectation_(ledgerBefore + ledgerAppended + ledgerGap);
 
+    const warnings = [];
+    if (commitMarkerError) {
+      warnings.push(
+        'The signed-off decisions are saved, but their ledger commit marker could not be written (' +
+        commitMarkerError + '). They will be reported as uncommitted until the ledger can be repaired.'
+      );
+    }
+
     return {
       ok: true,
       revision: nextRevision,
       lastSavedAt: nowIso,
       lastSavedBy: actorLabel,
       userEmail: userEmail,
-      signOffLedger: { appended: ledgerAppended, error: '' },
-      warnings: []
+      saveAttemptId: attemptId,
+      signOffLedger: { appended: ledgerAppended, error: commitMarkerError },
+      warnings: warnings
     };
   } finally {
     lock.releaseLock();
@@ -1497,7 +1570,9 @@ function signOffLedgerRows(previousGateRecords, nextGateRecords, projects, meta)
         String(meta.actorRole || edit.role || ''),
         edit.decision,
         edit.remark,
-        meta.userEmail
+        meta.userEmail,
+        String(meta.saveAttemptId || ''),
+        ''
       ];
     });
 }
@@ -1513,7 +1588,7 @@ function previousSlice_(rows, key) {
   return parsed.ok ? parsed.value : null;
 }
 
-/** Appends ledger rows; never rewrites the tab, never touches earlier rows. */
+/** Appends decision rows; their commit marker is stamped later, never their decision fields. */
 function appendSignOffLedger_(ss, rows) {
   if (!rows || rows.length === 0) return 0;
   const sheet = getOrCreateSheet_(ss, CONFIG.SIGN_OFF_SHEET);
@@ -1529,26 +1604,67 @@ function appendSignOffLedger_(ss, rows) {
 }
 
 /**
- * Appends only the rows the tab does not already hold. A decision's identity is
- * the revision plus the program, line, gate, approver and decision, so a retry
- * after a save wrote the ledger but failed to commit the store cannot duplicate
- * the audit row. The caller decides whether an append failure should fail the
- * save; the save path writes this before the mutable store.
+ * Appends only the rows the tab does not already hold. A new decision is keyed
+ * by its save attempt plus the program, line, gate, approver and decision, so a
+ * retry after a failed state write reuses the same attempt id instead of
+ * duplicating the row. Legacy rows without an attempt id keep the revision-based
+ * key. The caller decides whether an append failure should fail the save; the
+ * save path writes this before the mutable store.
  */
 function appendSignOffLedgerOnce_(ss, rows) {
   if (!rows || rows.length === 0) return 0;
   const known = {};
-  readSignOffLedgerRows_(ss).forEach(function(row) {
-    known[ledgerRowKey_(row.revision, row.programId, row.line, row.gate, row.approver, row.decision)] = true;
+  readSignOffLedgerRecords_(ss).forEach(function(row) {
+    const key = row.attemptId
+      ? ledgerAttemptRowKey_(row.attemptId, row.programId, row.line, row.gate, row.approver, row.decision)
+      : ledgerRowKey_(row.revision, row.programId, row.line, row.gate, row.approver, row.decision);
+    known[key] = true;
   });
   const fresh = [];
   rows.forEach(function(row) {
-    const key = ledgerRowKey_(row[1], row[2], row[4], row[5], row[6], row[8]);
+    const key = row[11]
+      ? ledgerAttemptRowKey_(row[11], row[2], row[4], row[5], row[6], row[8])
+      : ledgerRowKey_(row[1], row[2], row[4], row[5], row[6], row[8]);
     if (known[key]) return;
     known[key] = true;
     fresh.push(row);
   });
   return appendSignOffLedger_(ss, fresh);
+}
+
+/**
+ * Stamps the commit timestamp on every ledger row written by one save attempt.
+ * The decision columns are never changed; this is the marker that says the state
+ * write for that attempt succeeded. A failure here is reported by the save but
+ * does not undo the state commit, and reconciliation will surface the rows.
+ */
+function markSignOffAttemptCommitted_(ss, attemptId, committedAt) {
+  if (!attemptId) return 0;
+  const sheet = ss.getSheetByName(CONFIG.SIGN_OFF_SHEET);
+  if (!sheet || sheet.getLastRow() < 2) return 0;
+  const values = sheet
+    .getRange(2, 1, sheet.getLastRow() - 1, SIGN_OFF_LEDGER_HEADERS.length)
+    .getValues();
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < values.length; i++) {
+    if (String(values[i][11] || '').trim() !== attemptId) continue;
+    if (first < 0) first = i;
+    last = i;
+  }
+  if (first < 0) return 0;
+  const markerColumn = SIGN_OFF_LEDGER_HEADERS.length; // CommittedAt is the last ledger column.
+  const markers = sheet.getRange(2 + first, markerColumn, last - first + 1, 1).getValues();
+  let marked = 0;
+  for (let i = first; i <= last; i++) {
+    if (String(values[i][11] || '').trim() !== attemptId) continue;
+    markers[i - first][0] = committedAt;
+    marked++;
+  }
+  if (marked > 0) {
+    sheet.getRange(2 + first, markerColumn, markers.length, 1).setValues(markers);
+  }
+  return marked;
 }
 
 /**
@@ -1560,6 +1676,21 @@ function appendSignOffLedgerOnce_(ss, rows) {
 function ledgerRowKey_(revision, programId, line, gate, approver, decision) {
   return [
     String(Number(revision) || 0),
+    String(programId || '').trim(),
+    String(line || '').trim(),
+    String(gate || '').trim(),
+    identityKey_(approver),
+    String(decision || '').trim()
+  ].join('\u0000');
+}
+
+/**
+ * Retry identity: a save attempt can revisit a decision without appending the
+ * same row again, even if a caller resends it with a different revision.
+ */
+function ledgerAttemptRowKey_(attemptId, programId, line, gate, approver, decision) {
+  return [
+    String(attemptId || '').trim(),
     String(programId || '').trim(),
     String(line || '').trim(),
     String(gate || '').trim(),
@@ -1619,12 +1750,9 @@ function historySnapshots_(rows) {
 
 /**
  * Decisions a consecutive pair of snapshots recorded that the ledger does not
- * hold. The rows are built exactly as the save would have built them — same
- * timestamp, revision, gate label, role and signed-in email — so a repaired row
- * is indistinguishable from one the failed append would have written.
- *
- * Only decisions are repaired: an erased signature has no decision to record, and
- * the ledger is append-only.
+ * hold. The first 11 columns match what the save would have written; the repair
+ * carries no save-attempt id and is stamped committed because the archived state
+ * proves the save committed. Only decisions are repaired.
  */
 function missingSignOffLedgerRows_(snapshots, ledgerRows) {
   const known = {};
@@ -1672,7 +1800,9 @@ function missingSignOffLedgerRows_(snapshots, ledgerRows) {
           String((actor && actor.role) || edit.role || ''),
           edit.decision,
           edit.remark,
-          String(next.savedBy || '')
+          String(next.savedBy || ''),
+          '',
+          next.savedAt || new Date().toISOString()
         ]);
       });
   }
@@ -1688,9 +1818,10 @@ function missingSignOffLedgerRows_(snapshots, ledgerRows) {
  * edit — on the next load, under the same lock a save takes, by replaying the
  * archived revisions against the tab and appending only the decisions missing.
  *
- * The cheap check comes first: script properties remember how many rows the tab
- * should hold, so a healthy store returns after two small reads and never touches
- * the history. Only a count mismatch pays for the replay.
+ * The cheap checks come first: script properties remember how many rows the tab
+ * should hold, and the ledger is read to look for uncommitted attempt rows. A
+ * healthy store never touches the archived history; only a clean count mismatch
+ * pays for the replay.
  */
 function reconcileSignOffLedger() {
   const userEmail = getActiveUserEmail_();
@@ -1717,6 +1848,41 @@ function reconcileSignOffLedger() {
 
     const actual = ledgerRowCount_(ss);
     const expected = readLedgerExpectation_();
+    const ledgerRecords = readSignOffLedgerRecords_(ss);
+    const uncommittedRows = ledgerRecords.filter(function(row) {
+      return Boolean(String(row.attemptId || '').trim()) && !String(row.committedAt || '').trim();
+    });
+
+    // A row that was written before a failed state write is not a decision the
+    // workspace committed. Report it; never count it as a baseline or repair it
+    // silently. This is checked even when the stored count matches, because a
+    // failed marker write can leave the count misleadingly healthy.
+    if (uncommittedRows.length > 0) {
+      return {
+        ok: true,
+        appended: 0,
+        revision: state.revision,
+        inSync: false,
+        uncommittedCount: uncommittedRows.length,
+        uncommitted: uncommittedRows.map(function(row) {
+          return {
+            timestamp: row.timestamp,
+            revision: row.revision,
+            programId: row.programId,
+            program: row.program,
+            line: row.line,
+            gate: row.gate,
+            approver: row.approver,
+            decision: row.decision,
+            attemptId: row.attemptId
+          };
+        }),
+        reason:
+          uncommittedRows.length + ' SignOffLog decision row(s) belong to a save attempt whose state write did not commit. ' +
+          'The ledger was left untouched for review; retry the failed save or remove the row after checking it.'
+      };
+    }
+
     if (actual === expected) {
       return { ok: true, appended: 0, revision: state.revision, inSync: true };
     }
@@ -1746,7 +1912,7 @@ function reconcileSignOffLedger() {
       data: state.data
     });
 
-    const rows = missingSignOffLedgerRows_(snapshots, readSignOffLedgerRows_(ss));
+    const rows = missingSignOffLedgerRows_(snapshots, ledgerRecords);
     if (rows.length === 0) {
       // The gap was not a missing decision (a hand-added row, or an append that
       // was written and then cleared). Re-baseline so the check stays cheap.

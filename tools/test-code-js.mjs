@@ -283,9 +283,9 @@ const reset = () => {
 };
 
 const sheetOf = (name) => store.sheets.get(name);
-const save = ({ payload, as = "owner@minebea.co.th", revision, summary = "test save", mirrors = false }) => {
+const save = ({ payload, as = "owner@minebea.co.th", revision, summary = "test save", mirrors = false, attempt }) => {
   session.email = as;
-  return api.saveWorkspaceState(JSON.stringify(payload), summary, revision, mirrors);
+  return api.saveWorkspaceState(JSON.stringify(payload), summary, revision, mirrors, attempt);
 };
 const ownerSave = (payload, revision) => save({ payload, as: "owner@minebea.co.th", revision });
 const stateRows = () => sheetOf(api.CONFIG.STATE_SHEET).rows.slice(1);
@@ -613,12 +613,24 @@ check("a member signing their own decision is allowed", () => {
 
 const ledgerRows = () => (sheetOf("SignOffLog") ? sheetOf("SignOffLog").rows : []);
 const ledgerData = () => ledgerRows().slice(1);
+const EXPECTED_PROP = "FFM_SIGN_OFF_LEDGER_ROWS";
 
 check("the seed writes no ledger rows: there is no previous state to compare", () => {
   reset();
   ownerSave(payloadOf({ gateRecords: gateRecordsWith([{ name: "Quality", decision: "Approved" }]) }));
   equal(ledgerRows()[0][0], "Timestamp", "the header exists");
   equal(ledgerData().length, 0, "seeding a dossier is not somebody approving");
+});
+
+check("an older 11-column ledger header is migrated in place", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  const sheet = sheetOf("SignOffLog");
+  sheet.rows[0] = sheet.rows[0].slice(0, 11);
+  ownerSave(payloadOf({ tasks: [] }), 1);
+  equal(sheet.rows[0][11], "SaveAttemptID");
+  equal(sheet.rows[0][12], "CommittedAt");
+  equal(ledgerData().length, 0, "the migration does not invent a decision");
 });
 
 check("a changed decision appends exactly one ledger row, named and attributed", () => {
@@ -752,11 +764,11 @@ check("a retry cannot duplicate a decision already in the ledger", () => {
   reset();
   ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
   // Simulate a ledger row whose state commit failed: the retry must not append
-  // the same decision again. The identity is revision + program + line + gate +
-  // approver + decision; the timestamp and remark are not part of it.
+  // the same decision again. The row's revision differs from the retry's next
+  // revision; the matching save attempt id is what makes it the same attempt.
   const existing = [
     "2026-11-20T00:00:00.000Z",
-    2,
+    1,
     "PRJ-X4151",
     "X4151",
     LINE_KEY,
@@ -765,19 +777,109 @@ check("a retry cannot duplicate a decision already in the ledger", () => {
     "NPI Engineer",
     "Approved",
     "",
-    "engineer@minebea.co.th"
+    "engineer@minebea.co.th",
+    "SA-retry",
+    ""
   ];
   sheetOf("SignOffLog").appendRow(existing);
 
   const retry = save({
     payload: payloadOf({ gateRecords: gateRecordsWith([{ name: "Engineer", decision: "Approved" }]) }),
     as: "engineer@minebea.co.th",
-    revision: 1
+    revision: 1,
+    attempt: "SA-retry"
   });
   equal(retry.ok, true);
   equal(retry.signOffLedger.appended, 0);
   equal(ledgerData().length, 1);
-  deep(ledgerData()[0], existing);
+  deep(ledgerData()[0].slice(0, 11), existing.slice(0, 11), "the decision fields did not change");
+  equal(ledgerData()[0][11], "SA-retry");
+  assert.ok(ledgerData()[0][12], "the retry stamps the existing row committed");
+});
+
+check("a row from a failed state write is reported uncommitted, then committed by its retry", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  const stateSheet = sheetOf("_FFM_STATE_STORE");
+  stateSheet.failNextSetValuesFromRow = 1;
+
+  assert.throws(
+    () =>
+      save({
+        payload: payloadOf({ gateRecords: gateRecordsWith([{ name: "Engineer", decision: "Approved" }]) }),
+        as: "engineer@minebea.co.th",
+        revision: 1,
+        attempt: "SA-failed"
+      }),
+    /_FFM_STATE_STORE could not be written.*previous revision was restored/
+  );
+  equal(ledgerData().length, 1, "the decision row was written before the failed commit");
+  equal(ledgerData()[0][11], "SA-failed");
+  equal(ledgerData()[0][12], "", "the row has no commit marker");
+
+  // Make the stored count look healthy too: reconciliation must still report the
+  // uncommitted row instead of treating the count as a baseline.
+  store.properties[EXPECTED_PROP] = "1";
+  const report = api.reconcileSignOffLedger();
+  equal(report.ok, true);
+  equal(report.inSync, false);
+  equal(report.appended, 0);
+  equal(report.uncommittedCount, 1);
+  equal(report.uncommitted[0].attemptId, "SA-failed");
+  equal(report.rebaselined, undefined, "an uncommitted row is not silently re-baselined");
+  equal(store.properties[EXPECTED_PROP], "1");
+  equal(ledgerData()[0][12], "", "reconciliation did not mark the row");
+
+  const retry = save({
+    payload: payloadOf({ gateRecords: gateRecordsWith([{ name: "Engineer", decision: "Approved" }]) }),
+    as: "engineer@minebea.co.th",
+    revision: 1,
+    attempt: "SA-failed"
+  });
+  equal(retry.ok, true);
+  equal(retry.signOffLedger.appended, 0, "the retry reuses its uncommitted row");
+  equal(retry.revision, 2);
+  equal(ledgerData().length, 1);
+  assert.ok(ledgerData()[0][12], "the successful state write stamps the row committed");
+  const after = api.reconcileSignOffLedger();
+  equal(after.ok, true);
+  equal(after.inSync, true);
+  equal(after.appended, 0);
+});
+
+check("a new attempt commits its own row and leaves the failed attempt's row reported", () => {
+  reset();
+  ownerSave(payloadOf({ gateRecords: gateRecordsWith([]) }));
+  const stateSheet = sheetOf("_FFM_STATE_STORE");
+  stateSheet.failNextSetValuesFromRow = 1;
+  assert.throws(
+    () =>
+      save({
+        payload: payloadOf({ gateRecords: gateRecordsWith([{ name: "Engineer", decision: "Approved" }]) }),
+        as: "engineer@minebea.co.th",
+        revision: 1,
+        attempt: "SA-abandoned"
+      }),
+    /_FFM_STATE_STORE could not be written/
+  );
+  const committed = save({
+    payload: payloadOf({ gateRecords: gateRecordsWith([{ name: "Engineer", decision: "Approved" }]) }),
+    as: "engineer@minebea.co.th",
+    revision: 1,
+    attempt: "SA-fresh"
+  });
+  equal(committed.ok, true);
+  equal(ledgerData().length, 2);
+  equal(ledgerData()[0][11], "SA-abandoned");
+  equal(ledgerData()[0][12], "", "the abandoned attempt stays uncommitted");
+  equal(ledgerData()[1][11], "SA-fresh");
+  assert.ok(ledgerData()[1][12], "the new attempt is committed");
+
+  const report = api.reconcileSignOffLedger();
+  equal(report.inSync, false);
+  equal(report.appended, 0);
+  equal(report.uncommittedCount, 1);
+  equal(report.uncommitted[0].attemptId, "SA-abandoned");
 });
 
 check("getSignOffLedger reads the tab back as decision objects", () => {
@@ -831,7 +933,6 @@ check("an empty ledger reads as an empty list rather than an error", () => {
 // 4. Self-healing ledger: reconcile replays the archived revisions
 // ---------------------------------------------------------------------------
 
-const EXPECTED_PROP = "FFM_SIGN_OFF_LEDGER_ROWS";
 const signEngineer = (decision, extra = {}) =>
   save({
     payload: payloadOf({
@@ -868,7 +969,12 @@ check("a missing ledger row is repaired from the archived revisions", () => {
   const repair = api.reconcileSignOffLedger();
   equal(repair.ok, true, `reconcile failed: ${repair.error || ""}`);
   equal(repair.appended, 1);
-  deep(ledgerData()[0], expected, "the rebuilt row keeps the save's timestamp and values");
+  deep(
+    ledgerData()[0].slice(0, 11),
+    expected.slice(0, 11),
+    "the rebuilt decision keeps the save's timestamp and values"
+  );
+  assert.ok(ledgerData()[0][12], "the rebuilt row is stamped committed");
 
   const again = api.reconcileSignOffLedger();
   equal(again.appended, 0, "reconciling twice does not duplicate the row");
@@ -889,7 +995,12 @@ check("a legacy gap is still repaired after later saves have moved the store on"
 
   const repair = api.reconcileSignOffLedger();
   equal(repair.appended, 1);
-  deep(ledgerData()[0], expected, "the rebuilt row keeps the save's timestamp and values");
+  deep(
+    ledgerData()[0].slice(0, 11),
+    expected.slice(0, 11),
+    "the rebuilt decision keeps the save's timestamp and values"
+  );
+  assert.ok(ledgerData()[0][12], "the rebuilt row is stamped committed");
   equal(Number(ledgerData()[0][1]), 2, "attributed to the revision that made the decision");
 });
 

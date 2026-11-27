@@ -106,7 +106,7 @@ The global scope is the only filter input that crosses modules.
 
 ```
 edit → setState → debounce → buildWorkspacePayload() → JSON
-     → google.script.run.saveWorkspaceState(json, summary, revisionRef, refreshMirrors)
+     → google.script.run.saveWorkspaceState(json, summary, revisionRef, refreshMirrors, saveAttemptId)
      → { ok, revision, lastSavedAt, lastSavedBy, warnings } | { ok:false, conflict:true, revision }
 ```
 
@@ -126,7 +126,7 @@ edit → setState → debounce → buildWorkspacePayload() → JSON
 | `doGet(e)` | Fail-closed entry: no email → sign-in page; otherwise evaluate the `Index` template with `serverConfigJson` |
 | `include(name)` | `HtmlService.createHtmlOutputFromFile(name).getContent()` |
 | `loadWorkspaceState()` | Reads chunks, parses `__META__`, returns `{data, revision, lastSavedAt, lastSavedBy}` |
-| `saveWorkspaceState(json, summary, expectedRevision, refreshMirrors)` | Revision check, permission check, sign-off ledger append, archive old copy, write new chunks, audit row, optional mirror refresh |
+| `saveWorkspaceState(json, summary, expectedRevision, refreshMirrors, saveAttemptId)` | Revision check, permission check, sign-off ledger append, archive old copy, write new chunks, commit-marker stamp, audit row, optional mirror refresh |
 | `authorizeWorkspaceSave_(previous, payload, email, isOwner)` | Program ownership, roster protection and signature identity, judged against the stored state |
 | `listStateRevisions()` / `loadStateRevision(rev)` | History sheet access (last `HISTORY_LIMIT = 5`) |
 | `refreshMirrorSheets()` / `readMirrorStatus_()` | Rebuild the human-readable tabs from the store |
@@ -154,14 +154,16 @@ projects | 1 | 3 | <iso> | <json chunk 1>
 
 `_FFM_STATE_HISTORY` — same idea plus `Revision`, `SavedAt`, `SavedBy`; whole-store copies, pruned.
 
-`SignOffLog` — append-only, 11 columns:
-`Timestamp, Revision, ProgramID, Program, Line, Gate, Approver, Role, Decision, Remark, SignedInEmail`.
+`SignOffLog` — append-only decision rows, 13 columns:
+`Timestamp, Revision, ProgramID, Program, Line, Gate, Approver, Role, Decision, Remark, SignedInEmail, SaveAttemptID, CommittedAt`.
 Rows are derived by diffing the gate records already on file against the incoming payload, so a save
 that changes nothing writes nothing. The rows are appended **before** the mutable store is rewritten:
 if the append fails the save is refused while the old state is still intact, so a committed signature
-can never be missing from the ledger. The append checks a decision's stable identity — revision plus
-program, line, gate, approver and decision — so retrying a save after a later state-write failure does
-not duplicate its audit row.
+can never be missing from the ledger. A decision row is written with its `SaveAttemptID` and a blank
+`CommittedAt`; after the state write succeeds, the attempt's rows are stamped with `CommittedAt`.
+Retries reuse the attempt ID and are keyed by it plus the program, line, gate, approver and decision,
+so a retry cannot duplicate its audit row. Reconciliation reports any row with an attempt ID but no
+commit marker instead of rebaselining it.
 
 Script properties keep `FFM_SIGN_OFF_LEDGER_ROWS`, the number of rows the tab should hold. On app load
 the client calls `reconcileSignOffLedger()`: under the save lock it compares that count with the tab and,
@@ -237,7 +239,7 @@ owner, reads the store and never writes to it, so a backup run cannot change a r
 | `test-server-permissions` | Program ownership, roster ownership and signature rules |
 | `test-state-backup` | Drive backup naming, pruning and the manifest scopes |
 | `test-production-validation` | The shared production-record rules: impossible input / good / planned hours, negative downtime, duplicate date × line × station, and the loader's drop-and-repair pass |
-| `test-code-js` | Code.js run against a mocked `SpreadsheetApp`: chunked state read/write, save permissions through the real save path, the SignOffLog append before the store commit (including a failed append that refuses the save), retry idempotency, and repair of a legacy gap on the next reconcile |
+| `test-code-js` | Code.js run against a mocked `SpreadsheetApp`: chunked state read/write, save permissions through the real save path, the SignOffLog append before the store commit (including a failed append that refuses the save), attempt-keyed retry idempotency, uncommitted-row reporting after a failed state write, and repair of a legacy gap on the next reconcile |
 | `test-generated-bundle` | `Bundle.html` / `Styles.html` match a fresh build byte for byte |
 
 Most suites are Node scripts that read the source files and assert behaviour of pure helpers. The

@@ -790,7 +790,8 @@ const ledgerRecords = (decision) => ({
 const LEDGER_META = {
   timestamp: '2026-11-26T10:00:00.000Z',
   revision: 7,
-  userEmail: 'auditor@minebea.co.th'
+  userEmail: 'auditor@minebea.co.th',
+  saveAttemptId: 'SA-review'
 };
 
 check('a changed decision appends one immutable row naming the signer', () => {
@@ -803,7 +804,7 @@ check('a changed decision appends one immutable row naming the signer', () => {
   equal(rows.length, 1);
   equal(
     rows[0].join('|'),
-    '2026-11-26T10:00:00.000Z|7|PRJ-X4151|X4151|ME11-RHS|G4 MBO & OK2B|Horikawa|Engineering Manager|Approved|Verified against the MBO checklist|auditor@minebea.co.th'
+    '2026-11-26T10:00:00.000Z|7|PRJ-X4151|X4151|ME11-RHS|G4 MBO & OK2B|Horikawa|Engineering Manager|Approved|Verified against the MBO checklist|auditor@minebea.co.th|SA-review|'
   );
   equal(rows[0].length, serverApi.SIGN_OFF_LEDGER_HEADERS.length);
 });
@@ -829,8 +830,8 @@ check('a rejection is a decision too', () => {
   equal(rows.length, 1);
   equal(rows[0][8], 'Rejected');
 });
-check('the ledger header names the program, gate, approver and signer', () => {
-  ['Timestamp', 'Program', 'Line', 'Gate', 'Approver', 'Decision', 'SignedInEmail'].forEach((column) => {
+check('the ledger header names the program, gate, approver, signer and commit marker', () => {
+  ['Timestamp', 'Program', 'Line', 'Gate', 'Approver', 'Decision', 'SignedInEmail', 'SaveAttemptID', 'CommittedAt'].forEach((column) => {
     assert.ok(serverApi.SIGN_OFF_LEDGER_HEADERS.indexOf(column) !== -1, `missing ${column}`);
   });
 });
@@ -855,7 +856,8 @@ check('a ledger append failure refuses the save instead of warning after commit'
   assert.ok(appendAt !== -1 && clearAt !== -1 && refusalAt !== -1, 'the ledger guard moved');
   assert.ok(refusalAt < clearAt, 'the ledger failure is handled before the store commit');
   assert.ok(!/appendSignOffLedgerSafely_/.test(saveBody), 'the post-commit ledger guard is still in the save path');
-  assert.ok(/warnings: \[\]/.test(saveBody), 'the save response still promises a ledger warning');
+  assert.ok(/const warnings = \[\];/.test(saveBody), 'the save response has a warnings list');
+  assert.ok(/markSignOffAttemptCommitted_\(/.test(saveBody), 'a committed save stamps the attempt marker');
 });
 
 check("a toast keeps its own duration, can be hidden, and never lets success bury a warning", () => {

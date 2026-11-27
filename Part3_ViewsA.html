@@ -1024,7 +1024,8 @@ function SignOffLedgerView({ gateRecords, projects }) {
             </div>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
               Every gate decision recorded in <span className="font-mono">SignOffLog</span>, one row per changed
-              approver decision. The tab is append-only and is never edited by the app.
+              approver decision. Decision rows are append-only; the app only stamps their commit marker
+              after the state save succeeds.
               {ledger.status === 'ready' && ledger.readAt && (
                 <> Read at {String(ledger.readAt).slice(11, 19)} UTC.</>
               )}
