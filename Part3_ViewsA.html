@@ -245,7 +245,7 @@ function OverviewView({
 
   return (
     <div className="space-y-6">
-      {/* KPI Results Summary — quality, throughput & process capability outcomes */}
+      {/* KPI Results Summary — quality and throughput outcomes */}
       <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
           <div>
@@ -327,13 +327,27 @@ function OverviewView({
             );
           })}
         </div>
+      </section>
 
-        {/* Capability in one line, and the way through to the full matrix. */}
+      {/* KPI deep dive — trend, worst variants and the Pareto behind the loss, in
+          the same three charts the full deep-dive modal shows. */}
+      <KpiDeepDiveSection
+        projects={projects}
+        records={records}
+        gateRecords={gateRecords}
+        globalSide={globalSide}
+        costProjects={costProjects}
+        customerFeedback={customerFeedback}
+        onOpenDeepDive={onOpenKpiDrilldown}
+      />
+
+      {/* Capability in one line, and the way through to the full matrix. */}
+      <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
         <button
           type="button"
           onClick={() => onSwitchView('cpk')}
           title="Open the Cpk matrix"
-          className="w-full border-t border-slate-200 dark:border-slate-800 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 transition-colors"
+          className="w-full px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 transition-colors"
         >
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
             <span className="font-semibold text-slate-600 dark:text-slate-300">Process capability</span>
@@ -374,19 +388,7 @@ function OverviewView({
             <ArrowRight className="w-3.5 h-3.5" />
           </span>
         </button>
-      </section>
-
-      {/* KPI deep dive — trend, worst variants and the Pareto behind the loss, in
-          the same three charts the full deep-dive modal shows. */}
-      <KpiDeepDiveSection
-        projects={projects}
-        records={records}
-        gateRecords={gateRecords}
-        globalSide={globalSide}
-        costProjects={costProjects}
-        customerFeedback={customerFeedback}
-        onOpenDeepDive={onOpenKpiDrilldown}
-      />
+      </div>
 
       {/* Active NPI Build Progress — units run vs planned build quantity, gate cells passed */}
       <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
