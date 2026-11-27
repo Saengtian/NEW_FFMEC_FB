@@ -2,7 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Printing a KPI deep dive: hide the app shell and lift the modal panel to the page. */
+/* Printing a KPI deep dive: print the dialog panel alone, in normal flow, so a
+   long panel paginates onto further sheets instead of being clipped or followed
+   by blank pages from the (hidden but still laid out) app shell. */
 @media print {
   @page {
     margin: 12mm;
@@ -17,11 +19,42 @@
     visibility: visible;
   }
 
+  /* The shell keeps its height on screen; on paper that height, and every
+     sibling of the dialog, would paginate as empty sheets after the panel. */
+  html,
+  body,
+  #root {
+    height: auto !important;
+    background: #fff !important;
+  }
+
+  .app-shell {
+    display: block !important;
+    height: auto !important;
+    min-height: 0 !important;
+    background: #fff !important;
+  }
+
+  .app-shell > *:not(.kpi-print-overlay) {
+    display: none !important;
+  }
+
+  /* The dialog is fixed and scrolls on screen; on paper it becomes a plain block
+     in document order so the panel flows across page breaks. */
+  .kpi-print-overlay {
+    display: block !important;
+    position: static !important;
+    inset: auto !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    background: transparent !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+
   .kpi-print-area {
-    position: absolute !important;
-    top: 0;
-    left: 0;
-    width: 100% !important;
+    position: static !important;
+    width: auto !important;
     max-width: none !important;
     margin: 0 !important;
     border: 0 !important;
@@ -33,22 +66,16 @@
     print-color-adjust: exact;
   }
 
-  /* The dialog is fixed and scrolls on screen; on paper that scroll box clips
-     everything past the first viewport, so the panel must escape it. */
-  .kpi-print-overlay {
-    position: static !important;
-    overflow: visible !important;
-    padding: 0 !important;
-    background: transparent !important;
-    -webkit-backdrop-filter: none !important;
-    backdrop-filter: none !important;
-  }
-
   .kpi-print-area .no-print {
     display: none !important;
   }
 
   .kpi-print-area section {
     break-inside: avoid;
+  }
+
+  /* Keep a section heading with the rows it introduces. */
+  .kpi-print-area h4 {
+    break-after: avoid;
   }
 }
