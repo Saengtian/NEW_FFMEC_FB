@@ -17,6 +17,8 @@
  *  - the ledger append runs after the state chunks commit, so a failure there
  *    is logged, audited and returned as a warning instead of failing a
  *    committed save
+ *  - the toast controller honours a per-message duration, hide() clears the
+ *    toast, and no success line can bury a warning someone still has to read
  *  - a team member's workload counts only the tasks assigned to them (a stored
  *    member id first, then the roster name behind free text like
  *    "Patcharapong J."), and matches their name among multi-name approvers
@@ -37,6 +39,18 @@ import assert from "node:assert/strict";
 const ROOT = join(import.meta.dir, "..");
 const source = readFileSync(join(ROOT, "Part1_Data.html"), "utf8");
 const serverSource = readFileSync(join(ROOT, "Code.js"), "utf8");
+const appSource = readFileSync(join(ROOT, "Part2_App.html"), "utf8");
+
+// The toast controller is a plain factory with injectable timers, so it can be
+// read out of the app file and driven without a React tree.
+const toastMatch = appSource.match(/function createToastController\([\s\S]*?\n}/);
+if (!toastMatch) {
+  console.error("Part2_App.html no longer declares createToastController — update this test, it moved.");
+  process.exit(1);
+}
+const createToastController = new Function(
+  `"use strict";\n${toastMatch[0]}\nreturn createToastController;`
+)();
 
 /** Top-level declarations the fixes are made of. Functions end at column 0. */
 const DECLARATIONS = [
@@ -888,6 +902,61 @@ check('a failed append is reported, logged and never thrown', () => {
     logged.some((line) => line.indexOf('SignOffLog append failed after the state store committed') !== -1),
     'the failure was swallowed without a log line'
   );
+});
+
+check("a toast keeps its own duration, can be hidden, and never lets success bury a warning", () => {
+  const scheduled = [];
+  const cleared = [];
+  const changes = [];
+  const controller = createToastController({
+    durationMs: 3600,
+    setTimeoutFn: (fn, ms) => {
+      scheduled.push({ fn, ms });
+      return scheduled.length;
+    },
+    clearTimeoutFn: (id) => cleared.push(id),
+    onChange: (value) => changes.push(value)
+  });
+  const last = () => changes[changes.length - 1];
+
+  // A warning that must be read sets its own wait instead of the default.
+  controller.show('2 production rows rejected — row 3: input must be above zero', 'warning', { durationMs: 30000 });
+  equal(scheduled.length, 1);
+  equal(scheduled[0].ms, 30000);
+  equal(last().tone, 'warning');
+
+  // A success line cannot replace it, and does not schedule a timer either.
+  controller.show('Synced to Google Sheet');
+  equal(scheduled.length, 1, 'the success message replaced the warning');
+  equal(last().message, '2 production rows rejected — row 3: input must be above zero');
+
+  // A second warning is allowed to replace the first, which cancels its timer.
+  controller.show('1 row rejected', 'warning');
+  equal(last().message, '1 row rejected');
+  deep(cleared, [1]);
+  equal(scheduled[1].ms, 3600);
+
+  // Expiry clears the toast.
+  scheduled[1].fn();
+  equal(last(), null);
+
+  // hide() clears the timer and the message at once.
+  controller.show('Saved', 'success', { durationMs: 9000 });
+  equal(scheduled[2].ms, 9000);
+  controller.hide();
+  equal(last(), null);
+  deep(cleared, [1, 3]);
+
+  // A stale timer cannot close a newer message.
+  controller.show('first', 'success', { durationMs: 5000 });
+  controller.show('second', 'success');
+  scheduled[3].fn();
+  equal(last().message, 'second');
+
+  // Once the warning is dismissed, success messages flow again.
+  controller.hide();
+  controller.show('Synced', 'success');
+  equal(last().message, 'Synced');
 });
 
 check("a timeline saved unchanged is the line's own schedule, not a move", () => {
