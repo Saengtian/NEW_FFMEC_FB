@@ -55,6 +55,12 @@ function createRange(sheet, r1, c1, numRows, numCols) {
   const write = (values) => {
     // One failure switch, used to prove a ledger append that throws before the
     // store commits refuses the save instead of committing an unlogged signature.
+    // The one-shot switch lets a single state write fail and then lets the restore
+    // path write the previous rows back.
+    if (sheet.failNextSetValuesFromRow && r1 >= sheet.failNextSetValuesFromRow) {
+      sheet.failNextSetValuesFromRow = 0;
+      throw new Error(`simulated one-shot sheet write failure at row ${r1}`);
+    }
     if (sheet.failSetValuesFromRow && r1 >= sheet.failSetValuesFromRow) {
       throw new Error(`simulated sheet write failure at row ${r1}`);
     }
@@ -92,6 +98,7 @@ function createSheet(name, id) {
     rows: [],
     frozenRows: 0,
     failSetValuesFromRow: 0,
+    failNextSetValuesFromRow: 0,
     getName: () => name,
     getSheetId: () => id,
     getLastRow: () => sheet.rows.length,
@@ -333,6 +340,24 @@ check("a save round-trips every slice it was given", () => {
   deep(state.data.projects, payload.projects);
   deep(state.data.tasks, payload.tasks);
   deep(state.data.teamMembers, payload.teamMembers);
+});
+
+check("a failed state rewrite restores the previous revision instead of leaving an empty store", () => {
+  reset();
+  const payload = payloadOf();
+  ownerSave(payload);
+  const stateSheet = sheetOf(api.CONFIG.STATE_SHEET);
+  const before = stateSheet.rows.map((row) => row.slice());
+  stateSheet.failNextSetValuesFromRow = 1;
+  refused(
+    () => ownerSave(payloadOf({ tasks: [] }), 1),
+    /_FFM_STATE_STORE could not be written.*previous revision was restored/
+  );
+  deep(stateSheet.rows, before, "the failed save left an empty or partial state store");
+  const restored = api.loadWorkspaceState();
+  equal(restored.revision, 1, "the failed save advanced the revision");
+  deep(restored.data.tasks, payload.tasks, "the failed save changed the stored tasks");
+  equal(sheetOf("AuditLog").rows.length, 2, "the failed save appended an audit row");
 });
 
 check("a slice larger than CHUNK_SIZE splits into ordered chunks and reassembles byte for byte", () => {

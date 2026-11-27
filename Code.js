@@ -94,6 +94,8 @@ const PERSISTED_SLICES = [
   'teamMembers'
 ];
 
+const STATE_STORE_HEADERS = ['SliceKey', 'ChunkIndex', 'ChunkCount', 'UpdatedAt', 'PayloadChunk'];
+
 /**
  * Web App Entry Point
  */
@@ -237,7 +239,7 @@ function ensureAllTabs_() {
   const ss = getSpreadsheet_();
   const stateSheet = getOrCreateSheet_(ss, CONFIG.STATE_SHEET);
   if (stateSheet.getLastRow() === 0) {
-    stateSheet.getRange(1, 1, 1, 5).setValues([['SliceKey', 'ChunkIndex', 'ChunkCount', 'UpdatedAt', 'PayloadChunk']]);
+    stateSheet.getRange(1, 1, 1, STATE_STORE_HEADERS.length).setValues([STATE_STORE_HEADERS]);
     stateSheet.getRange(1, 1, 1, 5).setFontWeight('bold').setBackground('#0f172a').setFontColor('#ffffff');
     stateSheet.setFrozenRows(1);
   }
@@ -1397,11 +1399,32 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       archiveStateRevision_(ss, prevRevision, previousRows);
     }
 
-    // Rewrite _FFM_STATE_STORE cleanly
-    stateSheet.clearContents();
-    stateSheet.getRange(1, 1, 1, 5).setValues([['SliceKey', 'ChunkIndex', 'ChunkCount', 'UpdatedAt', 'PayloadChunk']]);
-    if (rows.length > 0) {
-      stateSheet.getRange(2, 1, rows.length, 5).setValues(rows);
+    // Write the header and rows in one setValues call, then put the pre-save
+    // rows back if that write fails. Without the restore, a failure after
+    // clearContents leaves the authoritative store empty or partial.
+    const writeStateRows = function(dataRows) {
+      const values = [STATE_STORE_HEADERS].concat(dataRows);
+      stateSheet.clearContents();
+      stateSheet.getRange(1, 1, values.length, STATE_STORE_HEADERS.length).setValues(values);
+    };
+    try {
+      writeStateRows(rows);
+    } catch (err) {
+      try {
+        writeStateRows(previousRows);
+      } catch (restoreErr) {
+        throw new Error(
+          'Save refused: _FFM_STATE_STORE could not be written (' + errorMessage_(err) + '). ' +
+          'The previous revision could not be restored automatically (' + errorMessage_(restoreErr) + '). ' +
+          (prevRevision > 0 ? 'Revision #' + prevRevision + ' is preserved in ' + CONFIG.STATE_HISTORY_SHEET + '.' : '')
+        );
+      }
+      throw new Error(
+        'Save refused: _FFM_STATE_STORE could not be written (' + errorMessage_(err) + '). ' +
+        (prevRevision > 0
+          ? 'The previous revision was restored; no workspace change was saved.'
+          : 'No workspace state had been committed yet; the store was reset.')
+      );
     }
 
     // Mirror tabs are derived reports: rebuild them only on an explicit save.
