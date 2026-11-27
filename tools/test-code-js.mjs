@@ -64,13 +64,25 @@ function createRange(sheet, r1, c1, numRows, numCols) {
     if (sheet.failSetValuesFromRow && r1 >= sheet.failSetValuesFromRow) {
       throw new Error(`simulated sheet write failure at row ${r1}`);
     }
-    values.forEach((rowValues, ri) => {
-      const target = r1 - 1 + ri;
-      while (sheet.rows.length <= target) sheet.rows.push([]);
-      rowValues.forEach((value, ci) => {
-        sheet.rows[target][c1 - 1 + ci] = value;
+    const apply = (rowsToWrite = values.length) => {
+      values.slice(0, rowsToWrite).forEach((rowValues, ri) => {
+        const target = r1 - 1 + ri;
+        while (sheet.rows.length <= target) sheet.rows.push([]);
+        rowValues.forEach((value, ci) => {
+          sheet.rows[target][c1 - 1 + ci] = value;
+        });
       });
-    });
+    };
+    // Land some of the new rows, then fail as a real service might if a write
+    // times out after accepting only part of its input. The restore must remove
+    // those rows rather than leave a blend of revisions.
+    if (sheet.failNextSetValuesAfterRows) {
+      const landed = Math.min(sheet.failNextSetValuesAfterRows, values.length);
+      sheet.failNextSetValuesAfterRows = 0;
+      apply(landed);
+      throw new Error(`simulated sheet write failure after ${landed} row(s)`);
+    }
+    apply();
   };
 
   const range = {
@@ -99,6 +111,7 @@ function createSheet(name, id) {
     frozenRows: 0,
     failSetValuesFromRow: 0,
     failNextSetValuesFromRow: 0,
+    failNextSetValuesAfterRows: 0,
     getName: () => name,
     getSheetId: () => id,
     getLastRow: () => sheet.rows.length,
@@ -357,6 +370,25 @@ check("a failed state rewrite restores the previous revision instead of leaving 
   const restored = api.loadWorkspaceState();
   equal(restored.revision, 1, "the failed save advanced the revision");
   deep(restored.data.tasks, payload.tasks, "the failed save changed the stored tasks");
+  equal(sheetOf("AuditLog").rows.length, 2, "the failed save appended an audit row");
+});
+
+check("a state rewrite that fails after partial rows land is restored completely", () => {
+  reset();
+  const payload = payloadOf();
+  ownerSave(payload);
+  const stateSheet = sheetOf(api.CONFIG.STATE_SHEET);
+  const before = stateSheet.rows.map((row) => row.slice());
+  stateSheet.failNextSetValuesAfterRows = 2;
+
+  refused(
+    () => ownerSave(payloadOf({ tasks: [] }), 1),
+    /_FFM_STATE_STORE could not be written.*after 2 row.*previous revision was restored/
+  );
+  deep(stateSheet.rows, before, "the restore left rows from the partially applied revision");
+  const restored = api.loadWorkspaceState();
+  equal(restored.revision, 1, "the partial write advanced the revision");
+  deep(restored.data.tasks, payload.tasks, "the restore did not recover the stored tasks");
   equal(sheetOf("AuditLog").rows.length, 2, "the failed save appended an audit row");
 });
 
