@@ -669,9 +669,10 @@ function App() {
           // After the reload notice, so the rows win the single toast slot.
           announceProductionDrops(backfill.productionDrops);
 
-          // Self-healing SignOffLog: a save whose ledger append failed cannot fail
-          // the save (the revision is real), so the missing rows are repaired here.
-          // The server answers from two small reads when the ledger is in sync and
+          // Self-healing SignOffLog: the save path refuses to commit when the
+          // ledger append fails, so a new save cannot leave a missing row. This
+          // reconciliation still repairs legacy gaps from archived revisions. The
+          // server answers from two small reads when the ledger is in sync and
           // only replays the archived revisions when the row count disagrees.
           window.google.script.run
             .withSuccessHandler((repair) => {
