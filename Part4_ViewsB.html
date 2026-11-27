@@ -1643,6 +1643,247 @@ function NewProjectModal({ onClose, onSubmit }) {
 }
 
 /**
+ * Program header editor. It owns the identity panel only: the build matrix, gate
+ * dossiers and schedule stay with their own CRUD paths, so saving here cannot
+ * change a line or lose a signature.
+ */
+function ProjectSettingsModal({ project, familyGroups = [], onClose, onSubmit }) {
+  const [form, setForm] = useState({
+    model: project?.model || '',
+    phase: project?.phase || 'EVT',
+    status: project?.status || 'On Track',
+    familyGroup: project?.familyGroup || PROGRAM_FAMILY_GROUPS[0],
+    family: project?.family || '',
+    customer: project?.customer || '',
+    moRange: project?.moRange || '',
+    etdDate: project?.etdDate || '',
+    mihDate: project?.mihDate || '',
+    pm: project?.pm || '',
+    leader: project?.leader || '',
+    owner: project?.owner || '',
+    spec: project?.spec || '',
+    lineSpec: project?.lineSpec || ''
+  });
+
+  const set = (key) => (e) => setForm((prev) => ({ ...prev, [key]: e.target.value }));
+  const inputClass =
+    'w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900';
+  const labelClass = 'font-semibold text-slate-700 dark:text-slate-300 block mb-1';
+  const groups = [...familyGroups];
+  if (form.familyGroup && !groups.some((g) => g.toLowerCase() === form.familyGroup.toLowerCase())) {
+    groups.unshift(form.familyGroup);
+  }
+  const statuses = PROGRAM_STATUS_OPTIONS.includes(form.status)
+    ? PROGRAM_STATUS_OPTIONS
+    : [form.status, ...PROGRAM_STATUS_OPTIONS];
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!form.model.trim()) return;
+    onSubmit(form);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs"
+      >
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Program Settings</h3>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+              {project?.id} · changes save with the workspace; the record id and build matrix stay as they are.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-3.5 max-h-[70vh] overflow-y-auto">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass}>Model Code *</label>
+              <input required value={form.model} onChange={set('model')} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Build Phase</label>
+              <select value={form.phase} onChange={set('phase')} className={inputClass}>
+                {PHASE_ORDER.map((ph) => (
+                  <option key={ph} value={ph}>
+                    {ph}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass}>Program Status</label>
+              <select value={form.status} onChange={set('status')} className={inputClass}>
+                {statuses.map((status) => (
+                  <option key={status} value={status}>
+                    {status}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={labelClass}>Product Family</label>
+              <select value={form.familyGroup} onChange={set('familyGroup')} className={inputClass}>
+                {groups.map((group) => (
+                  <option key={group} value={group}>
+                    {group}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className={labelClass}>Family / Product Name</label>
+            <input value={form.family} onChange={set('family')} className={inputClass} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass}>MO (SPP Range)</label>
+              <input value={form.moRange} onChange={set('moRange')} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Customer / FATP</label>
+              <input value={form.customer} onChange={set('customer')} className={inputClass} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass}>Customer ETD</label>
+              <input type="date" value={form.etdDate} onChange={set('etdDate')} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>FATP MIH</label>
+              <input type="date" value={form.mihDate} onChange={set('mihDate')} className={inputClass} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className={labelClass}>Program Manager</label>
+              <input value={form.pm} onChange={set('pm')} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Program Leader</label>
+              <input value={form.leader} onChange={set('leader')} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Lead Engineer</label>
+              <input value={form.owner} onChange={set('owner')} className={inputClass} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={labelClass}>Spec</label>
+              <input value={form.spec} onChange={set('spec')} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Line Spec</label>
+              <input value={form.lineSpec} onChange={set('lineSpec')} className={inputClass} />
+            </div>
+          </div>
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="px-4 py-2 rounded-lg font-semibold bg-slate-900 dark:bg-slate-700 text-white hover:bg-slate-800 dark:hover:bg-slate-600"
+          >
+            Save Program
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/**
+ * Confirms a program deletion with the exact number of working records that go
+ * with it, so removing a program is never a surprise for the gate board.
+ */
+function DeleteProjectModal({ project, impact, onClose, onConfirm }) {
+  const counts = impact || { tasks: 0, lines: 0, dossiers: 0, scheduleOverrides: 0 };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+      <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs">
+        <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-2 text-rose-700 dark:text-rose-300">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Delete NPI Program</h3>
+          </div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-3">
+          <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
+            Remove the program and everything it owns in the workspace? This cannot be undone from the app — restore one of
+            the last five saved revisions to bring it back.
+          </p>
+          <div className="p-3 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-800 space-y-1">
+            <div className="font-bold text-slate-900 dark:text-slate-100">
+              {project?.model} · {project?.phase}
+            </div>
+            <div className="text-[11px] text-slate-500 dark:text-slate-400">
+              {project?.familyGroup} · {project?.customer} · MIH {project?.mihDate || '—'}
+            </div>
+          </div>
+          <div className="rounded-lg border border-rose-200 dark:border-rose-900 bg-rose-50/70 dark:bg-rose-950/40 p-3 space-y-1">
+            <div className="font-bold text-rose-800 dark:text-rose-200">Deleted with the program</div>
+            <ul className="list-disc pl-4 text-[11px] text-rose-700 dark:text-rose-300 space-y-0.5 tabular-nums">
+              <li>{counts.lines} Config × Side line(s)</li>
+              <li>{counts.dossiers} gate dossier(s) across 9 gates</li>
+              <li>{counts.tasks} task(s) linked to this program</li>
+              <li>{counts.scheduleOverrides} Gantt schedule override(s)</li>
+            </ul>
+          </div>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+            Production records, cost-saving items and the append-only SignOffLog stay on file.
+          </p>
+        </div>
+
+        <div className="px-5 py-3.5 bg-slate-50 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-800 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="px-4 py-2 rounded-lg font-semibold bg-rose-600 text-white hover:bg-rose-700"
+          >
+            Delete Program
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Next unused ME## config for a project line. Deriving it from the row count
  * reused a deleted line's config, and a config+side pair is the row's identity.
  */

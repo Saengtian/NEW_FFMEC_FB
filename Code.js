@@ -539,6 +539,18 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
       }
     });
 
+    // Build the ledger rows before the store is touched: building them is pure,
+    // so a malformed dossier fails the save while nothing has committed. Only
+    // the append itself is a post-commit step (see below).
+    let signOffRows = [];
+    if (previousGateRecords && payload.gateRecords && typeof payload.gateRecords === 'object') {
+      signOffRows = signOffLedgerRows(previousGateRecords, payload.gateRecords, payload.projects, {
+        timestamp: nowIso,
+        revision: nextRevision,
+        userEmail: userEmail
+      });
+    }
+
     // Keep the copy being replaced: every save is undoable from the history tab.
     if (prevRevision > 0 && previousRows.length > 0) {
       archiveStateRevision_(ss, prevRevision, previousRows);
@@ -570,20 +582,41 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
 
     // Append-only gate decision ledger, written under the same lock as the store
     // it describes. Nothing in this path edits or deletes an existing row.
-    if (previousGateRecords && payload.gateRecords && typeof payload.gateRecords === 'object') {
-      appendSignOffLedger_(ss, signOffLedgerRows(previousGateRecords, payload.gateRecords, payload.projects, {
-        timestamp: nowIso,
-        revision: nextRevision,
-        userEmail: userEmail
-      }));
+    // The store above is already committed, so a failure here cannot be reported
+    // as a failed save: the revision is real either way, and failing it would
+    // leave the client on a stale revision while hiding the decisions that did
+    // save. The failure is logged, recorded in AuditLog and returned as a
+    // warning — reported, never swallowed.
+    const ledger = appendSignOffLedgerSafely_(ss, signOffRows);
+    if (!ledger.ok) {
+      try {
+        auditSheet.appendRow([
+          nowIso,
+          actorLabel,
+          nextRevision,
+          'SIGN_OFF_LEDGER_ERROR',
+          safeSheetText_(signOffRows.length + ' gate decision(s) missing from SignOffLog: ' + ledger.error),
+          executorEmail
+        ]);
+      } catch (auditErr) {
+        console.error('AuditLog could not record the SignOffLog failure: ' + errorMessage_(auditErr));
+      }
     }
+
+    const warnings = ledger.ok ? [] : [
+      'Saved Rev #' + nextRevision + ', but SignOffLog could not be appended (' + ledger.error + '). ' +
+      signOffRows.length + ' gate decision(s) are in the saved state but missing from the ledger — ' +
+      'add them to SignOffLog by hand.'
+    ];
 
     return {
       ok: true,
       revision: nextRevision,
       lastSavedAt: nowIso,
       lastSavedBy: actorLabel,
-      userEmail: userEmail
+      userEmail: userEmail,
+      signOffLedger: { appended: ledger.appended, error: ledger.error },
+      warnings: warnings
     };
   } finally {
     lock.releaseLock();
@@ -664,6 +697,28 @@ function appendSignOffLedger_(ss, rows) {
     .getRange(sheet.getLastRow() + 1, 1, rows.length, SIGN_OFF_LEDGER_HEADERS.length)
     .setValues(rows.map(safeSheetRow_));
   return rows.length;
+}
+
+/**
+ * Writes the ledger rows once the state store has committed. This step cannot
+ * roll the save back, so it never throws: the outcome (including the error text)
+ * is returned to the caller, which turns a failure into a warning and an audit
+ * row instead of an exception that would misreport a committed save.
+ */
+function appendSignOffLedgerSafely_(ss, rows) {
+  if (!rows || rows.length === 0) return { ok: true, appended: 0, error: '' };
+  try {
+    return { ok: true, appended: appendSignOffLedger_(ss, rows), error: '' };
+  } catch (err) {
+    const message = errorMessage_(err);
+    console.error('SignOffLog append failed after the state store committed: ' + message);
+    return { ok: false, appended: 0, error: message };
+  }
+}
+
+function errorMessage_(err) {
+  if (err && err.message) return String(err.message);
+  return String(err || 'unknown error');
 }
 
 /**

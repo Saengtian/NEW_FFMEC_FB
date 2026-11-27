@@ -81,11 +81,14 @@ function createToastController(options) {
 /** Interpret a saveWorkspaceState response, including a stale-client conflict. */
 function resolveSaveResult(res, currentRevision) {
   if (res && res.ok === false && res.conflict) {
-    return { conflict: true, revision: Number(res.revision) || 0 };
+    return { conflict: true, revision: Number(res.revision) || 0, warnings: [] };
   }
   return {
     conflict: false,
-    revision: Number(res?.revision) || (Number(currentRevision) || 0) + 1
+    revision: Number(res?.revision) || (Number(currentRevision) || 0) + 1,
+    // A committed save can carry warnings (e.g. the sign-off ledger append
+    // failed afterwards). They are shown, not treated as a failed save.
+    warnings: Array.isArray(res?.warnings) ? res.warnings.map(String).filter(Boolean) : []
   };
 }
 
@@ -167,6 +170,8 @@ function App() {
 
   const [activeTaskDrawerId, setActiveTaskDrawerId] = useState(null);
   const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
+  const [editingProject, setEditingProject] = useState(null);
+  const [deletingProject, setDeletingProject] = useState(null);
   const [newTaskModalOpen, setNewTaskModalOpen] = useState(false);
   const [newProdRecordModalOpen, setNewProdRecordModalOpen] = useState(false);
   const [editingProdRecord, setEditingProdRecord] = useState(null);
@@ -385,9 +390,11 @@ function App() {
           lastSavedAt: res?.lastSavedAt || new Date().toISOString(),
           lastSavedBy: res?.lastSavedBy || prev.userEmail,
           userEmail: res?.userEmail || prev.userEmail,
-          errorMsg: null
+          errorMsg: outcome.warnings.length ? outcome.warnings.join(' ') : null
         }));
-        if (toast) {
+        if (outcome.warnings.length) {
+          showToast(outcome.warnings[0], 'error');
+        } else if (toast) {
           showToast(`Synced to Google Sheet (Rev #${outcome.revision})`, 'success');
         }
       })
@@ -1195,6 +1202,52 @@ function App() {
     showToast(`Initialized NPI program ${newProj.model} ${newProj.phase}`);
   };
 
+  // Program-level Update and Delete. Build matrix lines keep their own row
+  // actions; these edit the program record and remove what it owns.
+  const handleUpdateProject = (form) => {
+    if (!editingProject) return;
+    const updated = projectFromSettingsForm(editingProject, form);
+    setProjects((prev) => prev.map((project) => (project.id === updated.id ? updated : project)));
+    setEditingProject(null);
+    showToast(`Updated ${updated.model} ${updated.phase} program settings`);
+  };
+
+  const handleDeleteProject = (project) => {
+    if (!project) return;
+    if (projects.length <= 1) {
+      setDeletingProject(null);
+      showToast('Keep at least one NPI program — create another before deleting this one.', 'warning');
+      return;
+    }
+
+    const impact = projectDeletionImpact(project.id, tasks, gateRecords, scheduleOverrides);
+    const pruned = pruneProjectFromWorkspace(project.id, tasks, gateRecords, scheduleOverrides);
+    const remaining = projects.filter((p) => p.id !== project.id);
+
+    setProjects(remaining);
+    setTasks(pruned.tasks);
+    setGateRecords(pruned.gateRecords);
+    setScheduleOverrides(pruned.scheduleOverrides);
+
+    if (activeTaskDrawerId && !pruned.tasks.some((task) => task.id === activeTaskDrawerId)) {
+      setActiveTaskDrawerId(null);
+    }
+    if (selectedProjectId === project.id) {
+      const next = remaining[0];
+      setSelectedProjectId(next.id);
+      const firstLine = getLineVariantsForProject(next)[0]?.key || 'ME11-RHS';
+      setSelectedLineKey(firstLine);
+      setSelectedLineKeys([firstLine]);
+      setSelectedGateId(next.currentGateId);
+    }
+
+    setDeletingProject(null);
+    showToast(
+      `Deleted ${project.model} ${project.phase} · ${impact.lines} line(s), ${impact.dossiers} dossier(s), ${impact.tasks} task(s)`,
+      'warning'
+    );
+  };
+
   const handleSaveBuildMatrixRow = (projectId, originalRow, form) => {
     const project = projectMap[projectId];
     if (!project) return;
@@ -1769,7 +1822,7 @@ function App() {
       annualMaterialSavingThb: Math.max(0, Number(form.annualMaterialSavingThb) || 0),
       feasibility: form.feasibility || 'Pending',
       stage: form.stage || 'RFP / Studying',
-      fyTarget: form.fyTarget || 'FY2026',
+      fyTarget: form.fyTarget || `FY${currentFiscalYear()}`,
       owner: form.owner.trim() || 'Touchakorn',
       notes: (form.notes || '').trim()
     };
@@ -1890,7 +1943,7 @@ function App() {
               quotedCostThb: provided.quotedCostThb || 0,
               feasibility: provided.feasibility || 'Pending',
               stage: provided.stage || 'RFP / Studying',
-              fyTarget: 'FY2026',
+              fyTarget: provided.fyTarget || `FY${currentFiscalYear()}`,
               owner: 'NMB Eng',
               notes: `Imported from ${file.name}`
             }
@@ -2662,6 +2715,57 @@ function App() {
     reports: 'Executive KPI Report & Snapshot Analysis'
   };
 
+  // One definition of the global scope controls: the header renders them, and the
+  // KPI deep dive reuses the same list so its filters can never drift apart.
+  const scopeFilters = [
+    {
+      key: 'family',
+      label: 'Family',
+      ariaLabel: 'Global Family Filter',
+      value: globalFamily,
+      options: availableFamilies,
+      allLabel: 'All Families',
+      onChange: handleGlobalFamilyChange
+    },
+    {
+      key: 'model',
+      label: 'Model',
+      ariaLabel: 'Global Model Filter',
+      value: globalModel,
+      options: availableModels,
+      allLabel: 'All Models',
+      onChange: handleGlobalModelChange
+    },
+    {
+      key: 'phase',
+      label: 'Phase',
+      ariaLabel: 'Global Phase Filter',
+      value: globalPhase,
+      options: availablePhases,
+      allLabel: 'All Phases',
+      onChange: handleGlobalPhaseChange
+    },
+    {
+      key: 'side',
+      label: 'Side',
+      ariaLabel: 'Global Side Filter',
+      value: globalSide,
+      options: availableSides,
+      allLabel: 'All Sides',
+      onChange: handleGlobalSideChange
+    },
+    {
+      key: 'process',
+      label: 'Process',
+      ariaLabel: 'Global Process Filter',
+      value: globalProcess,
+      options: availableProcesses,
+      allLabel: 'All Processes',
+      onChange: setGlobalProcess,
+      fullWidthOnMobile: true
+    }
+  ];
+
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-slate-100 flex font-sans antialiased">
       {/* Mobile Backdrop */}
@@ -2884,6 +2988,11 @@ function App() {
                   {cloudSync.status === 'loading' && 'Loading Sheet...'}
                   {cloudSync.status === 'error' && 'Sync Error'}
                   {cloudSync.status === 'local' && 'Local Mode'}
+                  {cloudSync.status === 'synced' && cloudSync.errorMsg && (
+                    <span className="font-bold text-amber-600 dark:text-amber-400" title={cloudSync.errorMsg}>
+                      !
+                    </span>
+                  )}
                 </span>
                 {isGasEnv && (
                   <>
@@ -2954,54 +3063,7 @@ function App() {
                 <span>Global Scope</span>
               </span>
 
-              {[
-                {
-                  key: 'family',
-                  label: 'Family',
-                  ariaLabel: 'Global Family Filter',
-                  value: globalFamily,
-                  options: availableFamilies,
-                  allLabel: 'All Families',
-                  onChange: handleGlobalFamilyChange
-                },
-                {
-                  key: 'model',
-                  label: 'Model',
-                  ariaLabel: 'Global Model Filter',
-                  value: globalModel,
-                  options: availableModels,
-                  allLabel: 'All Models',
-                  onChange: handleGlobalModelChange
-                },
-                {
-                  key: 'phase',
-                  label: 'Phase',
-                  ariaLabel: 'Global Phase Filter',
-                  value: globalPhase,
-                  options: availablePhases,
-                  allLabel: 'All Phases',
-                  onChange: handleGlobalPhaseChange
-                },
-                {
-                  key: 'side',
-                  label: 'Side',
-                  ariaLabel: 'Global Side Filter',
-                  value: globalSide,
-                  options: availableSides,
-                  allLabel: 'All Sides',
-                  onChange: handleGlobalSideChange
-                },
-                {
-                  key: 'process',
-                  label: 'Process',
-                  ariaLabel: 'Global Process Filter',
-                  value: globalProcess,
-                  options: availableProcesses,
-                  allLabel: 'All Processes',
-                  onChange: setGlobalProcess,
-                  fullWidthOnMobile: true
-                }
-              ].map((filter) => (
+              {scopeFilters.map((filter) => (
                 <React.Fragment key={filter.key}>
                   {filter.key !== 'family' && (
                     <ChevronRight className="hidden 2xl:block w-3.5 h-3.5 text-slate-300 dark:text-slate-600" />
@@ -3078,6 +3140,9 @@ function App() {
                     onDeleteMatrixRow={(project, row) =>
                       setDeletingMatrixRow({ project, row })
                     }
+                    onEditProject={setEditingProject}
+                    onDeleteProject={setDeletingProject}
+                    canDeletePrograms={projects.length > 1}
                   />
                 );
               case 'timeline':
@@ -3274,7 +3339,7 @@ function App() {
           records={scopedProductionRecords}
           gateRecords={gateRecords}
           globalSide={globalSide}
-          globalScope={{ family: globalFamily, model: globalModel, phase: globalPhase, side: globalSide, process: globalProcess }}
+          scopeFilters={scopeFilters}
           costProjects={scopedCostProjects}
           customerFeedback={scopedCustomerFeedback}
           onClose={() => setKpiDrilldown(null)}
@@ -3285,6 +3350,29 @@ function App() {
         <NewProjectModal
           onClose={() => setNewProjectModalOpen(false)}
           onSubmit={handleCreateProject}
+        />
+      )}
+
+      {editingProject && (
+        <ProjectSettingsModal
+          project={editingProject}
+          familyGroups={projectFamilyGroupOptions(projects)}
+          onClose={() => setEditingProject(null)}
+          onSubmit={handleUpdateProject}
+        />
+      )}
+
+      {deletingProject && (
+        <DeleteProjectModal
+          project={deletingProject}
+          impact={projectDeletionImpact(
+            deletingProject.id,
+            tasks,
+            gateRecords,
+            scheduleOverrides
+          )}
+          onClose={() => setDeletingProject(null)}
+          onConfirm={() => handleDeleteProject(deletingProject)}
         />
       )}
 

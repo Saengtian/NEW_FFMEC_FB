@@ -58,10 +58,10 @@ function OverviewView({
     };
   }, [records]);
 
-  // FY2026 KPI scorecard: the six official targets measured against current data.
+  // KPI scorecard: the six official targets measured against current data.
   const kpiTiles = useMemo(() => {
-    // Every tile uses the MIH tile's fiscal window (1 Apr – 31 Mar), so FY2026 means
-    // the same twelve months here rather than a calendar year or an all-time total.
+    // Every tile uses the MIH tile's fiscal window (1 Apr – 31 Mar) for the fiscal year
+    // that contains today, so one FY label means the same twelve months everywhere.
     const claimsFy2026 = (customerFeedback || []).filter(
       (f) => f.category === 'Claim' && isInKpiFiscalYear(f.feedbackDate)
     ).length;
@@ -74,7 +74,7 @@ function OverviewView({
       0
     );
 
-    // Shipment to MIH is measured on time against lines already due in FY2026;
+    // Shipment to MIH is measured on time against lines already due this fiscal year;
     // the all-lines coverage is reported separately as a forecast figure.
     const mihToday = todayIso();
     const mihLines = [];
@@ -147,15 +147,15 @@ function OverviewView({
         unit: '%',
         footnote: 'Input UPH vs net-good UPH'
       }),
-      build('claims', 'Customer Claims FY2026', claimsFy2026, KPI_TARGETS.customerClaims, {
+      build('claims', `Customer Claims FY${currentFiscalYear()}`, claimsFy2026, KPI_TARGETS.customerClaims, {
         digits: 0,
         mode: 'min',
         targetFormat: (v) => `\u2264 ${v}`,
         footnote: kpiFiscalScopeLabel()
       }),
-      build('saving', 'Annual Cost Saving FY2026', annualSavingThb, KPI_TARGETS.annualSavingThb, {
+      build('saving', `Annual Cost Saving FY${currentFiscalYear()}`, annualSavingThb, KPI_TARGETS.annualSavingThb, {
         format: formatThbCompact,
-        footnote: `${fySavingProjects.length} saving initiatives tagged FY${KPI_FISCAL_YEAR}`
+        footnote: `${fySavingProjects.length} saving initiatives tagged FY${currentFiscalYear()}`
       }),
       mihTile
     ];
@@ -208,7 +208,7 @@ function OverviewView({
             <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">KPI Results Summary</h2>
             <p className="text-[11px] text-slate-500 dark:text-slate-400">
               Weighted actuals from {kpiResults.runs} production run{kpiResults.runs === 1 ? '' : 's'} in the
-              active Global Scope ({kpiResults.totalInput.toLocaleString()} units input) against the FY2026 KPI targets
+              active Global Scope ({kpiResults.totalInput.toLocaleString()} units input) against the FY{currentFiscalYear()} KPI targets
             </p>
           </div>
           <button
@@ -750,7 +750,10 @@ function ProjectsMatrixView({
   onOpenGate,
   onAddMatrixRow,
   onEditMatrixRow,
-  onDeleteMatrixRow
+  onDeleteMatrixRow,
+  onEditProject,
+  onDeleteProject,
+  canDeletePrograms = true
 }) {
   if (projects.length === 0) {
     return (
@@ -839,6 +842,29 @@ function ProjectsMatrixView({
               </div>
 
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onEditProject(p)}
+                  title={`Edit ${p.model} program settings`}
+                  aria-label={`Edit ${p.model} program settings`}
+                  className="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition-colors"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDeleteProject(p)}
+                  disabled={!canDeletePrograms}
+                  title={
+                    canDeletePrograms
+                      ? `Delete ${p.model} program and its gate dossiers`
+                      : 'Keep at least one NPI program in the workspace'
+                  }
+                  aria-label={`Delete ${p.model} program`}
+                  className="p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-rose-50 dark:hover:bg-rose-950 hover:text-rose-700 dark:hover:text-rose-300 text-slate-600 dark:text-slate-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white dark:disabled:hover:bg-slate-900"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
                 <button
                   type="button"
                   onClick={() => onAddMatrixRow(p)}

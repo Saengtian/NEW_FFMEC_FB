@@ -422,7 +422,7 @@ function CostSavingView({
                         <td className="py-2.5 px-2.5 whitespace-nowrap">
                           <div className="font-bold text-slate-900 dark:text-slate-100">{item.familyGroup}</div>
                           <div className="text-[10px] text-slate-500 dark:text-slate-400">
-                            {item.model} · {item.fyTarget || 'FY2026'}
+                            {item.model} · {item.fyTarget || `FY${currentFiscalYear()}`}
                           </div>
                         </td>
                         <td className="py-2.5 px-2.5 whitespace-nowrap text-slate-700 dark:text-slate-300 font-medium">
@@ -561,7 +561,7 @@ function CostSavingModal({
           annualMaterialSavingThb: 0,
           feasibility: 'Pending',
           stage: 'DFM & Quotation',
-          fyTarget: 'FY2027',
+          fyTarget: `FY${currentFiscalYear()}`,
           owner: 'Touchakorn',
           notes: ''
         }
@@ -653,9 +653,19 @@ function CostSavingModal({
                 onChange={(e) => setForm({ ...form, fyTarget: e.target.value })}
                 className="w-full px-2 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
               >
-                <option value="FY2026">FY2026</option>
-                <option value="FY2027">FY2027</option>
-                <option value="FY2028">FY2028</option>
+                {Array.from(
+                  new Set([
+                    currentFiscalYear() - 1,
+                    currentFiscalYear(),
+                    currentFiscalYear() + 1,
+                    currentFiscalYear() + 2,
+                    Number(String(form.fyTarget || '').replace(/[^0-9]/g, '')) || currentFiscalYear()
+                  ])
+                )
+                  .sort((a, b) => a - b)
+                  .map((year) => (
+                    <option key={year} value={`FY${year}`}>{`FY${year}`}</option>
+                  ))}
               </select>
             </div>
           </div>
@@ -1011,7 +1021,7 @@ function CustomerFeedbackView({
                   : 'text-slate-600 dark:text-slate-300'
               }
             >
-              {claimsFy} in FY{KPI_FISCAL_YEAR}
+              {claimsFy} in FY{currentFiscalYear()}
             </span>
           </div>
         </div>
@@ -2476,7 +2486,7 @@ const KPI_DEEP_DIVE_META = {
     paretoUnit: 'min'
   },
   claims: {
-    title: `Customer Claims FY${KPI_FISCAL_YEAR}`,
+    title: `Customer Claims FY${currentFiscalYear()}`,
     family: 'claims',
     target: KPI_TARGETS.customerClaims,
     targetText: `${KPI_TARGETS.customerClaims}`,
@@ -2493,7 +2503,7 @@ const KPI_DEEP_DIVE_META = {
     emptyTrend: 'No claims in this range.'
   },
   saving: {
-    title: `Annual Cost Saving FY${KPI_FISCAL_YEAR}`,
+    title: `Annual Cost Saving FY${currentFiscalYear()}`,
     family: 'savings',
     target: KPI_TARGETS.annualSavingThb,
     targetText: formatThbCompact(KPI_TARGETS.annualSavingThb),
@@ -2883,7 +2893,7 @@ const KPI_FAMILY_BUILDERS = {
     return {
       headline: { value: total, text: formatThbCompact(total) },
       scopeLabel: kpiFiscalScopeLabel(
-        `${fyItems.length} initiatives tagged FY${KPI_FISCAL_YEAR} · annual run-rate`
+        `${fyItems.length} initiatives tagged FY${currentFiscalYear()} · annual run-rate`
       ),
       trend: [],
       variant,
@@ -3007,9 +3017,18 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
   const W = chartW;
   const H = 190;
   const padL = 38;
-  // Keep the target label in its own right gutter so it never prints over the
-  // last point, the way the report KPI charts already do.
-  const padR = target === null || target === undefined ? 16 : 76;
+  // The target label keeps its own right gutter so it never prints over the last
+  // point, but it wraps onto two lines ("target" above the value) and the gutter
+  // is measured from that text, so a narrow modal keeps its plot wide instead of
+  // handing a quarter of it to one long line.
+  const hasTarget = target !== null && target !== undefined;
+  const targetValueText = hasTarget ? `${target.toFixed(digits)}${unit}` : '';
+  // 9px UI text averages about 4.9px per character; the extra 14px leaves a clear
+  // gap between the label and the dashed target line.
+  const approxTextWidth = (text) => text.length * 4.9;
+  const padR = hasTarget
+    ? Math.max(34, Math.min(104, Math.round(Math.max(approxTextWidth('target'), approxTextWidth(targetValueText)) + 14)))
+    : 16;
   const padT = 14;
   const padB = 26;
 
@@ -3032,6 +3051,9 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
   const area = `${line} L${xOf(points.length - 1).toFixed(1)},${H - padB} L${xOf(0).toFixed(1)},${H - padB} Z`;
   const yTicks = [minV, minV + span / 2, maxV];
   const xTickIdx = points.length <= 4 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
+  // Centre the two label lines on the target, but keep both inside the plot band
+  // when the target sits on the top or bottom edge.
+  const targetLabelTop = hasTarget ? Math.min(Math.max(yOf(target) - 4, padT + 2), H - padB - 10) : 0;
 
   return (
     <div ref={wrapRef}>
@@ -3054,7 +3076,7 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
       <path d={area} className={fillClass || 'fill-blue-500/10'} />
       <path d={line} fill="none" className={colorClass || 'stroke-blue-600 dark:stroke-blue-400'} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
 
-      {target !== null && target !== undefined && (
+      {hasTarget && (
         <g>
           <line
             x1={padL}
@@ -3065,8 +3087,11 @@ function KpiTrendChart({ points, target, unit, digits, colorClass, fillClass, th
             strokeWidth="1"
             strokeDasharray="5 4"
           />
-          <text x={W - 3} y={yOf(target) + 3} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px' }}>
-            target {target.toFixed(digits)}{unit}
+          <text x={W - 4} y={targetLabelTop} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px' }}>
+            target
+          </text>
+          <text x={W - 4} y={targetLabelTop + 10} textAnchor="end" aria-hidden="true" className="fill-rose-500 dark:fill-rose-400" style={{ fontSize: '9px', fontWeight: 700 }}>
+            {targetValueText}
           </text>
         </g>
       )}
@@ -3254,7 +3279,7 @@ function KpiDeepDiveModal({
   records,
   gateRecords,
   globalSide,
-  globalScope,
+  scopeFilters,
   costProjects,
   customerFeedback,
   onClose
@@ -3262,6 +3287,11 @@ function KpiDeepDiveModal({
   const [rangeId, setRangeId] = useState('90D');
   const [variantFilter, setVariantFilter] = useState('ALL');
   const meta = KPI_DEEP_DIVE_META[kpiKey] || KPI_DEEP_DIVE_META.fpy;
+  // The process filter is the one dimension claims and cost-saving records cannot
+  // honour, so the modal says so only when it is actually narrowing something.
+  const processFilter = (scopeFilters || []).find((filter) => filter.key === 'process');
+  const processNarrowsProduction =
+    meta.family !== 'quality' && Boolean(processFilter && processFilter.value && processFilter.value !== 'ALL');
   const range = KPI_RANGE_OPTIONS.find((r) => r.id === rangeId) || KPI_RANGE_OPTIONS[1];
   const cutoffIso = range.days ? addDaysIso(todayIso(), -(range.days - 1)) : null;
 
@@ -3425,49 +3455,27 @@ function KpiDeepDiveModal({
         </div>
 
         <div className="p-5 space-y-5">
-          {globalScope && (
-            <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-              <span className="font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 mr-1">
+          {Array.isArray(scopeFilters) && scopeFilters.length > 0 && (
+            <div className="no-print flex flex-wrap items-center gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 Global scope
               </span>
-              {[
-                { label: globalScope.family === 'ALL' ? 'All families' : globalScope.family, applies: true },
-                { label: globalScope.model === 'ALL' ? 'All models' : globalScope.model, applies: true },
-                { label: globalScope.phase === 'ALL' ? 'All phases' : globalScope.phase, applies: true },
-                { label: globalScope.side === 'ALL' ? 'Both sides' : globalScope.side, applies: true },
-                {
-                  label: !globalScope.process || globalScope.process === 'ALL' ? 'All processes' : globalScope.process,
-                  // Claims and cost-saving records carry no process field, so the
-                  // filter cannot narrow those two dives — say so instead of implying it did.
-                  applies: meta.family === 'quality'
-                }
-              ].map((chip) => (
-                <span
-                  key={chip.label}
-                  title={
-                    chip.applies
-                      ? undefined
-                      : 'Claims and cost-saving records carry no process field — this filter only narrows production-based KPIs.'
-                  }
-                  className={`px-1.5 py-0.5 rounded border ${
-                    chip.applies
-                      ? 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
-                      : 'border-dashed border-slate-300 dark:border-slate-600 text-slate-400 dark:text-slate-500'
-                  }`}
-                >
-                  {chip.label}
-                </span>
+              {scopeFilters.map((filter) => (
+                <ScopeFilterSelect
+                  key={filter.key}
+                  label={filter.label}
+                  ariaLabel={`${filter.ariaLabel} (deep dive)`}
+                  value={filter.value}
+                  options={filter.options}
+                  allLabel={filter.allLabel}
+                  onChange={filter.onChange}
+                />
               ))}
-              <span className="text-slate-400 dark:text-slate-500">
-                — this dive only covers records inside the global scope
-              </span>
-              <button
-                type="button"
-                onClick={onClose}
-                className="no-print font-semibold text-blue-600 dark:text-blue-400 hover:underline"
-              >
-                Change scope
-              </button>
+              {processNarrowsProduction && (
+                <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                  Claims and cost-saving records carry no process field, so Process only narrows production-based KPIs.
+                </span>
+              )}
             </div>
           )}
 

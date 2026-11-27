@@ -98,11 +98,9 @@ function reportInRange(iso, from, to) {
   return /^\d{4}-\d{2}-\d{2}$/.test(day) && day >= from && day <= to;
 }
 
+/** Report-side name for the shared fiscal-year rule (see currentFiscalYear). */
 function reportFiscalYearOf(iso) {
-  const day = String(iso || '').slice(0, 10);
-  const year = Number(day.slice(0, 4)) || KPI_FISCAL_YEAR;
-  const month = Number(day.slice(5, 7)) || 1;
-  return month >= FISCAL_YEAR_START_MONTH ? year : year - 1;
+  return currentFiscalYear(iso);
 }
 
 function reportIsoShift(iso, days) {
@@ -1140,7 +1138,7 @@ function ReportsView({
   scopeLabel = 'All programs'
 }) {
   // The report opens on the fiscal year that contains today, so the FY presets and
-  // the default period roll over on 1 April instead of pinning KPI_FISCAL_YEAR.
+  // the default period roll over on 1 April instead of pinning a fixed year.
   const today = todayIso();
   const fiscalYear = reportFiscalYearOf(today);
   const fiscalWindow = fiscalYearWindow(fiscalYear);

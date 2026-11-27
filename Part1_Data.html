@@ -520,7 +520,7 @@ function exportCostProjectsCsv(items) {
       m.roiMonths.toFixed(1),
       csvText(p.feasibility),
       csvText(p.stage),
-      csvText(p.fyTarget || 'FY2026'),
+      csvText(p.fyTarget || `FY${currentFiscalYear()}`),
       csvText(p.owner)
     ].join(',');
   });
@@ -4280,7 +4280,20 @@ function getFamilyGroup(item) {
  * year the fiscal year opens in, so FY2026 = 2026-04-01 … 2027-03-31.
  */
 const FISCAL_YEAR_START_MONTH = 4;
-const KPI_FISCAL_YEAR = 2026;
+
+/**
+ * The fiscal year that contains `iso` (default: today in the plant time zone).
+ * Every scorecard tile, the MIH measure, the cost-saving tag test and the report
+ * presets derive from this one function, so the whole app rolls over on 1 April
+ * instead of staying pinned to the year it was deployed in.
+ */
+function currentFiscalYear(iso = todayIso()) {
+  const day = String(iso || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return currentFiscalYear(todayIso());
+  const year = Number(day.slice(0, 4));
+  const month = Number(day.slice(5, 7));
+  return month >= FISCAL_YEAR_START_MONTH ? year : year - 1;
+}
 
 function fiscalYearWindow(fyStartYear) {
   const pad = (n) => String(n).padStart(2, '0');
@@ -4295,25 +4308,27 @@ function fiscalYearWindow(fyStartYear) {
 /**
  * One fiscal-year test for every KPI tile. The MIH tile has always measured against
  * the FY window above; claims and cost saving read the same window (and fiscal-year
- * tag) so "FY2026" cannot mean two different twelve-month periods on one scorecard.
+ * tag) so one fiscal year cannot mean two different twelve-month periods on one
+ * scorecard. The year defaults to the one that contains today, never to a constant.
  */
-function isInKpiFiscalYear(iso, fiscalYear = KPI_FISCAL_YEAR) {
+function isInKpiFiscalYear(iso, fiscalYear = currentFiscalYear()) {
   const day = String(iso || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
   const { start, end } = fiscalYearWindow(fiscalYear);
   return day >= start && day <= end;
 }
 
-// Cost-saving initiatives carry a fiscal-year tag rather than a date; untagged
-// records keep the historical default of the current KPI fiscal year.
-function isKpiFiscalYearTag(fyTarget, fiscalYear = KPI_FISCAL_YEAR) {
+// Cost-saving initiatives carry a fiscal-year tag rather than a date; an untagged
+// record belongs to the fiscal year being scored, the same default as the tiles.
+function isKpiFiscalYearTag(fyTarget, fiscalYear = currentFiscalYear()) {
   return String(fyTarget || `FY${fiscalYear}`).trim().toUpperCase() === `FY${fiscalYear}`;
 }
 
 /** One fiscal window for the scorecard tile and every drill-down that explains it. */
 function kpiFiscalScopeLabel(suffix) {
-  const { start, end } = fiscalYearWindow(KPI_FISCAL_YEAR);
-  const window = `FY${KPI_FISCAL_YEAR} ${start} to ${end}`;
+  const fiscalYear = currentFiscalYear();
+  const { start, end } = fiscalYearWindow(fiscalYear);
+  const window = `FY${fiscalYear} ${start} to ${end}`;
   return suffix ? `All programs · ${window} · ${suffix}` : `All programs · ${window}`;
 }
 
@@ -4386,7 +4401,7 @@ function mihApprovalIso(gateRecords, projectId, lineKey, today = todayIso()) {
  * an approval with no usable date is accepted (it cannot be shown to be late).
  */
 function summarizeMihAchievement(lines, options = {}) {
-  const { today = todayIso(), fiscalYear = KPI_FISCAL_YEAR } = options;
+  const { today = todayIso(), fiscalYear = currentFiscalYear(today) } = options;
   const window = fiscalYearWindow(fiscalYear);
   const summary = {
     fiscalYear,
@@ -4446,6 +4461,104 @@ function getLineVariantsForProject(project) {
     });
   });
   return variants;
+}
+
+const PROGRAM_STATUS_OPTIONS = ['On Track', 'At Risk', 'Blocked', 'On Hold', 'Completed'];
+const PROGRAM_FAMILY_GROUPS = ['MB14"', 'MB16"', 'iMac', 'MacMini', 'Display'];
+
+/**
+ * Family groups already used by a program first, then the house presets. The
+ * picker must never hide a family the workspace already runs under.
+ */
+function projectFamilyGroupOptions(projects) {
+  const seen = new Set();
+  const options = [];
+  const add = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return;
+    const key = normalizeProductKey(text);
+    if (seen.has(key)) return;
+    seen.add(key);
+    options.push(text);
+  };
+  (projects || []).forEach((project) => add(project && project.familyGroup));
+  PROGRAM_FAMILY_GROUPS.forEach(add);
+  return options;
+}
+
+/**
+ * Applies an edited program header. The record id and the build matrix belong
+ * to other CRUD paths, so a settings edit can never rename an id or drop the
+ * Config x Side rows behind it. A field left blank keeps the value on file
+ * instead of wiping it.
+ */
+function projectFromSettingsForm(project, form) {
+  if (!project) return project;
+  const source = form || {};
+  const pick = (key, fallback) => {
+    const raw = source[key] === undefined || source[key] === null ? '' : source[key];
+    const text = String(raw).trim();
+    return text || fallback;
+  };
+  const familyGroup = pick('familyGroup', project.familyGroup || PROGRAM_FAMILY_GROUPS[0]);
+  return {
+    ...project,
+    model: pick('model', project.model).toUpperCase(),
+    phase: pick('phase', project.phase),
+    status: pick('status', project.status),
+    familyGroup: familyGroup,
+    family: pick('family', project.family || `${familyGroup} FDB Fan Module`),
+    customer: pick('customer', project.customer),
+    moRange: pick('moRange', project.moRange),
+    etdDate: pick('etdDate', project.etdDate),
+    mihDate: pick('mihDate', project.mihDate),
+    pm: pick('pm', project.pm),
+    leader: pick('leader', project.leader),
+    owner: pick('owner', project.owner),
+    spec: pick('spec', project.spec),
+    lineSpec: pick('lineSpec', project.lineSpec)
+  };
+}
+
+/**
+ * Everything a program deletion takes with it, so the confirmation names the
+ * cost before anything is removed. Production records, cost-saving items and
+ * the append-only SignOffLog are history and are deliberately not counted.
+ */
+function projectDeletionImpact(projectId, tasks, gateRecords, scheduleOverrides) {
+  const id = String(projectId || '');
+  if (!id) return { tasks: 0, lines: 0, dossiers: 0, scheduleOverrides: 0 };
+  const projectTasks = (tasks || []).filter((task) => task && task.projectId === id);
+  const lineMap = (gateRecords && gateRecords[id]) || {};
+  const lines = Object.keys(lineMap);
+  let dossiers = 0;
+  lines.forEach((line) => {
+    dossiers += Object.keys(lineMap[line] || {}).length;
+  });
+  const overrides = Object.keys(scheduleOverrides || {}).filter(
+    (key) => key.indexOf(`${id}::`) === 0
+  );
+  return { tasks: projectTasks.length, lines: lines.length, dossiers, scheduleOverrides: overrides.length };
+}
+
+/**
+ * Removes one program's owned working records: its tasks, gate dossiers and
+ * Gantt overrides. Returns new objects, so the caller's state is never mutated
+ * and a cancelled deletion cannot leave a half-pruned workspace.
+ */
+function pruneProjectFromWorkspace(projectId, tasks, gateRecords, scheduleOverrides) {
+  const id = String(projectId || '');
+  const nextGates = { ...(gateRecords || {}) };
+  delete nextGates[id];
+  const nextOverrides = {};
+  Object.keys(scheduleOverrides || {}).forEach((key) => {
+    if (key.indexOf(`${id}::`) !== 0) nextOverrides[key] = scheduleOverrides[key];
+  });
+  return {
+    tasks: (tasks || []).filter((task) => !task || task.projectId !== id),
+    gateRecords: nextGates,
+    scheduleOverrides: nextOverrides
+  };
 }
 
 function computeBuildMatrixRow(row) {
@@ -4741,6 +4854,8 @@ function StatusBadge({ status }) {
     Conditional: 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800',
     Blocked: 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800',
     'At Risk': 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800',
+    'On Hold': 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-200 border-amber-200 dark:border-amber-800',
+    Completed: 'bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800',
     Rejected: 'bg-rose-50 dark:bg-rose-950 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800',
     Pending: 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800',
     'To Do': 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800',
