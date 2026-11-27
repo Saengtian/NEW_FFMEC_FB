@@ -72,7 +72,8 @@ and the backing spreadsheet.
 ## Rules that keep this repo healthy
 
 1. **Edit sources, never artifacts.** `Bundle.html` and `Styles.html` are rebuilt; `bun run test`
-   fails when the committed artifacts do not match a fresh build.
+   fails when the committed artifacts do not match a fresh build. CI runs that same suite on every
+   push (`.github/workflows/ci.yml`), so a stale artifact cannot sit unnoticed until someone deploys.
 2. **Never leave in-flight state in the store.** Seed data may be incomplete, but nothing fabricated
    may be written to the spreadsheet; the app strips known fabricated Cpk seeds on load.
 3. **Provisional limits stay provisional** until a planner enters the real limit. The six CTQs in

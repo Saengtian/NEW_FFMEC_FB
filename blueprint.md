@@ -229,6 +229,10 @@ bun run build → clasp push -f (12 files) → clasp version "deploy <sha>"
               → clasp update-deployment <prod-id> -V <n> -d "deploy <sha>"   (only on a pass)
 ```
 
+- `bun run test` also runs on every push in GitHub Actions (`.github/workflows/ci.yml`, bun 1.4.0,
+  frozen lockfile). It is the same suite a deploy assumes: helper suites plus the byte-identical
+  generated-bundle check, so a commit whose `Bundle.html` does not match its sources fails without a
+  person running anything.
 - `.claspignore` keeps tooling, docs and local agent folders out of the pushed project; only
   `appsscript.json`, `Code.js`, `Index.html`, `Icons.html`, `Part1…Part6`, `Bundle.html`,
   `Styles.html` are tracked.
