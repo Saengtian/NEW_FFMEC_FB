@@ -25,7 +25,8 @@ const ROOT = join(import.meta.dir, "..");
 const sources = {
   part1: readFileSync(join(ROOT, "Part1_Data.html"), "utf8"),
   part2: readFileSync(join(ROOT, "Part2_App.html"), "utf8"),
-  part4: readFileSync(join(ROOT, "Part4_ViewsB.html"), "utf8")
+  part4: readFileSync(join(ROOT, "Part4_ViewsB.html"), "utf8"),
+  code: readFileSync(join(ROOT, "Code.js"), "utf8")
 };
 
 /** Top-level declarations the checks are made of. Functions end at column 0. */
@@ -33,7 +34,8 @@ const DECLARATIONS = [
   { file: "part1", pattern: /function nextId\([\s\S]*?\n}/ },
   { file: "part1", pattern: /function withIdCounter\([\s\S]*?\n}/, optional: true },
   { file: "part1", pattern: /function getSideList\([\s\S]*?\n}/ },
-  { file: "part4", pattern: /function nextBuildMatrixConfig\([\s\S]*?\n}/ }
+  { file: "part4", pattern: /function nextBuildMatrixConfig\([\s\S]*?\n}/ },
+  { file: "code", pattern: /function saveIdentity_\([\s\S]*?\n}/, optional: true }
 ];
 
 const pieces = DECLARATIONS.flatMap(({ file, pattern, optional }) => {
@@ -49,7 +51,8 @@ const pieces = DECLARATIONS.flatMap(({ file, pattern, optional }) => {
 const api = new Function(
   `"use strict";\n${pieces.join("\n")}\n` +
     "return { nextId, getSideList, nextBuildMatrixConfig, " +
-    "withIdCounter: typeof withIdCounter === 'function' ? withIdCounter : undefined };"
+    "withIdCounter: typeof withIdCounter === 'function' ? withIdCounter : undefined, " +
+    "saveIdentity_: typeof saveIdentity_ === 'function' ? saveIdentity_ : undefined };"
 )();
 
 /**
@@ -128,6 +131,13 @@ check('deleting a seeded ME12 records the high-water mark', () => {
   deep(nextCounters, { 'ME:PRJ-X4151': 12 });
   equal(api.nextBuildMatrixConfig(projects[0], nextCounters['ME:PRJ-X4151'] || 0), 'ME13');
 });
+
+check('missing email yields unknown actor', () =>
+  deep(api.saveIdentity_('', 'deployer@example.com'),
+    { actorLabel: 'unknown', executorEmail: 'deployer@example.com' }));
+check('real email stays the actor', () =>
+  deep(api.saveIdentity_('user@example.com', 'deployer@example.com'),
+    { actorLabel: 'user@example.com', executorEmail: 'deployer@example.com' }));
 
 for (const r of results) {
   console.log(`  ${r.ok ? "pass" : "FAIL"}  ${r.label}${r.ok ? "" : `  (${r.message})`}`);

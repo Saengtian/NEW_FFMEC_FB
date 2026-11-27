@@ -173,6 +173,18 @@ function getExecutorEmail_() {
 }
 
 /**
+ * Resolve the AuditLog identity for a save. A missing Google identity is
+ * recorded as `unknown` instead of refusing the save; the executor email is
+ * kept separately for diagnostics and must never replace the actor label.
+ */
+function saveIdentity_(userEmail, executorEmail) {
+  return {
+    actorLabel: userEmail || 'unknown',
+    executorEmail: executorEmail || ''
+  };
+}
+
+/**
  * Neutralizes spreadsheet formula injection: a text cell whose trimmed value
  * starts with =, +, -, @, tab or CR would otherwise be evaluated as a formula
  * when written with setValues/appendRow. Non-string values pass through so
@@ -447,15 +459,7 @@ function initializeDatabase(payloadJson) {
  * debounced autosave cheap.
  */
 function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirrors) {
-  // Reject unauthenticated saves server-side: the web app runs as the accessing
-  // user, and a save with no identity could not be attributed or defended.
-  const userEmail = getActiveUserEmail_();
-  if (!userEmail) {
-    throw new Error(
-      'Save refused: FFM NPI Ops could not read your Google Workspace identity. ' +
-      'Sign in with your Minebea account, grant the requested permissions, and reload.'
-    );
-  }
+  const identity = saveIdentity_(getActiveUserEmail_(), getExecutorEmail_());
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
@@ -468,8 +472,8 @@ function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirro
     const stateSheet = getOrCreateSheet_(ss, CONFIG.STATE_SHEET);
     const payload = typeof payloadJson === 'string' ? JSON.parse(payloadJson) : payloadJson;
     const nowIso = new Date().toISOString();
-    const actorLabel = userEmail;
-    const executorEmail = getExecutorEmail_();
+    const actorLabel = identity.actorLabel;
+    const executorEmail = identity.executorEmail;
 
     // Read current revision, keeping the rows so the copy being replaced can
     // be archived before the store is rewritten.
