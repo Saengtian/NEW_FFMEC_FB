@@ -41,6 +41,13 @@ const DECLARATIONS = [
   /function productionRecordBlockingIssues\([\s\S]*?\n}/,
   /function clampProductionDowntime\([\s\S]*?\n}/,
   /function sanitizeProductionRecords\([\s\S]*?\n}/,
+  /function parseIsoDate\([\s\S]*?\n}/,
+  /function isoDateParts\([\s\S]*?\n}/,
+  /function formatMonthDay\([\s\S]*?\n}/,
+  /function productionDropReport\([\s\S]*?\n}/,
+  /function productionDropRowLines\([\s\S]*?\n}/,
+  /function productionDropMessage\([\s\S]*?\n}/,
+  /function productionDropSummary\([\s\S]*?\n}/,
   /const INITIAL_PRODUCTION_RECORDS = \[[\s\S]*?\n\];/,
 ];
 
@@ -57,7 +64,8 @@ const api = new Function(
   `"use strict";\n${pieces.join("\n")}\n` +
     "return { PRODUCTION_RECORD_ISSUES, computeProductionMetrics, productionLineKey, productionRecordLabel, " +
     "productionRecordGoodUnits, productionRecordIssues, productionRecordBlockingIssues, clampProductionDowntime, " +
-    "sanitizeProductionRecords, INITIAL_PRODUCTION_RECORDS };"
+    "sanitizeProductionRecords, productionDropReport, productionDropRowLines, productionDropMessage, " +
+    "productionDropSummary, INITIAL_PRODUCTION_RECORDS };"
 )();
 
 const {
@@ -68,6 +76,9 @@ const {
   productionRecordGoodUnits,
   productionRecordIssues,
   productionRecordBlockingIssues,
+  productionDropReport,
+  productionDropMessage,
+  productionDropSummary,
   clampProductionDowntime,
   sanitizeProductionRecords,
   INITIAL_PRODUCTION_RECORDS,
@@ -269,6 +280,57 @@ check("loading a list drops the rows the KPIs cannot trust", () => {
 
   // Whatever the loader keeps is exactly what the form would have accepted.
   cleaned.records.forEach((row) => assert.deepEqual(productionRecordBlockingIssues(row), []));
+});
+
+check("a refused row is reported with its day, line, station and reason", () => {
+  const cleaned = sanitizeProductionRecords([
+    record(),
+    record({ id: "REC-GOOD", date: "2026-11-22", goodQty: 900 }),
+    "not a record",
+  ]);
+  const report = productionDropReport(cleaned.dropped);
+  assert.equal(report.length, 2);
+
+  const impossibleGood = report[0];
+  assert.equal(impossibleGood.dateIso, "2026-11-22");
+  assert.equal(impossibleGood.dateText, "11/22");
+  assert.equal(impossibleGood.line, "X4151 · ME11 RHS");
+  assert.equal(impossibleGood.station, "Fan Assembly");
+  assert.deepEqual(impossibleGood.codes, [PRODUCTION_RECORD_ISSUES.GOOD_EXCEEDS_INPUT]);
+  assert.match(impossibleGood.reason, /exceed/);
+
+  // A row too broken to name a line still names a row and a reason.
+  const unreadable = report[1];
+  assert.equal(unreadable.line, "unidentified line");
+  assert.equal(unreadable.station, "no station");
+  assert.equal(unreadable.dateText, "—");
+  assert.deepEqual(unreadable.codes, [PRODUCTION_RECORD_ISSUES.NOT_A_RECORD]);
+});
+
+check("the drop report is what the toast and the save summary say", () => {
+  const rows = [1, 2, 3, 4, 5].map((n) =>
+    record({ id: `R${n}`, date: `2026-11-2${n}`, input: 0 })
+  );
+  const report = productionDropReport(sanitizeProductionRecords(rows).dropped);
+  assert.equal(report.length, 5);
+
+  const message = productionDropMessage(report);
+  const lines = message.split("\n");
+  assert.match(lines[0], /^5 production rows rejected on load/);
+  assert.equal(lines.length, 6, "headline, four rows, then the count held back");
+  assert.match(lines[1], /^11\/21 · X4151 · ME11 RHS · Fan Assembly: /);
+  assert.match(lines[5], /^…and 1 more$/);
+
+  const summary = productionDropSummary(report, 3);
+  assert.match(summary, /^Dropped 5 invalid production record\(s\): /);
+  assert.equal(summary.includes("\n"), false, "the save summary lives on one cell");
+  assert.match(summary, /more$/);
+  assert.match(summary, /11\/21 · X4151 · ME11 RHS · Fan Assembly: /);
+
+  // Nothing dropped is nothing to say.
+  assert.equal(productionDropMessage([]), "");
+  assert.equal(productionDropSummary([]), "");
+  assert.equal(productionDropMessage(productionDropReport(sanitizeProductionRecords([record()]).dropped)), "");
 });
 
 check("loading does not mutate the rows it keeps", () => {

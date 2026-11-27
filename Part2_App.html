@@ -59,21 +59,35 @@ function createToastController(options) {
   } = options;
   let nextId = 1;
   let activeId = null;
+  let activeTone = null;
   let timerId = null;
 
   return {
-    show(message, tone = 'success') {
+    // `durationMs` lets a message that must be read (which rows a load refused)
+    // stay up longer than a success confirmation.
+    show(message, tone = 'success', options = {}) {
+      // A success line must not bury a warning: "Synced to Google Sheet" used to
+      // replace the list of rows a load refused before anyone could read it.
+      if (activeId !== null && activeTone === 'warning' && tone !== 'warning') return;
       if (timerId !== null) clearTimeoutFn(timerId);
       const id = nextId++;
       activeId = id;
+      activeTone = tone;
       onChange({ id, message, tone });
+      const wait = Number(options.durationMs) > 0 ? Number(options.durationMs) : durationMs;
       timerId = setTimeoutFn(() => {
         timerId = null;
         if (activeId === id) {
           activeId = null;
           onChange(null);
         }
-      }, durationMs);
+      }, wait);
+    },
+    hide() {
+      if (timerId !== null) clearTimeoutFn(timerId);
+      timerId = null;
+      activeId = null;
+      onChange(null);
     }
   };
 }
@@ -209,8 +223,15 @@ function App() {
     toastControllerRef.current = createToastController({ onChange: (value) => setToast(value) });
   }
 
-  const showToast = (message, tone = 'success') => {
-    toastControllerRef.current.show(message, tone);
+  const showToast = (message, tone = 'success', options) => {
+    toastControllerRef.current.show(message, tone, options);
+  };
+
+  // A load that refuses rows names them and stays up until dismissed: the count
+  // alone left nobody able to find the run that vanished, or repair it.
+  const announceProductionDrops = (report) => {
+    if (!Array.isArray(report) || report.length === 0) return;
+    showToast(productionDropMessage(report), 'warning', { durationMs: 20000 });
   };
 
   // ==========================================================================
@@ -268,6 +289,11 @@ function App() {
     let frozenLimits = 0;
     let purgedEvidence = 0;
     let removedFabricated = 0;
+    // Declared at function scope: the return below reads these, and `let` inside
+    // the try block made that read a ReferenceError that hid every load report.
+    let productionDropped = 0;
+    let productionRepaired = 0;
+    let productionDrops = [];
     isHydratingRef.current = true;
     try {
       if (Array.isArray(data.projects)) setProjects(data.projects);
@@ -279,8 +305,6 @@ function App() {
         purgedEvidence = purged.removed;
         setGateRecords(purged.records);
       }
-      let productionDropped = 0;
-      let productionRepaired = 0;
       if (Array.isArray(data.productionRecords)) {
         // A row that cannot describe a real run never reaches the tiles: the same
         // rules the form enforces also gate what is loaded from the Sheet, a CSV
@@ -288,6 +312,7 @@ function App() {
         const cleaned = sanitizeProductionRecords(data.productionRecords);
         productionDropped = cleaned.dropped.length;
         productionRepaired = cleaned.repaired;
+        productionDrops = productionDropReport(cleaned.dropped);
         setProductionRecords(cleaned.records);
       }
       const loadedSpecs = Array.isArray(data.masterSpecs)
@@ -320,7 +345,14 @@ function App() {
     setTimeout(() => {
       isHydratingRef.current = false;
     }, 150);
-    return { frozenLimits, purgedEvidence, removedFabricated, productionDropped, productionRepaired };
+    return {
+      frozenLimits,
+      purgedEvidence,
+      removedFabricated,
+      productionDropped,
+      productionRepaired,
+      productionDrops
+    };
   };
 
   // ---------------------------------------------------------------------------
@@ -432,7 +464,8 @@ function App() {
   const handleConflictUseRemote = () => {
     const conflict = syncConflictRef.current;
     if (!conflict || !conflict.remote) return;
-    hydrateFromPayload(conflict.remote);
+    const hydratedRemote = hydrateFromPayload(conflict.remote);
+    announceProductionDrops(hydratedRemote && hydratedRemote.productionDrops);
     revisionRef.current = conflict.revision;
     setCloudSync((prev) => ({
       ...prev,
@@ -534,7 +567,8 @@ function App() {
     if (Array.isArray(restored.cpkRecords)) {
       restored.cpkRecords = migrateCpkRecords(restored.cpkRecords, restored.masterSpecs || masterSpecs);
     }
-    hydrateFromPayload(restored);
+    const hydratedRestore = hydrateFromPayload(restored);
+    announceProductionDrops(hydratedRestore && hydratedRestore.productionDrops);
     pushToGoogleSheet(`Restored Rev #${revision} from state history`, {
       toast: true,
       refreshMirrors: true,
@@ -561,7 +595,14 @@ function App() {
           return;
         }
         if (res && res.initialized && res.data) {
-          let backfill = { frozenLimits: 0, purgedEvidence: 0, removedFabricated: 0, productionDropped: 0, productionRepaired: 0 };
+          let backfill = {
+            frozenLimits: 0,
+            purgedEvidence: 0,
+            removedFabricated: 0,
+            productionDropped: 0,
+            productionRepaired: 0,
+            productionDrops: []
+          };
           try {
             backfill = hydrateFromPayload(res.data) || backfill;
           } catch (err) {
@@ -593,13 +634,19 @@ function App() {
             backfillNotes.push(`Removed ${backfill.removedFabricated} fabricated Cpk seed row(s)`);
           }
           if (backfill.productionDropped > 0) {
-            backfillNotes.push(`Dropped ${backfill.productionDropped} invalid production record(s)`);
+            // The summary is what the Sheet's state history keeps, so it names the
+            // rows instead of only counting them.
+            backfillNotes.push(productionDropSummary(backfill.productionDrops, 3));
           }
           if (backfill.productionRepaired > 0) {
             backfillNotes.push(`Zeroed negative downtime on ${backfill.productionRepaired} production record(s)`);
           }
-          if (backfillNotes.length > 0) saveSchedulerRef.current.schedule(backfillNotes);
+          // One summary string: the sender takes a summary and options, so passing
+          // the notes as separate arguments used to keep only the first.
+          if (backfillNotes.length > 0) saveSchedulerRef.current.schedule([backfillNotes.join(' · ')]);
           if (showNotice) showToast(`Reloaded workspace from Google Sheet (Rev #${res.revision || 1})`, 'success');
+          // After the reload notice, so the rows win the single toast slot.
+          announceProductionDrops(backfill.productionDrops);
 
           // Self-healing SignOffLog: a save whose ledger append failed cannot fail
           // the save (the revision is real), so the missing rows are repaired here.
@@ -751,8 +798,9 @@ function App() {
         if (!payload.projects || !Array.isArray(payload.projects)) {
           throw new Error('Invalid FFM NPI Ops backup file.');
         }
-        hydrateFromPayload(payload);
+        const hydratedBackup = hydrateFromPayload(payload);
         showToast('Workspace restored from JSON backup.', 'success');
+        announceProductionDrops(hydratedBackup && hydratedBackup.productionDrops);
         if (isGasEnv) {
           setTimeout(() => pushToGoogleSheet('Restored from JSON backup', { toast: true, refreshMirrors: true, payload }), 300);
         }
@@ -3790,14 +3838,26 @@ function App() {
       {/* Toast Notification */}
       {toast && (
         <div
-          className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-lg border text-xs font-semibold flex items-center gap-2 ${
+          className={`fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-lg border text-xs font-semibold flex items-start gap-2 max-w-md ${
             toast.tone === 'warning'
               ? 'bg-amber-950 text-amber-100 dark:text-amber-100 border-amber-800'
               : 'bg-slate-900 dark:bg-slate-700 text-white border-slate-700'
           }`}
         >
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 dark:text-emerald-400 shrink-0" />
-          <span>{toast.message}</span>
+          {toast.tone === 'warning' ? (
+            <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 dark:text-emerald-400 shrink-0" />
+          )}
+          <span className="whitespace-pre-line">{toast.message}</span>
+          <button
+            type="button"
+            onClick={() => toastControllerRef.current.hide()}
+            aria-label="Dismiss notification"
+            className="ml-1 p-0.5 rounded text-current/70 hover:text-current shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
     </div>

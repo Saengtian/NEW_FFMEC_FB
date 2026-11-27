@@ -56,7 +56,7 @@ The app answers those, and refuses to answer the rest with invented numbers.
 | **Cpk & Master Specs** | Spec library, capability roll-up, distribution compare, spec correction, import pipeline; a *N provisional* chip narrows both tabs to the CTQs still on placeholder limits, including those no upload has reached | Upload Cpk data, correct a spec, compare distributions, filter to provisional CTQs |
 | **Projects & Cost Saving** | VA/VE, yield and HC saving ideas with computed annual saving | Edit item, compare against the 10M THB target |
 | **Customer Feedback** | Claims and FA/8D cases with severity, stage and closure status | Open case, update 8D stage |
-| **Production Records** | Yield, UPH, efficiency and loss per station per day | Add / edit / delete a record, filter by station |
+| **Production Records** | Yield, UPH, efficiency and loss per station per day; a load that refuses rows names the day, line, station and rule for each in a dismissible warning, and the save summary the Sheet keeps repeats them | Add / edit / delete a record, filter by station |
 | **Team & Workload** | Roster, product ownership, external programs, derived workload, unassigned work; each owed signature reads as its gate's prefix plus the plan date (`Dep. 01/03 · 5d overdue`), closest deadline first | Claim a task, edit a member, open the workload drawer |
 | **Reports & Snapshots** | Six-KPI executive report for a fiscal period, printable A4 deck, CSV/print | Pick a preset, export the deck, print |
 

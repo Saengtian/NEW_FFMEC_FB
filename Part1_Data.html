@@ -2392,6 +2392,74 @@ function sanitizeProductionRecords(records) {
   return { records: kept, dropped: dropped, repaired: repaired };
 }
 
+/**
+ * What a load refused, in the form someone can go and fix: one entry per dropped
+ * row naming its day, line and station, plus the rule that refused it. The loader
+ * used to reduce this to a count, which told nobody which run had vanished.
+ */
+function productionDropReport(dropped) {
+  return (Array.isArray(dropped) ? dropped : []).map(function(entry, index) {
+    const record = (entry && entry.record) || {};
+    const issues = entry && Array.isArray(entry.issues) ? entry.issues : [];
+    const line = [record.model, [record.config, record.side].filter(Boolean).join(' ')]
+      .filter(Boolean)
+      .join(' · ');
+    return {
+      key: String(record.id || '') || `row-${index + 1}`,
+      dateIso: String(record.date || '').slice(0, 10),
+      dateText: formatMonthDay(record.date),
+      line: line || 'unidentified line',
+      station: String(record.station || '').trim() || 'no station',
+      reason:
+        issues
+          .map(function(issue) { return issue.message; })
+          .filter(Boolean)
+          .join(' ') || 'the row could not be read',
+      codes: issues
+        .map(function(issue) { return issue.code; })
+        .filter(Boolean)
+    };
+  });
+}
+
+/** One line per refused row: `11/20 · X4152 EVT · ME11-RHS · Station A: reason`. */
+function productionDropRowLines(report, limit) {
+  const list = Array.isArray(report) ? report : [];
+  const cap = Number(limit) > 0 ? Number(limit) : list.length;
+  return list.slice(0, cap).map(function(entry) {
+    return `${entry.dateText} · ${entry.line} · ${entry.station}: ${entry.reason}`;
+  });
+}
+
+/** The toast body: the headline, then a line per row, then what was held back. */
+function productionDropMessage(report, limit) {
+  const list = Array.isArray(report) ? report : [];
+  if (list.length === 0) return '';
+  const cap = Number(limit) > 0 ? Number(limit) : 4;
+  const lines = productionDropRowLines(list, cap);
+  const rest = list.length - lines.length;
+  return (
+    `${list.length} production row${list.length === 1 ? '' : 's'} rejected on load — left out of every KPI:` +
+    '\n' +
+    lines.join('\n') +
+    (rest > 0 ? `\n…and ${rest} more` : '')
+  );
+}
+
+/** The same details on one line, for the save summary the Sheet keeps on file. */
+function productionDropSummary(report, limit) {
+  const list = Array.isArray(report) ? report : [];
+  if (list.length === 0) return '';
+  const cap = Number(limit) > 0 ? Number(limit) : 3;
+  const lines = productionDropRowLines(list, cap);
+  const rest = list.length - lines.length;
+  return (
+    `Dropped ${list.length} invalid production record(s): ` +
+    lines.join(' · ') +
+    (rest > 0 ? ` · +${rest} more` : '')
+  );
+}
+
 // ============================================================================
 // GANTT TIMELINE HELPERS & SIDE-PRIORITY / READINESS SEQUENCING
 // ============================================================================
