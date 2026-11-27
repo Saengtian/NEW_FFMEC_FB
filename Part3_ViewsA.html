@@ -609,7 +609,7 @@ function OverviewView({
   );
 }
 
-function GateWorkstreamMatrix({ projects, gateRecords, globalSide, onOpenGate }) {
+function GateWorkstreamMatrix({ projects, gateRecords, globalSide, scheduleOverrides = {}, onOpenGate }) {
   const groupedSections = useMemo(() => {
     return projects.map((project) => {
       const variants = getLineVariantsForProject(project)
@@ -631,10 +631,28 @@ function GateWorkstreamMatrix({ projects, gateRecords, globalSide, onOpenGate })
     });
   }, [projects, gateRecords, globalSide]);
 
+  // Each line's plan (a dragged schedule where one exists), so a cell can name the
+  // day its gate is due even before anything is signed.
+  const lineSchedules = useMemo(() => {
+    const map = new Map();
+    projects.forEach((project) => {
+      getLineVariantsForProject(project).forEach((variant) => {
+        map.set(`${project.id}::${variant.key}`, lineGateSchedule(project, variant.key, scheduleOverrides));
+      });
+    });
+    return map;
+  }, [projects, scheduleOverrides]);
+
   const renderGateCell = (project, variant, gate, gateIdx) => {
     const lineGates = gateRecords[project.id]?.[variant.key] || {};
     const dossier = lineGates[gate.id];
     const status = dossier?.status || 'Pending';
+    // A passed gate is dated when it was signed; every other cell shows the day the
+    // plan needs it cleared by, so the row reads as a timeline.
+    const passedIso = gateApprovalIso(gateRecords, project.id, variant.key, gate.id);
+    const planIso = gateSignOffDueIso(gate.id, lineSchedules.get(`${project.id}::${variant.key}`));
+    const cellDateIso = passedIso || planIso;
+    const cellDate = cellDateIso ? formatMonthDay(cellDateIso) : null;
 
     const prevGate = gateIdx > 0 ? NPI_GATES[gateIdx - 1] : null;
     const prevApproved = !prevGate || lineGates[prevGate.id]?.status === 'Approved';
@@ -659,10 +677,19 @@ function GateWorkstreamMatrix({ projects, gateRecords, globalSide, onOpenGate })
         <button
           type="button"
           onClick={() => onOpenGate(project.id, gate.id, variant.key)}
-          title={`${project.model} ${project.phase} · ${variant.side} ${variant.config} · ${gate.code} ${gate.label}: ${status}`}
-          className={`w-full py-1 px-1.5 rounded-md border text-[11px] transition-colors ${styleClass}`}
+          title={`${project.model} ${project.phase} · ${variant.side} ${variant.config} · ${gate.code} ${gate.label}: ${status}${
+            passedIso
+              ? ` · passed ${formatMonthDay(passedIso)}`
+              : planIso
+              ? ` · planned ${formatMonthDay(planIso)}`
+              : ''
+          }`}
+          className={`w-full py-1 px-1.5 rounded-md border text-[11px] leading-tight transition-colors ${styleClass}`}
         >
-          {label}
+          <span className="block">{label}</span>
+          <span className="block text-[9px] font-semibold tabular-nums opacity-80">
+            {cellDate || '—'}
+          </span>
         </button>
       </td>
     );
@@ -676,7 +703,8 @@ function GateWorkstreamMatrix({ projects, gateRecords, globalSide, onOpenGate })
             Gate Pass Sign-Off &amp; Dependency Matrix (Model × Phase × Side × Config)
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            Click any gate cell to open its individual or multi-config sign-off dossier · Ordered by Model &gt; Phase &gt; Side &gt; Config
+            Status and date (mm/dd) per gate: a passed gate shows the day it was signed, every other cell the day the
+            plan needs it cleared by · Click any cell to open its sign-off dossier
           </p>
         </div>
 
@@ -2947,6 +2975,7 @@ function GateSignOffView({
   selectedGateId,
   onSelectGate,
   gateRecords,
+  scheduleOverrides = {},
   tasks,
   onToggleCriterion,
   onOpenSignOffModal,
@@ -3778,6 +3807,7 @@ function GateSignOffView({
           projects={projects}
           gateRecords={gateRecords}
           globalSide={globalSide}
+          scheduleOverrides={scheduleOverrides}
           onOpenGate={onOpenGate}
         />
       </div>

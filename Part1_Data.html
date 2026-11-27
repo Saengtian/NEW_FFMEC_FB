@@ -4743,8 +4743,13 @@ function todayIso(now = new Date()) {
  * entries, so only approval records are considered; an undated approval returns
  * null (it cannot be shown to be late).
  */
-function mihApprovalIso(gateRecords, projectId, lineKey, today = todayIso()) {
-  const gate = gateRecords?.[projectId]?.[lineKey]?.mih;
+/**
+ * When one gate on one line was approved — the latest dated approval signature,
+ * else the latest signed-and-approved audit entry. Null when the gate is not
+ * approved or nothing dates it, which callers show as the plan date instead.
+ */
+function gateApprovalIso(gateRecords, projectId, lineKey, gateId, today = todayIso()) {
+  const gate = gateRecords?.[projectId]?.[lineKey]?.[gateId];
   if (!gate || gate.status !== 'Approved') return null;
 
   const parse = (value) => {
@@ -4768,6 +4773,10 @@ function mihApprovalIso(gateRecords, projectId, lineKey, today = todayIso()) {
 
   const dates = (fromApprovers.length ? fromApprovers : fromAuditLog).sort();
   return dates.length ? dates[dates.length - 1] : null;
+}
+
+function mihApprovalIso(gateRecords, projectId, lineKey, today = todayIso()) {
+  return gateApprovalIso(gateRecords, projectId, lineKey, 'mih', today);
 }
 
 /**
