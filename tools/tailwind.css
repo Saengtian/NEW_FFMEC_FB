@@ -10,29 +10,20 @@
     margin: 12mm;
   }
 
-  body * {
-    visibility: hidden;
-  }
-
-  .kpi-print-area,
-  .kpi-print-area * {
-    visibility: visible;
-  }
-
-  /* The shell keeps its height on screen; on paper that height, and every
-     sibling of the dialog, would paginate as empty sheets after the panel. */
+  /* The app paints slate in both themes; print on white instead, so the shell
+     cannot show through behind the panel. */
   html,
   body,
-  #root {
-    height: auto !important;
+  #root,
+  .app-shell {
     background: #fff !important;
   }
 
+  /* The shell's own height and chrome would paginate as empty sheets after the
+     panel, so only the dialog is laid out on paper. */
   .app-shell {
     display: block !important;
-    height: auto !important;
     min-height: 0 !important;
-    background: #fff !important;
   }
 
   .app-shell > *:not(.kpi-print-overlay) {
@@ -44,17 +35,13 @@
   .kpi-print-overlay {
     display: block !important;
     position: static !important;
-    inset: auto !important;
     overflow: visible !important;
     padding: 0 !important;
     background: transparent !important;
-    -webkit-backdrop-filter: none !important;
-    backdrop-filter: none !important;
   }
 
   .kpi-print-area {
     position: static !important;
-    width: auto !important;
     max-width: none !important;
     margin: 0 !important;
     border: 0 !important;

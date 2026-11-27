@@ -3194,7 +3194,7 @@ function KpiBarRows({ rows, emptyText, activeKey, onSelect }) {
             {/* Below sm the label gets its own line and the bar shares the second
                 with the numbers: in the 310px-wide deep-dive dialog the side-by-side
                 row squeezed the label to 105px and cut the bar to nothing. */}
-            <span className={`min-w-0 sm:w-44 sm:max-w-[11rem] truncate ${active ? 'font-semibold text-blue-800 dark:text-blue-200' : 'text-slate-600 dark:text-slate-400'}`} title={row.label}>
+            <span className={`min-w-0 sm:w-44 truncate ${active ? 'font-semibold text-blue-800 dark:text-blue-200' : 'text-slate-600 dark:text-slate-400'}`} title={row.label}>
               {row.label}
             </span>
             <span className="flex w-full min-w-0 items-center gap-2 sm:flex-1">
@@ -3203,7 +3203,7 @@ function KpiBarRows({ rows, emptyText, activeKey, onSelect }) {
               </div>
               <span className="w-14 sm:w-20 shrink-0 text-right font-semibold tabular-nums text-slate-700 dark:text-slate-300">{row.valueText}</span>
               {row.meta && (
-                <span className="hidden sm:inline w-20 sm:w-32 shrink-0 text-right text-[10px] text-slate-400 dark:text-slate-400 truncate" title={row.meta}>
+                <span className="hidden sm:inline-block w-32 shrink-0 text-right text-[10px] text-slate-400 dark:text-slate-400 truncate" title={row.meta}>
                   {row.meta}
                 </span>
               )}
@@ -3265,7 +3265,7 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun }) {
                 310px wide at a 375px viewport, and side-by-side every failure mode
                 was cut at 105px while the bar kept a 48px floor. */}
             <span
-              className={`min-w-0 sm:w-44 sm:max-w-[11rem] truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
+              className={`min-w-0 sm:w-44 truncate ${row.isOthers ? 'italic text-slate-500 dark:text-slate-400' : 'text-slate-600 dark:text-slate-400'}`}
               title={row.label}
             >
               {row.label}
@@ -3284,7 +3284,7 @@ function KpiParetoRows({ rows, unit, emptyText, groupNoun }) {
               {/* Below sm the cumulative column is dropped so the bar keeps its
                   width; the footer stops promising it there. */}
               <span
-                className={`hidden sm:inline-block w-12 sm:w-16 shrink-0 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}
+                className={`hidden sm:inline-block w-16 shrink-0 text-right font-semibold tabular-nums ${vital ? 'text-rose-600 dark:text-rose-400' : 'text-slate-400 dark:text-slate-400'}`}
                 title="cumulative share"
               >
                 {cumulative.toFixed(0)}%
@@ -3626,7 +3626,7 @@ function KpiDeepDiveModal({
           <section>
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
               {meta.variantHeading}
-              <span className="ml-2 text-[10px] font-normal normal-case tracking-normal text-slate-400 dark:text-slate-500">
+              <span className="no-print ml-2 text-[10px] font-normal normal-case tracking-normal text-slate-400 dark:text-slate-500">
                 click a row to scope the deep dive
               </span>
             </h4>
