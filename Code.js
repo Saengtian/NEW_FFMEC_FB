@@ -459,7 +459,8 @@ function initializeDatabase(payloadJson) {
  * debounced autosave cheap.
  */
 function saveWorkspaceState(payloadJson, summary, expectedRevision, refreshMirrors) {
-  const identity = saveIdentity_(getActiveUserEmail_(), getExecutorEmail_());
+  const userEmail = getActiveUserEmail_();
+  const identity = saveIdentity_(userEmail, getExecutorEmail_());
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {

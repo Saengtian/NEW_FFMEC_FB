@@ -69,6 +69,13 @@ if (!deleteSource) {
   process.exit(1);
 }
 
+/** The shipped save path is checked statically: no GAS service stubs needed. */
+const saveStateSource = sources.code.match(/function saveWorkspaceState\([\s\S]*?\n}/);
+if (!saveStateSource) {
+  console.error("Code.js no longer declares saveWorkspaceState — update this test, the save path moved.");
+  process.exit(1);
+}
+
 function deleteSeededMe12(project, counters) {
   let projects = [project];
   let gateRecords = { [project.id]: {} };
@@ -138,6 +145,17 @@ check('missing email yields unknown actor', () =>
 check('real email stays the actor', () =>
   deep(api.saveIdentity_('user@example.com', 'deployer@example.com'),
     { actorLabel: 'user@example.com', executorEmail: 'deployer@example.com' }));
+check('saveWorkspaceState binds the typed email for ledger and response', () => {
+  const src = saveStateSource[0];
+  assert.ok(/const userEmail = getActiveUserEmail_\(\);/.test(src),
+    'saveWorkspaceState must bind the typed email');
+  assert.ok(/saveIdentity_\(userEmail, getExecutorEmail_\(\)\)/.test(src),
+    'saveIdentity_ must receive the typed email');
+  assert.ok((src.match(/userEmail: userEmail/g) || []).length === 2,
+    'ledger and response must both use the typed email');
+  assert.ok(!/userEmail: actorLabel/.test(src),
+    'the fallback actorLabel must not replace the typed email');
+});
 
 for (const r of results) {
   console.log(`  ${r.ok ? "pass" : "FAIL"}  ${r.label}${r.ok ? "" : `  (${r.message})`}`);
