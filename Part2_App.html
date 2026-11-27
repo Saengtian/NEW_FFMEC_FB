@@ -107,11 +107,20 @@ function resolveSaveResult(res, currentRevision) {
 }
 
 /**
- * One Global Scope dropdown. Family, model, phase, side and process all render
- * through this component so their sizing, focus ring and light/dark colors can
- * never drift apart again.
+ * One scope dropdown. Family, model, phase, side and process all render through
+ * this component so their sizing, focus ring and light/dark colors can never
+ * drift apart again.
  */
-function ScopeFilterSelect({ label, ariaLabel, value, options, allLabel, onChange, fullWidthOnMobile = false }) {
+function ScopeFilterSelect({
+  label,
+  ariaLabel,
+  value,
+  options,
+  allLabel,
+  onChange,
+  fullWidthOnMobile = false,
+  showAllCount = true
+}) {
   const optionClass = 'bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100';
   return (
     <div
@@ -127,7 +136,7 @@ function ScopeFilterSelect({ label, ariaLabel, value, options, allLabel, onChang
         className="w-full max-w-none cursor-pointer bg-transparent pr-1 text-xs font-bold text-slate-900 focus:outline-none dark:text-slate-100 sm:w-auto sm:max-w-[11rem]"
       >
         <option value="ALL" className={optionClass}>
-          {allLabel} ({options.length})
+          {allLabel}{showAllCount ? ` (${options.length})` : ''}
         </option>
         {options.map((option) => (
           <option key={option} value={option} className={optionClass}>
@@ -2991,7 +3000,8 @@ function App() {
       ariaLabel: 'Global Family Filter',
       value: globalFamily,
       options: availableFamilies,
-      allLabel: 'All Families',
+      allLabel: 'All',
+      showAllCount: false,
       onChange: handleGlobalFamilyChange
     },
     {
@@ -3327,7 +3337,7 @@ function App() {
             <div className="grid w-full grid-cols-2 items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
               <span className="col-span-2 inline-flex w-full items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 sm:col-auto sm:mr-1 sm:w-auto">
                 <SlidersHorizontal className="w-3.5 h-3.5 text-slate-400 dark:text-slate-400" />
-                <span>Global Scope</span>
+                <span>Scope</span>
               </span>
 
               {scopeFilters.map((filter) => (
@@ -3341,6 +3351,7 @@ function App() {
                     value={filter.value}
                     options={filter.options}
                     allLabel={filter.allLabel}
+                    showAllCount={filter.showAllCount !== false}
                     onChange={filter.onChange}
                     fullWidthOnMobile={Boolean(filter.fullWidthOnMobile)}
                   />

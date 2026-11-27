@@ -3892,7 +3892,7 @@ function KpiDeepDiveModal({
           {Array.isArray(scopeFilters) && scopeFilters.length > 0 && (
             <div className="no-print flex flex-wrap items-center gap-2">
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                Global scope
+                Scope
               </span>
               {scopeFilters.map((filter) => (
                 <ScopeFilterSelect
@@ -3902,6 +3902,7 @@ function KpiDeepDiveModal({
                   value={filter.value}
                   options={filter.options}
                   allLabel={filter.allLabel}
+                  showAllCount={filter.showAllCount !== false}
                   onChange={filter.onChange}
                 />
               ))}
