@@ -1948,12 +1948,25 @@ function syncMirrorSheets_(ss, payload) {
       const inp = Number(r.input) || 0;
       const fpy = inp > 0 ? (((inp - fallout) / inp) * 100).toFixed(2) + '%' : '';
       const fy = inp > 0 ? (((inp - fallout + salvage) / inp) * 100).toFixed(2) + '%' : '';
+      // Planned and downtime hours are mirror-only columns: without them the tab
+      // cannot be downloaded and re-imported, because UPH and efficiency divide
+      // by the planned time and the import refuses a row that has none.
+      const planned = Number(r.plannedTimeHr) || 0;
+      const downtimeMin = (Array.isArray(r.downtimeEvents) ? r.downtimeEvents : []).reduce(
+        function(s, e) { return s + Math.max(0, Number(e && e.durationMin) || 0); },
+        0
+      );
+      const downtimeHr = (downtimeMin / 60).toFixed(2);
       return [
         r.id || '', r.date || '', r.model || '', r.phase || '', r.side || '',
-        r.config || '', r.station || '', inp, fallout, salvage, fpy, fy
+        r.config || '', r.station || '', inp, planned, fallout, salvage, downtimeHr, fpy, fy
       ];
     });
-    writeTable('ProductionRecords', ['ID', 'Date', 'Model', 'Phase', 'Side', 'Config', 'Station', 'InputQty', 'Fallout', 'Salvage', 'FPY', 'FY'], rows);
+    writeTable(
+      'ProductionRecords',
+      ['ID', 'Date', 'Model', 'Phase', 'Side', 'Config', 'Station', 'InputQty', 'PlannedHr', 'Fallout', 'Salvage', 'DowntimeHr', 'FPY', 'FY'],
+      rows
+    );
   }
 
   if (Array.isArray(payload.masterSpecs)) {

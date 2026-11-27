@@ -3818,7 +3818,7 @@ function GateSignOffView({
 // VIEW 5: PRODUCTION RECORDS (CALCULATED FPY, FY, UPH & EFFICIENCY)
 // ============================================================================
 
-function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDeleteRecord }) {
+function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDeleteRecord, onImportFile }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [stationFilter, setStationFilter] = useState('ALL');
   const [expandedIds, setExpandedIds] = useState({});
@@ -3967,6 +3967,26 @@ function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDelet
                 className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-none focus:border-blue-500 w-52"
               />
             </div>
+            {typeof onImportFile === 'function' && (
+              <label
+                className="px-2.5 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950 hover:bg-blue-100 dark:hover:bg-blue-900 text-blue-700 dark:text-blue-300 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                title="Every row goes through the same rules as the form; refused rows are named with their reason."
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Import CSV / Excel</span>
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  className="hidden"
+                  aria-label="Import production records from CSV or Excel"
+                  onChange={(e) => {
+                    const picked = e.target.files && e.target.files[0];
+                    if (picked) onImportFile(picked);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+            )}
             <button
               type="button"
               onClick={onOpenNewRecord}

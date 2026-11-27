@@ -1580,6 +1580,49 @@ function App() {
     showToast(`Logged production record for ${newRec.model} ${newRec.phase} (${newRec.station})`);
   };
 
+  // CSV / Excel rows go through the same rules as the form. Accepted rows join the
+  // store; refused ones are named with their file line and the rule that stopped
+  // them, so a bad export is fixable instead of half-imported.
+  const handleImportProductionRecords = async (file) => {
+    try {
+      const { headers, rows } = await parseUploadedTabularFile(file);
+      if (!rows || rows.length === 0) {
+        showToast(`No production rows found in ${file.name}.`, 'warning');
+        return;
+      }
+      const plan = productionRecordImportPlan(headers, rows, {
+        existing: productionRecords,
+        fileName: file.name
+      });
+      if (plan.missing.length > 0) {
+        showToast(
+          `Could not find the column(s) ${plan.missing.join(', ')} in ${file.name} — nothing was imported.`,
+          'warning',
+          { durationMs: 12000 }
+        );
+        return;
+      }
+      if (plan.accepted.length > 0) {
+        setProductionRecords((prev) => [...plan.accepted, ...prev]);
+      }
+      if (plan.rejected.length > 0) {
+        const report = productionDropReport(plan.rejected);
+        const acceptedLine =
+          plan.accepted.length > 0
+            ? `${plan.accepted.length} of ${plan.rows} row(s) imported from ${file.name}. `
+            : `Nothing imported from ${file.name}. `;
+        showToast(acceptedLine + productionDropMessage(report, 4, `in ${file.name}`), 'warning', {
+          durationMs: 30000
+        });
+        return;
+      }
+      showToast(`Imported ${plan.accepted.length} production record(s) from ${file.name}.`);
+    } catch (err) {
+      console.error('Production import failed:', err);
+      showToast(`Production import failed: ${err && err.message ? err.message : String(err)}`, 'error');
+    }
+  };
+
   const handleUpdateProductionRecord = (id, form) => {
     const cleanDefects = (form.defectItems || [])
       .filter((d) => d.mode.trim() || Number(d.falloutQty) > 0 || Number(d.salvageQty) > 0)
@@ -3372,6 +3415,7 @@ function App() {
                     onOpenNewRecord={() => setNewProdRecordModalOpen(true)}
                     onEditRecord={(rec) => setEditingProdRecord(rec)}
                     onDeleteRecord={(rec) => setDeletingProdRecord(rec)}
+                    onImportFile={handleImportProductionRecords}
                   />
                 );
               case 'team':

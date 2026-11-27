@@ -40,6 +40,9 @@ const DECLARATIONS = [
   /function productionRecordIssues\([\s\S]*?\n}/,
   /function productionRecordBlockingIssues\([\s\S]*?\n}/,
   /function clampProductionDowntime\([\s\S]*?\n}/,
+  /function createColumnFinder\([\s\S]*?\n}/,
+  /function normalizeProductionDate\([\s\S]*?\n}/,
+  /function productionRecordImportPlan\([\s\S]*?\n}/,
   /function sanitizeProductionRecords\([\s\S]*?\n}/,
   /function parseIsoDate\([\s\S]*?\n}/,
   /function isoDateParts\([\s\S]*?\n}/,
@@ -65,7 +68,7 @@ const api = new Function(
     "return { PRODUCTION_RECORD_ISSUES, computeProductionMetrics, productionLineKey, productionRecordLabel, " +
     "productionRecordGoodUnits, productionRecordIssues, productionRecordBlockingIssues, clampProductionDowntime, " +
     "sanitizeProductionRecords, productionDropReport, productionDropRowLines, productionDropMessage, " +
-    "productionDropSummary, INITIAL_PRODUCTION_RECORDS };"
+    "productionDropSummary, productionRecordImportPlan, normalizeProductionDate, INITIAL_PRODUCTION_RECORDS };"
 )();
 
 const {
@@ -79,6 +82,8 @@ const {
   productionDropReport,
   productionDropMessage,
   productionDropSummary,
+  productionRecordImportPlan,
+  normalizeProductionDate,
   clampProductionDowntime,
   sanitizeProductionRecords,
   INITIAL_PRODUCTION_RECORDS,
@@ -235,8 +240,8 @@ check("the same date × line × station cannot be logged twice", () => {
 });
 
 check("a row with no line identity at all does not collide with another", () => {
-  const blank = { input: 10, plannedTimeHr: 1, defectItems: [], downtimeEvents: [] };
-  const other = { input: 20, plannedTimeHr: 2, defectItems: [], downtimeEvents: [] };
+  const blank = { date: "2026-11-20", input: 10, plannedTimeHr: 1, defectItems: [], downtimeEvents: [] };
+  const other = { date: "2026-11-21", input: 20, plannedTimeHr: 2, defectItems: [], downtimeEvents: [] };
   assert.deepEqual(codes(productionRecordIssues(blank, [other], null)), []);
 });
 
@@ -331,6 +336,74 @@ check("the drop report is what the toast and the save summary say", () => {
   assert.equal(productionDropMessage([]), "");
   assert.equal(productionDropSummary([]), "");
   assert.equal(productionDropMessage(productionDropReport(sanitizeProductionRecords([record()]).dropped)), "");
+});
+
+check("a production date is read from the shapes a file writes", () => {
+  assert.equal(normalizeProductionDate("2026-11-20"), "2026-11-20");
+  assert.equal(normalizeProductionDate("2026-11-20T00:00:00.000Z"), "2026-11-20");
+  assert.equal(normalizeProductionDate("2026/11/20"), "2026-11-20");
+  assert.equal(normalizeProductionDate("11/20/2026"), "2026-11-20");
+  assert.equal(normalizeProductionDate("2026-13-45"), "", "an impossible date is not read as one");
+  assert.equal(normalizeProductionDate(""), "");
+  assert.equal(normalizeProductionDate(null), "");
+
+  // A row with no readable date cannot be placed in any period, so it is refused.
+  const issues = productionRecordIssues(record({ date: "" }), null, null);
+  assert.deepEqual(codes(issues), [PRODUCTION_RECORD_ISSUES.DATE_MISSING]);
+});
+
+check("a CSV import plans the rows that pass and names the ones it refuses", () => {
+  const headers = ["ID", "Date", "Model", "Phase", "Side", "Config", "Station", "InputQty", "PlannedHr", "Fallout", "Salvage", "FPY", "FY"];
+  const rows = [
+    { ID: "", Date: "2026-11-20", Model: "X4151", Phase: "EVT", Side: "RHS", Config: "ME11", Station: "Fan Assembly", InputQty: "500", PlannedHr: "1.5", Fallout: "12", Salvage: "8", FPY: "97.6%", FY: "99.2%" },
+    { ID: "", Date: "2026-11-21", Model: "X4152", Phase: "EVT", Side: "LHS", Config: "ME12", Station: "Fan Test & Accessory", InputQty: "0", PlannedHr: "2", Fallout: "0", Salvage: "0" },
+    { ID: "", Date: "2026-11-20", Model: "X4151", Phase: "EVT", Side: "RHS", Config: "ME11", Station: "Fan Assembly", InputQty: "500", PlannedHr: "1.5", Fallout: "12", Salvage: "8" },
+    { ID: "", Date: "", Model: "X3082", Phase: "MP", Side: "RHS", Config: "MP-POR", Station: "Fan Assembly", InputQty: "100", PlannedHr: "10", Fallout: "1", Salvage: "0" }
+  ];
+
+  const plan = productionRecordImportPlan(headers, rows, { existing: [] });
+  assert.deepEqual(plan.missing, []);
+  assert.equal(plan.accepted.length, 1, "only the good row is imported");
+  assert.equal(plan.rejected.length, 3);
+
+  const good = plan.accepted[0];
+  assert.equal(good.model, "X4151");
+  assert.equal(good.date, "2026-11-20");
+  assert.equal(good.input, 500);
+  assert.equal(good.defectItems[0].falloutQty, 12);
+  assert.equal(good.defectItems[0].salvageQty, 8);
+  assert.deepEqual(productionRecordIssues(good, [good], null).filter((i) => i.severity !== "clamp"), []);
+
+  // The refused rows carry the shared rule and the file line they sit on.
+  assert.deepEqual(codes(plan.rejected[0].issues), [PRODUCTION_RECORD_ISSUES.INPUT_NOT_POSITIVE]);
+  assert.equal(plan.rejected[0].lineNumber, 3);
+  assert.deepEqual(codes(plan.rejected[1].issues), [PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE]);
+  assert.equal(plan.rejected[1].lineNumber, 4);
+  assert.deepEqual(codes(plan.rejected[2].issues), [PRODUCTION_RECORD_ISSUES.DATE_MISSING]);
+
+  // The toast names the line, the day, the line and the station.
+  const message = productionDropMessage(productionDropReport(plan.rejected), 4);
+  assert.match(message, /^3 production rows rejected on load/);
+  assert.match(message, /row 3 · 11\/21 · X4152 · ME12 LHS · Fan Test & Accessory: Input quantity/);
+
+  // A file that repeats a row already on file is refused the same way.
+  const againstExisting = productionRecordImportPlan(headers, [rows[0]], { existing: [record({ date: "2026-11-20" })] });
+  assert.equal(againstExisting.accepted.length, 0);
+  assert.deepEqual(codes(againstExisting.rejected[0].issues), [PRODUCTION_RECORD_ISSUES.DUPLICATE_LINE]);
+
+  // A file with no usable Model / Date / Input / Planned column imports nothing.
+  const blind = productionRecordImportPlan(["Notes", "Something"], [{ Notes: "x" }], {});
+  assert.deepEqual(blind.missing, ["Model", "Date", "Input", "Planned (h)"]);
+  assert.equal(blind.accepted.length, 0);
+
+  // Planned hours is the one column the Sheet mirror does not carry yet: say so
+  // rather than importing a file full of rows the rules would all refuse.
+  const noPlanned = productionRecordImportPlan(
+    ["Date", "Model", "Station", "InputQty"],
+    [{ Date: "2026-11-20", Model: "X4151", Station: "Fan Assembly", InputQty: "500" }],
+    {}
+  );
+  assert.deepEqual(noPlanned.missing, ["Planned (h)"]);
 });
 
 check("loading does not mutate the rows it keeps", () => {

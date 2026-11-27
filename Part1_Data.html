@@ -2175,6 +2175,7 @@ function computeProductionMetrics(rec) {
 // ============================================================================
 
 const PRODUCTION_RECORD_ISSUES = {
+  DATE_MISSING: 'date-missing',
   INPUT_NOT_POSITIVE: 'input-not-positive',
   PLANNED_HOURS_MISSING: 'planned-hours-missing',
   GOOD_EXCEEDS_INPUT: 'good-exceeds-input',
@@ -2232,6 +2233,17 @@ function productionRecordIssues(record, peers, ignoreId) {
       severity: 'block',
       message: 'Record is not an object.'
     }];
+  }
+
+  // A row with no readable date cannot be placed in any period, so a trend or a
+  // range would silently ignore it. The form always carries one; an import may not.
+  if (!isoDateParts(rec.date)) {
+    issues.push({
+      field: 'date',
+      code: PRODUCTION_RECORD_ISSUES.DATE_MISSING,
+      severity: 'block',
+      message: 'Production date is missing or not a real date — every trend and range is keyed on it.'
+    });
   }
 
   const input = Number(rec.input);
@@ -2404,8 +2416,11 @@ function productionDropReport(dropped) {
     const line = [record.model, [record.config, record.side].filter(Boolean).join(' ')]
       .filter(Boolean)
       .join(' · ');
+    const lineNumber = Number(entry && entry.lineNumber);
     return {
       key: String(record.id || '') || `row-${index + 1}`,
+      // Only an import knows its file line; a load has none to name.
+      lineNumber: isFinite(lineNumber) && lineNumber > 0 ? lineNumber : null,
       dateIso: String(record.date || '').slice(0, 10),
       dateText: formatMonthDay(record.date),
       line: line || 'unidentified line',
@@ -2427,19 +2442,21 @@ function productionDropRowLines(report, limit) {
   const list = Array.isArray(report) ? report : [];
   const cap = Number(limit) > 0 ? Number(limit) : list.length;
   return list.slice(0, cap).map(function(entry) {
-    return `${entry.dateText} · ${entry.line} · ${entry.station}: ${entry.reason}`;
+    const where = entry.lineNumber ? `row ${entry.lineNumber} · ` : '';
+    return `${where}${entry.dateText} · ${entry.line} · ${entry.station}: ${entry.reason}`;
   });
 }
 
 /** The toast body: the headline, then a line per row, then what was held back. */
-function productionDropMessage(report, limit) {
+function productionDropMessage(report, limit, context) {
   const list = Array.isArray(report) ? report : [];
   if (list.length === 0) return '';
   const cap = Number(limit) > 0 ? Number(limit) : 4;
   const lines = productionDropRowLines(list, cap);
   const rest = list.length - lines.length;
+  const where = String(context || 'on load');
   return (
-    `${list.length} production row${list.length === 1 ? '' : 's'} rejected on load — left out of every KPI:` +
+    `${list.length} production row${list.length === 1 ? '' : 's'} rejected ${where} — left out of every KPI:` +
     '\n' +
     lines.join('\n') +
     (rest > 0 ? `\n…and ${rest} more` : '')
@@ -2458,6 +2475,149 @@ function productionDropSummary(report, limit) {
     lines.join(' · ') +
     (rest > 0 ? ` · +${rest} more` : '')
   );
+}
+
+/**
+ * A production date as the store keeps it (YYYY-MM-DD), or '' when the cell holds
+ * nothing usable. Files write ISO, ISO with a time, 2026/11/20 or a locale date.
+ */
+function normalizeProductionDate(value) {
+  const text = String(value === null || value === undefined ? '' : value).trim();
+  if (!text) return '';
+  const iso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) {
+    const month = Number(iso[2]);
+    const day = Number(iso[3]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return '';
+    return `${iso[1]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+  // 2026/11/20 and 11/20/2026 are both read by hand: Date() applies the machine's
+  // timezone, so a date would slide a day west of UTC.
+  const yearFirst = text.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (yearFirst) {
+    const month = Number(yearFirst[2]);
+    const day = Number(yearFirst[3]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return '';
+    return `${yearFirst[1]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+  const monthFirst = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (monthFirst) {
+    const month = Number(monthFirst[1]);
+    const day = Number(monthFirst[2]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return '';
+    return `${monthFirst[3]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+  const parsed = new Date(text);
+  if (isNaN(parsed.getTime())) return '';
+  // Read the calendar day the input names, not the UTC instant it converts to.
+  const y = parsed.getFullYear();
+  const m = String(parsed.getMonth() + 1).padStart(2, '0');
+  const d = String(parsed.getDate()).padStart(2, '0');
+  const local = `${y}-${m}-${d}`;
+  return isoDateParts(local) ? local : '';
+}
+
+/**
+ * Reads a production table (CSV / Excel rows) into records, judging every row with
+ * the same rules the form enforces. Nothing is written blind: the plan comes back
+ * with the rows that pass, and with the rows the rules refuse — each carrying its
+ * file line, its record and the issues — so the caller can name what it skipped.
+ * A row that repeats one already on file (or an earlier row of the same file) is
+ * refused exactly as sanitizeProductionRecords refuses a duplicate on load.
+ */
+function productionRecordImportPlan(headers, rows, options) {
+  const opts = options || {};
+  const existing = Array.isArray(opts.existing) ? opts.existing : [];
+  const dataRows = Array.isArray(rows) ? rows : [];
+  const findCol = createColumnFinder(headers);
+  const col = {
+    model: findCol(['model', 'product']),
+    date: findCol(['date', 'productiondate', 'rundate']),
+    station: findCol(['station', 'process', 'processstep']),
+    config: findCol(['config', 'buildconfig', 'configuration']),
+    side: findCol(['side']),
+    phase: findCol(['phase']),
+    family: findCol(['family', 'familygroup']),
+    input: findCol(['input', 'inputqty', 'inputquantity']),
+    planned: findCol(['plannedhr', 'plannedtimehr', 'plannedhours', 'plannedtime', 'planned']),
+    fallout: findCol(['fallout', 'falloutqty', 'ng', 'ngqty', 'rejectqty']),
+    salvage: findCol(['salvage', 'salvageqty', 'rework']),
+    defect: findCol(['defectmode', 'defect', 'failuremode', 'mode'])
+  };
+
+  // Model and date identify the row; the quantities are what the rules judge. A
+  // file missing any of these cannot describe a run, so nothing is imported.
+  const missing = [
+    ['model', 'Model'],
+    ['date', 'Date'],
+    ['input', 'Input'],
+    ['planned', 'Planned (h)']
+  ]
+    .filter(function(pair) { return !col[pair[0]]; })
+    .map(function(pair) { return pair[1]; });
+  if (missing.length > 0) {
+    return { accepted: [], rejected: [], columns: col, missing: missing, rows: dataRows.length };
+  }
+
+  const number = function(value) {
+    const text = String(value === null || value === undefined ? '' : value).replace(/[^0-9.-]/g, '');
+    if (!text) return 0;
+    const parsed = Number(text);
+    return isFinite(parsed) ? parsed : 0;
+  };
+  const text = function(value) {
+    return String(value === null || value === undefined ? '' : value).trim();
+  };
+  const stamp = Date.now().toString().slice(-6);
+
+  const accepted = [];
+  const rejected = [];
+  const firstLine = Number(opts.firstLine) > 0 ? Number(opts.firstLine) : 2;
+
+  dataRows.forEach(function(row, index) {
+    const values = row || {};
+    const model = text(col.model ? values[col.model] : '').toUpperCase();
+    const record = {
+      id: `REC-IMP-${stamp}-${index + 1}`,
+      model: model,
+      familyGroup: text(col.family ? values[col.family] : '') || 'MB14"',
+      phase: text(col.phase ? values[col.phase] : '').toUpperCase() || 'EVT',
+      station: text(col.station ? values[col.station] : '') || PRODUCTION_STATIONS[3],
+      config: text(col.config ? values[col.config] : '').toUpperCase() || 'ME11',
+      side: text(col.side ? values[col.side] : '').toUpperCase() || 'RHS',
+      input: number(col.input ? values[col.input] : 0),
+      plannedTimeHr: number(col.planned ? values[col.planned] : 0),
+      date: normalizeProductionDate(col.date ? values[col.date] : ''),
+      defectItems: [],
+      downtimeEvents: []
+    };
+    const fallout = number(col.fallout ? values[col.fallout] : 0);
+    const salvage = number(col.salvage ? values[col.salvage] : 0);
+    if (fallout > 0 || salvage > 0) {
+      record.defectItems = [{
+        id: `d-${stamp}-${index + 1}`,
+        mode: text(col.defect ? values[col.defect] : '') || 'Imported fallout',
+        falloutQty: Math.max(0, fallout),
+        salvageQty: Math.max(0, salvage)
+      }];
+    }
+
+    const issues = productionRecordIssues(record, existing.concat(accepted), null);
+    const blocking = issues.filter(function(issue) { return issue.severity !== 'clamp'; });
+    if (blocking.length > 0) {
+      rejected.push({
+        lineNumber: firstLine + index,
+        record: record,
+        issues: blocking,
+        reason: blocking.map(function(issue) { return issue.message; }).join(' ')
+      });
+      return;
+    }
+    const clampable = issues.some(function(issue) { return issue.severity === 'clamp'; });
+    accepted.push(clampable ? clampProductionDowntime(record) : record);
+  });
+
+  return { accepted: accepted, rejected: rejected, columns: col, missing: [], rows: dataRows.length };
 }
 
 // ============================================================================
