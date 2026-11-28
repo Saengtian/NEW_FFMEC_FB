@@ -117,6 +117,18 @@
   min-width: var(--freeze-first-width);
 }
 
+/* The value is what gets clamped, not the cell: an auto-layout table honours a
+   child's max-width but ignores one on the cell, so without this a long Config
+   name widens the pinned column and leaves the Side offset behind. The cell
+   padding is subtracted so the column resolves to exactly --freeze-first-width. */
+.table-freeze-first-wide .config-cell-clamp {
+  display: block;
+  max-width: calc(var(--freeze-first-width) - 1.25rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 :where(.table-freeze-first-two thead th:nth-child(2):not([colspan])),
 :where(.table-freeze-first-two tbody td:nth-child(2):not([colspan])) {
   left: var(--freeze-first-width);
@@ -145,5 +157,12 @@
     position: static !important;
     box-shadow: none !important;
     background: transparent !important;
+  }
+
+  /* Nothing is pinned on paper, so print the whole Config name. */
+  .table-freeze-first-wide .config-cell-clamp {
+    max-width: none;
+    overflow: visible;
+    white-space: normal;
   }
 }

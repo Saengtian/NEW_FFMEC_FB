@@ -1621,8 +1621,10 @@ function ProjectsMatrixView({
                                 : 'border-t border-slate-100 dark:border-slate-800'
                             }`}
                           >
-                            <td className="py-2.5 px-2.5 font-bold text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                              {row.config}
+                            <td className="py-2.5 px-2.5 font-bold text-slate-900 dark:text-slate-100">
+                              <span className="config-cell-clamp" title={row.config}>
+                                {row.config}
+                              </span>
                             </td>
                             <td className="py-2.5 px-2 whitespace-nowrap">
                               <span
