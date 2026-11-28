@@ -1559,11 +1559,14 @@ function ProjectsMatrixView({
                     No Config × Side lines match the current filter. Click <strong>Add Config / Side</strong> to create one.
                   </div>
                 ) : (
-                  <table className="table-freeze-first w-full text-left border-collapse text-xs">
+                  <table className="table-freeze-first-two table-freeze-first-wide w-full text-left border-collapse text-xs">
                     <thead>
                       <tr className="bg-slate-100/90 dark:bg-slate-800/90 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase tracking-wider text-slate-600 dark:text-slate-400">
-                        <th colSpan={5} className="py-1.5 px-3 border-r border-slate-200 dark:border-slate-800">
-                          Config · Side · Part Identification &amp; Vendor Split
+                        <th colSpan={2} className="py-1.5 px-3 whitespace-nowrap">
+                          Config · Side
+                        </th>
+                        <th colSpan={3} className="py-1.5 px-3 border-r border-slate-200 dark:border-slate-800">
+                          Part Identification &amp; Vendor Split
                         </th>
                         <th colSpan={4} className="py-1.5 px-2.5 text-center border-r border-slate-200 dark:border-slate-800 bg-blue-50/70 dark:bg-blue-950/70 text-blue-800 dark:text-blue-200">
                           Shipment Requirement

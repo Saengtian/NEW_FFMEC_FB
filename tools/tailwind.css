@@ -93,7 +93,7 @@
 }
 
 :where(.table-freeze-first thead th:first-child:not([colspan])),
-:where(.table-freeze-first-two thead th:first-child:not([colspan])),
+:where(.table-freeze-first-two thead th:first-child),
 :where(.table-freeze-first-two thead th:nth-child(2):not([colspan])),
 :where(.table-freeze-first tbody td:first-child:not([colspan])),
 :where(.table-freeze-first-two tbody td:first-child:not([colspan])),
@@ -105,13 +105,25 @@
   box-shadow: 1px 0 0 var(--freeze-border);
 }
 
+/* A frozen first column that carries a label rather than a chevron: this one
+   value is both the column's width and the pinned offset of the second column,
+   so the two cannot drift apart. */
+.table-freeze-first-wide {
+  --freeze-first-width: 6rem;
+}
+
+.table-freeze-first-wide :is(thead th:first-child, tbody td:first-child):not([colspan]) {
+  width: var(--freeze-first-width);
+  min-width: var(--freeze-first-width);
+}
+
 :where(.table-freeze-first-two thead th:nth-child(2):not([colspan])),
 :where(.table-freeze-first-two tbody td:nth-child(2):not([colspan])) {
   left: var(--freeze-first-width);
 }
 
 .table-freeze-first thead th:first-child:not([colspan]),
-.table-freeze-first-two thead th:first-child:not([colspan]),
+.table-freeze-first-two thead th:first-child,
 .table-freeze-first-two thead th:nth-child(2):not([colspan]) {
   z-index: 3;
   background-color: var(--freeze-head-bg);
