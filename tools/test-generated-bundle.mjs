@@ -66,6 +66,37 @@ try {
       );
     }
   });
+
+  // The served bundle is one inline <script>. Apps Script's HTML pipeline reads a
+  // literal `<?` as a scriptlet and a raw `http://` as a comment start, and a
+  // stray `</script` closes the tag early — each of those turns the served page
+  // into a blank screen that `clasp push` reports as success. tools/build.mjs
+  // escapes all three, so the payload must not contain them.
+  check("the compiled bundle cannot be mangled by the HTML pipeline", () => {
+    const bundle = readFileSync(join(ROOT, "Bundle.html"), "utf8");
+    const open = bundle.indexOf("<script>");
+    const close = bundle.lastIndexOf("</script>");
+    assert.ok(open !== -1 && close > open, "Bundle.html is not a single inline script");
+    const payload = bundle.slice(open + "<script>".length, close);
+    for (const [pattern, why] of [
+      [/<\?/, "a literal `<?` (Apps Script reads it as a template scriptlet)"],
+      [/(^|[^:\\])http:\/\//, "a raw `http://` (Apps Script drops the rest of the line)"],
+      [/<\/script/i, "a literal `</script` (it closes the inline tag early)"]
+    ]) {
+      const hit = payload.match(pattern);
+      assert.ok(!hit, `Bundle.html contains ${why} near: ${hit ? payload.slice(Math.max(0, hit.index - 60), hit.index + 60).replace(/\s+/g, " ") : ""}`);
+    }
+  });
+
+  check("Index.html keeps its scriptlets and adds none to the served markup", () => {
+    const index = readFileSync(join(ROOT, "Index.html"), "utf8");
+    assert.ok(index.includes("<?!= include('Bundle') ?>"), "the bundle include must stay a template scriptlet");
+    assert.ok(index.includes("<?!= serverConfigJson ?>"), "the config injection must stay a template scriptlet");
+    // Everything outside a scriptlet is served as-is: a stray `<?` there would be
+    // read as a scriptlet Apps Script cannot resolve.
+    const withoutScriptlets = index.replace(/<\?!=?[\s\S]*?\?>/g, "");
+    assert.ok(!withoutScriptlets.includes("<?"), "Index.html has a `<?` that is not a closed scriptlet");
+  });
 } finally {
   restore();
 }

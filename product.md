@@ -50,24 +50,44 @@ The app answers those, and refuses to answer the rest with invented numbers.
 | Module | What it does | Key interactions |
 | --- | --- | --- |
 | **Program Overview** | Portfolio header, KPI tiles, inline KPI deep dive (trend · by variant worst first · Pareto of loss), gate matrix, scope summary | Open a KPI deep dive, switch the deep dive KPI or range; jump into a program |
-| **NPI Projects & Matrix** | Program records, split build across vendors/configs, product assignment | Create / edit / delete program, assign products |
+| **My Actions** | One queue over every source of open work: gates on hold, signatures the plan needs within 7 days, tasks past their date, customer cases open more than 30 days and the data-quality gaps. Every row ages from its own clock and opens the record it came from; the owner picker narrows the list to one person and the summary follows the rows shown | Pick an owner, filter by kind, open the gate dossier, task drawer, case form or owning module |
+| **NPI Projects & Matrix** | Program records, split build across vendors/configs, product assignment | Edit / delete program, add config/side, assign products |
+| **Program Setup & Products** | Combined setup workspace: initialize a PEN-81-0002 program, and maintain the model-to-family registry behind the scope filters, program forms and product assignments | Initialize program; add a product, change its family, delete an unused product |
+| **MIH Risk & Capacity** | Predicted FATP MIH per line, from the gates still unsigned, the program's late and blocked work, the build against the share of its window spent, and the median stage time of the gates already passed on other lines; every driver is shown as days with its evidence, and the slip is their sum. Also sizes each owner's open tasks plus owed signatures against an explicit items-per-week assumption | Read the predicted date and its drivers, open the gate dossier, the task drawer or the timeline, check which owners cannot clear their load |
+| **Data Quality** | The trust behind the scorecard: every KPI tile carries the newest source date, its row coverage and a stale warning once that source is over a month old, and one queue lists records that are missing, contradict a stored rule, or point at a program/spec that no longer exists | Filter the queue by severity, open the module that owns the record |
 | **Build Timeline (Gantt)** | Stage sequence per line, gate-coloured bars, drag to reschedule | Drag a bar (refused when it breaks the sequence), open a dossier |
 | **Tasks & AIL** | Action items with owner, due date, status, linked program/gate | New task, claim unassigned work, open drawer |
 | **NPI Gate Sign-Off** | Nine gates (PEN-81-0002 Rev B) per configuration × side, exit criteria, cross-functional signatures, evidence links, audit trail; the matrix cell shows status + date (mm/dd) — the pass date once signed, the plan date otherwise, and `gateStatusPrefix` keeps that word the same in the ledger (`Pass 11/21`) and in the signatures-owed list (`Dep. 01/03`) | Tick criteria, sign, attach evidence, open matrix cell |
 | **Cpk & Master Specs** | Spec library, capability roll-up, distribution compare, spec correction, import pipeline; one provisional-limits panel lists every CTQ still on placeholder limits with its limit owner and confirm-by date (overdue flagged), opens that spec's editor, and its *Show only these* toggle narrows both tabs to those CTQs, including ones no upload has reached | Upload Cpk data, correct a spec, compare distributions, filter to provisional CTQs |
 | **Projects & Cost Saving** | VA/VE, yield and HC saving ideas with computed annual saving | Edit item, compare against the 10M THB target |
 | **Customer Feedback** | Claims and FA/8D cases with severity, stage and closure status | Open case, update 8D stage |
-| **Production Records** | Yield, UPH, efficiency and loss per station per day; CSV/Excel import judged by the same rules as the form (a real production date is required — every trend, range and duplicate is keyed on it), and any refused row — on import or on load — is named with its day, line, station and the rule in a dismissible warning (the save summary repeats it) | Import CSV / Excel, add / edit / delete a record, filter by station |
+| **Production Records** | Yield, UPH, efficiency and loss per station per day, plus a daily % fallout (of input) / % salvage recovered (of fallout) trend fed by the filtered records; CSV/Excel import judged by the same rules as the form (a real production date is required — every trend, range and duplicate is keyed on it), and any refused row — on import or on load — is named with its day, line, station and the rule in a dismissible warning (the save summary repeats it) | Import CSV / Excel, add / edit / delete a record, filter by station |
 | **Team & Workload** | Roster, product ownership, external programs, derived workload, unassigned work; each owed signature reads as its gate's prefix plus the plan date (`Dep. 01/03 · 5d overdue`), closest deadline first | Claim a task, edit a member, open the workload drawer |
 | **Reports & Snapshots** | Six-KPI executive report for a fiscal period, printable A4 deck, CSV/print | Pick a preset, export the deck, print |
 
+MIH forecast method: each line's prediction is the plan date plus the sum of four capped drivers —
+the worst gate past the date its signature was needed (≤ 45 d), late tasks at one day each plus two
+per blocked task (≤ 10 d), the build gap against the spent share of the build window (≤ 30 d), and
+the remaining gates' historical median stage time minus the days left (≤ 30 d). Cycle time is the
+median, not the mean, so one stalled line cannot set it. Approvals stamped on the same day are one
+bulk sign-off rather than a stage that took no time, so they are not a sample; with no approved
+stage pairs the forecast falls back to the plan's own stage length and says so.
+
+My Actions method: severity comes from the overdue count alone — a hold or a blocker, or more than
+7 days late, is urgent; 1–7 days is due; anything not yet late is watch. Each row ages from its own
+clock: the date the plan needed a gate signature, a task's due date, the day a customer case was
+raised (stale after 30 days open), and a data gap carries no age rather than a made-up one. A gate on
+hold is one row, not also an owed signature, so the queue never inflates itself.
+
 Cross-cutting: Global Scope filter, KPI deep-dive modal (live scope + range + variant filters),
-state history, JSON backup/restore, sync badge, dark mode.
+KPI data-trust strip (as-of · sheet revision · source coverage · stale warning), data-quality
+queue, state history, JSON backup/restore, sync badge, dark mode.
 
 ## 5. Domain model
 
 | Object | Identity | Important fields |
 | --- | --- | --- |
+| Product (`products`) | `PRD-X####` | Model code and family group; active NPI/MP status derives from the model |
 | Program (`projects`) | `X####` + phase | Family, model, phase, configs, sides, owner, dates, gate schedule |
 | Line / variant | Program + configuration + side | Stage sequence, current gate, schedule overrides |
 | Gate record (`gateRecords`) | Program → line key → gate | Status, criteria ticks, signatures, evidence links, remarks, history |
@@ -79,8 +99,12 @@ state history, JSON backup/restore, sync badge, dark mode.
 | Feedback case | `CF-…` | Customer, category, severity, stage, 8D steps, claim amount |
 | Team member | `TM-…` | Role, reports-to, products, external programs, email |
 
-Persisted client slices: `projects`, `tasks`, `gateRecords`, `productionRecords`, `masterSpecs`,
-`cpkRecords`, `costProjects`, `customerFeedback`, `teamMembers`, `scheduleOverrides`.
+Only **X4151, X4152 and X4026** are active NPI models. A program on any other model is
+normalized to **MP** on load and on save. The header **Portfolio** switch defaults to
+NPI; Program Overview and every module show either the NPI or the MP portfolio, never both.
+
+Persisted client slices: `projects`, `products`, `tasks`, `gateRecords`, `productionRecords`,
+`masterSpecs`, `cpkRecords`, `costProjects`, `customerFeedback`, `teamMembers`, `scheduleOverrides`.
 
 ## 6. Metrics
 
@@ -108,7 +132,10 @@ whole app crosses into the next fiscal year together on 1 April rather than on a
 - No second backend, database or API. The Sheet is the database; Apps Script is the server.
 - No email or chat notifications (the data to drive them exists; the sender does not).
 - No mobile app, no offline mode, no per-line data entry on a tablet beyond what the web page offers.
-- No automatic SPC alarming, forecasting or capacity planning yet.
+- No automatic SPC alarming or forecasting beyond the MIH slip forecast, which is driver-based and
+  reads the workspace on screen rather than projecting a run-rate curve. No scheduling solver and
+  no second capacity model: owner load is the workload board's own count, judged against a stated
+  items-per-week assumption.
 - No multilingual UI: the interface is English; source data may be Thai.
 
 ## 8. Known limitations

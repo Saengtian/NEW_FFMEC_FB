@@ -1511,9 +1511,9 @@ function TaskDetailDrawer({ task, project, gate, onClose, onUpdateStatus, onUpda
   );
 }
 
-function NewProjectModal({ onClose, onSubmit }) {
+function NewProjectForm({ onClose, onSubmit, cancelLabel = 'Cancel' }) {
   const [form, setForm] = useState({
-    model: 'X4037',
+    model: ACTIVE_NPI_MODELS[0],
     familyGroup: 'MB14"',
     family: 'MB 14" FDB Fan Module',
     phase: 'EVT',
@@ -1525,6 +1525,7 @@ function NewProjectModal({ onClose, onSubmit }) {
     etdDate: '2027-03-25',
     mihDate: '2027-03-29'
   });
+  const activeNpi = isActiveNpiModel(form.model);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -1532,17 +1533,14 @@ function NewProjectModal({ onClose, onSubmit }) {
     onSubmit(form);
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/50 backdrop-blur-[1px]">
+  const body = (
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-md bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden text-xs"
+        className="w-full max-w-3xl bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden text-xs"
       >
         <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
           <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Initialize NPI Program (PEN-81-0002)</h3>
-          <button type="button" onClick={onClose} className="text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-400">
-            <X className="w-4 h-4" />
-          </button>
+
         </div>
 
         <div className="p-5 space-y-3.5">
@@ -1552,7 +1550,13 @@ function NewProjectModal({ onClose, onSubmit }) {
               <input
                 required
                 value={form.model}
-                onChange={(e) => setForm({ ...form, model: e.target.value })}
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    model: e.target.value,
+                    phase: canonicalProgramPhase(e.target.value, prev.phase)
+                  }))
+                }
                 className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg"
               />
             </div>
@@ -1561,9 +1565,10 @@ function NewProjectModal({ onClose, onSubmit }) {
               <select
                 value={form.phase}
                 onChange={(e) => setForm({ ...form, phase: e.target.value })}
-                className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900"
+                disabled={!activeNpi}
+                className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 disabled:opacity-60"
               >
-                {PHASE_ORDER.map((ph) => (
+                {PHASE_ORDER.filter((ph) => activeNpi || ph === 'MP').map((ph) => (
                   <option key={ph} value={ph}>
                     {ph}
                   </option>
@@ -1571,6 +1576,10 @@ function NewProjectModal({ onClose, onSubmit }) {
               </select>
             </div>
           </div>
+
+          <p className="text-[10px] leading-snug text-slate-500 dark:text-slate-400">
+            Active NPI models: {ACTIVE_NPI_MODELS.join(' · ')}. Any other model is saved as MP.
+          </p>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -1653,7 +1662,7 @@ function NewProjectModal({ onClose, onSubmit }) {
             onClick={onClose}
             className="px-3.5 py-2 rounded-lg font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
           >
-            Cancel
+            {cancelLabel}
           </button>
           <button
             type="submit"
@@ -1663,8 +1672,8 @@ function NewProjectModal({ onClose, onSubmit }) {
           </button>
         </div>
       </form>
-    </div>
   );
+  return body;
 }
 
 /**
@@ -1675,7 +1684,7 @@ function NewProjectModal({ onClose, onSubmit }) {
 function ProjectSettingsModal({ project, familyGroups = [], onClose, onSubmit }) {
   const [form, setForm] = useState({
     model: project?.model || '',
-    phase: project?.phase || 'EVT',
+    phase: canonicalProgramPhase(project?.model, project?.phase),
     status: project?.status || 'On Track',
     familyGroup: project?.familyGroup || PROGRAM_FAMILY_GROUPS[0],
     family: project?.family || '',
@@ -1691,6 +1700,7 @@ function ProjectSettingsModal({ project, familyGroups = [], onClose, onSubmit })
   });
 
   const set = (key) => (e) => setForm((prev) => ({ ...prev, [key]: e.target.value }));
+  const activeNpi = isActiveNpiModel(form.model);
   const inputClass =
     'w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900';
   const labelClass = 'font-semibold text-slate-700 dark:text-slate-300 block mb-1';
@@ -1730,12 +1740,28 @@ function ProjectSettingsModal({ project, familyGroups = [], onClose, onSubmit })
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelClass}>Model Code *</label>
-              <input required value={form.model} onChange={set('model')} className={inputClass} />
+              <input
+                required
+                value={form.model}
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    model: e.target.value,
+                    phase: canonicalProgramPhase(e.target.value, prev.phase)
+                  }))
+                }
+                className={inputClass}
+              />
             </div>
             <div>
               <label className={labelClass}>Build Phase</label>
-              <select value={form.phase} onChange={set('phase')} className={inputClass}>
-                {PHASE_ORDER.map((ph) => (
+              <select
+                value={form.phase}
+                onChange={set('phase')}
+                disabled={!activeNpi}
+                className={`${inputClass} disabled:opacity-60`}
+              >
+                {PHASE_ORDER.filter((ph) => activeNpi || ph === 'MP').map((ph) => (
                   <option key={ph} value={ph}>
                     {ph}
                   </option>
@@ -1743,6 +1769,10 @@ function ProjectSettingsModal({ project, familyGroups = [], onClose, onSubmit })
               </select>
             </div>
           </div>
+
+          <p className="text-[10px] leading-snug text-slate-500 dark:text-slate-400">
+            Active NPI models: {ACTIVE_NPI_MODELS.join(' · ')}. Any other model is saved as MP.
+          </p>
 
           <div className="grid grid-cols-2 gap-3">
             <div>

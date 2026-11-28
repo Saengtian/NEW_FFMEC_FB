@@ -33,7 +33,8 @@ bun install            # once
 bun run preview        # local preview on http://127.0.0.1:5183
 bun run test           # every test suite
 bun run deploy:login   # once: sign the staging browser profile in to Google
-bun run deploy         # build → push → version → staging → browser check → production
+bun run deploy         # build → push → version → staging → browser check → production → check → rollback on failure
+bun run deploy:verify  # smoke-test the live production URL, changing nothing
 ```
 
 Prerequisites for anything that touches Google: Node ≥ 20 (Bun is used as the runner and packager),
@@ -47,9 +48,12 @@ and the backing spreadsheet.
 | `bun run build` | Compiles `Icons.html` + `Part*.html` into `Bundle.html` and Tailwind CSS into `Styles.html` |
 | `bun run preview` | Local server that rebuilds on change and shims `google.script.run` with `localStorage` |
 | `bun run test` | Fiscal-year, Cpk-freeze, SheetJS, review-fix, state-history and generated-bundle checks |
-| `bun run deploy` | Build, `clasp push -f`, `clasp version`, put that version on the staging deployment, prove it in a real browser, then point production at it |
-| `bun run deploy:login` | One-time Google sign-in for the profile the staging check uses (`.preview/staging-browser`) |
-| `bun tools/verify-deployment.mjs <url>` | Load any deployment URL in headless Chrome; fails unless the page parses and `#root` renders |
+| `bun run deploy` | Build, `clasp push -f`, `clasp version`, prove that version on the staging deployment in a real browser, point production at it, then prove it again on production — rolling production back if the promoted version does not render |
+| `bun run deploy:verify` | Load the live production URL in headless Chrome and report the verdict; changes nothing |
+| `bun run deploy:rollback` | Point production back at `lastGoodVersion` from `deploy.config.json` (`--to=<version>` for a specific one), then smoke-test the result |
+| `bun run deploy:login` | One-time Google sign-in for the profile the deployment checks use (`.preview/staging-browser`) |
+| `bun tools/verify-deployment.mjs <url>` | Load any deployment URL in headless Chrome; exit 0 rendered, 1 broken, 2 could not test, 3 permission dialog |
+| `bun tools/diagnose-deployment.mjs <url>` | When a deployment will not render: report every frame, its bytes, whether `#root` is there, and any console errors |
 | `bun run state:import` | Imports a `_FFM_STATE_STORE` CSV export into the local preview |
 
 ## Project layout
@@ -95,15 +99,51 @@ in mind before adding inline HTML in a string. Check the pushed content with `cl
 twelve app files should be tracked) and roll back with:
 
 ```bash
-clasp list-versions
-clasp update-deployment <deployment-id> -V <last-good-version> -d "rollback"
+bun run deploy:rollback            # back to the recorded last good version
+bun run deploy:rollback --to=49    # or to a version you name
 ```
 
-**`bun run deploy` stopped at the browser check.** Production was not touched — the new version is on the staging
+**The page is blank, or says "Authorization required — Review permissions".** The deployment is fine and the
+app is not broken: Apps Script runs the page in a sandbox iframe, and because the web app runs as the accessing
+user (`executeAs: USER_ACCESSING`) every Google account must allow the script's scopes once. Until it does,
+that iframe holds the permission dialog and the app HTML is never loaded. Open the URL, press
+*Review permissions* → *Allow*, and the app appears; it is a one-time grant per account, not per visit. Prove it
+without guessing:
+
+```bash
+bun run deploy:verify        # exit 3 = permission dialog; exit 0 = the app rendered
+bun tools/diagnose-deployment.mjs <url>   # frame-by-frame: who holds the page, and what it contains
+```
+
+The check reads the app where Apps Script puts it. The deployment URL is only a shell: it embeds the app in a
+cross-origin `userCodeAppPanel` frame, which embeds the served HTML in a same-origin `userHtmlFrame`. That shell
+always ships the dialog's markup — a hidden `#review-permissions-button` — and its frame URL always says
+`?createOAuthDialog=true`, so neither is evidence of a missing grant. `tools/verify-deployment.mjs` walks every
+reachable document, takes `#root` from whichever one holds it, and reports `3` only while that dialog is
+actually laid out on screen and nothing rendered. A green check therefore means the served bundle mounted, not
+just that the shell answered.
+
+If a user sees this and cannot allow (wrong account, or a scope denied on the consent screen), the app cannot
+run for that account at all: it signs every save and gate decision as that user, and refuses to work
+anonymously on purpose.
+
+**`bun run deploy` stopped at the staging check.** Production was not touched — the new version is on the staging
 deployment only. The check exits `1` when the served page throws a parse error or `#root` never replaces the
-splash, and `2` when it could not test anything (signed-out browser, no Chrome/Edge, unreachable page). Sign in
-once with `bun run deploy:login`, open the staging URL it prints, and re-run the deploy. If the version is
-broken, fix it and deploy again; the untouched production deployment keeps serving the last good version.
+splash, `2` when it could not test anything (signed-out browser, no Chrome/Edge, unreachable page), and `3` when
+Apps Script served a *visible* permission dialog instead of the app. Sign in once with `bun run deploy:login`,
+open the staging URL it prints and allow the scopes, then re-run the deploy. If the version is broken, fix it and deploy again; the untouched
+production deployment keeps serving the last good version.
+
+**A deploy reached production but the production check failed.** The deploy rolls production back to
+`lastGoodVersion` itself and re-runs the check there, exiting `1`. The failed version stays on the staging
+deployment for debugging. If the rollback could not name a target, it prints the `clasp update-deployment`
+command to run by hand. A permission dialog (`3`) never triggers a rollback: it says nothing about the version.
+Manual rollback at any time:
+
+```bash
+bun run deploy:rollback            # to the lastGoodVersion recorded by the last good deploy
+bun run deploy:rollback --to=49    # to a specific version (see `clasp deployments`)
+```
 
 **Preview shows an old bundle.** The preview server keeps its own copy; restart `bun run preview`
 after a build if the change does not appear.

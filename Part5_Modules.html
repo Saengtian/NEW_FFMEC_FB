@@ -2709,63 +2709,9 @@ function kpiInRange(iso, cutoffIso) {
   return !cutoffIso || (Boolean(iso) && iso >= cutoffIso);
 }
 
-/** The line identity the quality deep dive groups by; the drill-down reuses it. */
+/** The line identity the quality deep dive groups by. */
 function kpiVariantKey(record) {
   return `${record.model} · ${record.config} ${record.side}`;
-}
-
-/**
- * The production rows behind a variant or Pareto row. A Pareto row is a sum over
- * defectItems (fpy/fy) or downtimeEvents (eff); a record is listed only when it
- * actually contributes to the selected key. Variant rows list every record on
- * that line. `selection.keys` carries the modes folded into an Other's row.
- */
-function kpiDrillRows({ records, cutoffIso, kpiKey, selection }) {
-  if (!selection) return [];
-  const ranged = (records || []).filter((record) => record.date && kpiInRange(record.date, cutoffIso));
-  const byNewest = (a, b) =>
-    String(b.record.date).localeCompare(String(a.record.date)) ||
-    String(a.record.model).localeCompare(String(b.record.model)) ||
-    String(a.record.station || '').localeCompare(String(b.record.station || ''));
-
-  if (selection.kind === 'variant') {
-    return ranged
-      .filter((record) => kpiVariantKey(record) === selection.key)
-      .map((record) => {
-        const metrics = computeProductionMetrics(record);
-        return { record, fallout: metrics.fallout, salvage: metrics.salvage, match: null };
-      })
-      .sort(byNewest);
-  }
-
-  const keys = new Set(selection.keys && selection.keys.length ? selection.keys : [selection.key]);
-  return ranged
-    .filter((record) => !selection.variantKey || kpiVariantKey(record) === selection.variantKey)
-    .map((record) => {
-      if (kpiKey === 'eff') {
-        const minutes = (record.downtimeEvents || []).reduce((sum, event) => {
-          const key = event.category || 'Unclassified';
-          return keys.has(key) ? sum + Math.max(0, Number(event.durationMin) || 0) : sum;
-        }, 0);
-        if (minutes <= 0) return null;
-        const metrics = computeProductionMetrics(record);
-        return { record, fallout: metrics.fallout, salvage: metrics.salvage, match: minutes };
-      }
-
-      let fallout = 0;
-      let salvage = 0;
-      (record.defectItems || []).forEach((defect) => {
-        if (!keys.has(defect.mode || 'Unclassified')) return;
-        const qty = Math.max(0, Number(defect.falloutQty) || 0);
-        fallout += qty;
-        salvage += Math.min(qty, Math.max(0, Number(defect.salvageQty) || 0));
-      });
-      const net = fallout - salvage;
-      if (kpiKey === 'fpy' ? fallout <= 0 : net <= 0) return null;
-      return { record, fallout, salvage, match: kpiKey === 'fy' ? net : fallout };
-    })
-    .filter(Boolean)
-    .sort(byNewest);
 }
 
 function kpiEmptyAcc() {
@@ -2879,6 +2825,27 @@ function kpiDeepDiveCsv(meta, view) {
   });
 
   return rows.map((cells) => cells.map(kpiCsvCell).join(',')).join('\r\n');
+}
+
+// The Overview and the full deep dive share one download: same filename, same
+// UTF-8 CSV, so exporting from either place cannot produce a different sheet.
+function kpiDeepDiveExportName(meta, range) {
+  return `${meta.title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')}-deep-dive-${range.id}-${todayIso()}`;
+}
+
+function downloadKpiDeepDiveCsv(meta, view, range) {
+  const blob = new Blob([kpiDeepDiveCsv(meta, view)], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${kpiDeepDiveExportName(meta, range)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // One builder per KPI family. Everything the modal renders — headline, scope line,
@@ -3622,98 +3589,6 @@ function KpiEfficiencyDiagnostics({ analysis, headingClass, headingTag: Heading 
   );
 }
 
-/** The production rows behind one Pareto bar or one variant row. */
-function KpiDrillRecords({ selection, rows, kpiKey, onClose }) {
-  const isVariant = selection.kind === 'variant';
-  const totalFallout = rows.reduce((sum, row) => sum + row.fallout, 0);
-  const totalSalvage = rows.reduce((sum, row) => sum + row.salvage, 0);
-  const totalMatch = rows.reduce((sum, row) => sum + (row.match || 0), 0);
-  const showNet = !isVariant && kpiKey === 'fy';
-  const showDowntime = !isVariant && kpiKey === 'eff';
-  const recordWord = rows.length === 1 ? 'record' : 'records';
-  const summary = isVariant
-    ? `${rows.length} ${recordWord} · fallout ${totalFallout.toLocaleString()} · salvage ${totalSalvage.toLocaleString()}`
-    : showDowntime
-    ? `${rows.length} ${recordWord} · ${totalMatch.toLocaleString()} matching downtime minutes`
-    : `${rows.length} ${recordWord} · fallout ${totalFallout.toLocaleString()} · salvage ${totalSalvage.toLocaleString()}${
-        showNet ? ` · net reject ${totalMatch.toLocaleString()}` : ''
-      }`;
-
-  return (
-    <div
-      className="no-print mt-3 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/30 overflow-hidden"
-      role="region"
-      aria-label={`Production records behind ${selection.label}`}
-    >
-      <div className="px-3 py-2 border-b border-blue-200/70 dark:border-blue-800/70 flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-[11px] font-bold text-blue-900 dark:text-blue-200 truncate" title={selection.label}>
-            Records behind “{selection.label}”
-          </div>
-          <div className="text-[10px] text-slate-500 dark:text-slate-400">{summary}</div>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Hide production records"
-          className="p-1 rounded-md text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-white/70 dark:hover:bg-slate-800/70 transition-colors shrink-0"
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
-      </div>
-
-      {rows.length === 0 ? (
-        <div className="px-3 py-3 text-[11px] text-slate-500 dark:text-slate-400">
-          No production records in this range contribute to this row.
-        </div>
-      ) : (
-        <div className="max-h-64 overflow-auto">
-          <table className="table-freeze-first w-full min-w-[560px] text-left border-collapse text-[11px]">
-            <thead className="sticky top-0 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
-              <tr>
-                <th className="py-2 pl-3 pr-2 whitespace-nowrap">Date</th>
-                <th className="py-2 px-2">Line</th>
-                <th className="py-2 px-2">Station</th>
-                <th className="py-2 px-2 text-right">Fallout</th>
-                <th className="py-2 px-2 text-right">Salvage</th>
-                {showNet && <th className="py-2 px-2 text-right">Net reject</th>}
-                {showDowntime && <th className="py-2 pl-2 pr-3 text-right">Downtime</th>}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800 tabular-nums">
-              {rows.map((row, index) => (
-                <tr key={row.record.id || `${row.record.date}-${index}`} className="hover:bg-white/60 dark:hover:bg-slate-900/40">
-                  <td className="py-2 pl-3 pr-2 whitespace-nowrap text-slate-600 dark:text-slate-400">{row.record.date}</td>
-                  <td className="py-2 px-2">
-                    <div className="font-semibold text-slate-900 dark:text-slate-100">{row.record.model}</div>
-                    <div className="text-[10px] text-slate-400 dark:text-slate-500">
-                      {row.record.phase} · {row.record.config} {row.record.side}
-                    </div>
-                  </td>
-                  <td className="py-2 px-2 text-slate-600 dark:text-slate-400">{row.record.station || '—'}</td>
-                  <td className="py-2 px-2 text-right font-semibold text-rose-600 dark:text-rose-400">{row.fallout.toLocaleString()}</td>
-                  <td className="py-2 px-2 text-right font-medium text-amber-700 dark:text-amber-300">{row.salvage.toLocaleString()}</td>
-                  {showNet && <td className="py-2 px-2 text-right font-semibold text-slate-900 dark:text-slate-100">{row.match.toLocaleString()}</td>}
-                  {showDowntime && <td className="py-2 pl-2 pr-3 text-right font-semibold text-slate-700 dark:text-slate-300">{row.match.toLocaleString()} min</td>}
-                </tr>
-              ))}
-            </tbody>
-            <tfoot className="bg-slate-50/80 dark:bg-slate-800/80 border-t border-slate-200 dark:border-slate-700 font-bold tabular-nums text-slate-700 dark:text-slate-300">
-              <tr>
-                <td className="py-2 pl-3 pr-2" colSpan={3}>Total ({rows.length})</td>
-                <td className="py-2 px-2 text-right text-rose-700 dark:text-rose-300">{totalFallout.toLocaleString()}</td>
-                <td className="py-2 px-2 text-right text-amber-800 dark:text-amber-200">{totalSalvage.toLocaleString()}</td>
-                {showNet && <td className="py-2 px-2 text-right">{totalMatch.toLocaleString()}</td>}
-                {showDowntime && <td className="py-2 pl-2 pr-3 text-right">{totalMatch.toLocaleString()} min</td>}
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /**
  * The three derived inputs every KPI family builder reads, computed once for both
  * the modal and the inline deep-dive section on the Overview.
@@ -3786,6 +3661,8 @@ function buildKpiDeepDiveView({
 function KpiDeepDiveModal({
   kpiKey,
   initialVariant = 'ALL',
+  initialRange = '90D',
+  printOnOpen = false,
   projects,
   records,
   gateRecords,
@@ -3795,9 +3672,10 @@ function KpiDeepDiveModal({
   customerFeedback,
   onClose
 }) {
-  const [rangeId, setRangeId] = useState('90D');
+  const [rangeId, setRangeId] = useState(() =>
+    KPI_RANGE_OPTIONS.some((option) => option.id === initialRange) ? initialRange : '90D'
+  );
   const [variantFilter, setVariantFilter] = useState(initialVariant || 'ALL');
-  const [drill, setDrill] = useState(null);
   const meta = KPI_DEEP_DIVE_META[kpiKey] || KPI_DEEP_DIVE_META.fpy;
   // The process filter is the one dimension claims and cost-saving records cannot
   // honour, so the modal says so only when it is actually narrowing something.
@@ -3840,36 +3718,8 @@ function KpiDeepDiveModal({
     [meta, kpiKey, records, claims, savingItems, scopedLines, gateRecords, cutoffIso, range.days, range.label, variantFilter]
   );
 
-  const quality = meta.family === 'quality';
-  const drillRows = useMemo(
-    () => (drill ? kpiDrillRows({ records, cutoffIso, kpiKey, selection: drill }) : []),
-    [records, cutoffIso, kpiKey, drill]
-  );
-
   const handleVariantSelect = (key) => {
-    const next = activeVariant === key ? 'ALL' : key;
-    setVariantFilter(next);
-    if (!quality || next === 'ALL') {
-      setDrill(null);
-      return;
-    }
-    setDrill({ kind: 'variant', key, label: variants.find((v) => v.key === key)?.label || key });
-  };
-
-  const handleParetoSelect = (row) => {
-    if (!quality || !row) return;
-    const key = row.key;
-    setDrill((prev) =>
-      prev && prev.kind === 'pareto' && prev.key === key
-        ? null
-        : {
-            kind: 'pareto',
-            key,
-            keys: row.keys && row.keys.length ? row.keys : [row.key],
-            label: row.label,
-            variantKey: activeVariant === 'ALL' ? null : activeVariant
-          }
-    );
+    setVariantFilter(activeVariant === key ? 'ALL' : key);
   };
 
   const variantLabel = variants.find((v) => v.key === activeVariant)?.label;
@@ -3880,22 +3730,7 @@ function KpiDeepDiveModal({
     ? `No dated points${scopePhrase} in the last ${range.days} days — widen the range or wait for the next run.`
     : `No dated points${scopePhrase} in this period — widen the range or wait for the next run.`;
 
-  const exportName = `${meta.title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')}-deep-dive-${range.id}-${todayIso()}`;
-
-  const handleExportCsv = () => {
-    const blob = new Blob([kpiDeepDiveCsv(meta, view)], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${exportName}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  };
+  const handleExportCsv = () => downloadKpiDeepDiveCsv(meta, view, range);
 
   // Print in the light palette even when the app is in dark mode, then restore it.
   const handlePrint = () => {
@@ -3910,6 +3745,15 @@ function KpiDeepDiveModal({
     setTimeout(restore, 2000);
     window.print();
   };
+
+  // The inline card's Print action opens this dialog in its current state so the
+  // same print stylesheet and panel layout are used. Give the charts a short
+  // beat to lay out, then invoke the browser's print dialog once.
+  useEffect(() => {
+    if (!printOnOpen) return undefined;
+    const timer = setTimeout(handlePrint, 300);
+    return () => clearTimeout(timer);
+  }, [printOnOpen]);
 
   return (
     <div
@@ -3978,6 +3822,7 @@ function KpiDeepDiveModal({
                   value={filter.value}
                   options={filter.options}
                   onChange={filter.onChange}
+                  groupByFamily={Boolean(filter.groupByFamily)}
                 />
               ))}
               {processNarrowsProduction && (
@@ -3998,7 +3843,6 @@ function KpiDeepDiveModal({
                 value={activeVariant}
                 onChange={(e) => {
                   setVariantFilter(e.target.value);
-                  setDrill(null);
                 }}
                 className="px-2.5 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 max-w-[54%]"
               >
@@ -4014,7 +3858,6 @@ function KpiDeepDiveModal({
                   type="button"
                   onClick={() => {
                     setVariantFilter('ALL');
-                    setDrill(null);
                   }}
                   className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:underline"
                 >
@@ -4037,7 +3880,6 @@ function KpiDeepDiveModal({
                       type="button"
                       onClick={() => {
                         setRangeId(option.id);
-                        setDrill(null);
                       }}
                       className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
                         rangeId === option.id
@@ -4079,7 +3921,7 @@ function KpiDeepDiveModal({
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
               {meta.variantHeading}
               <span className="no-print ml-2 text-[10px] font-normal normal-case tracking-normal text-slate-400 dark:text-slate-500">
-                {quality ? 'click a row to scope the deep dive and list its records' : 'click a row to scope the deep dive'}
+                click a row to scope the deep dive
               </span>
             </h4>
             <KpiBarRows
@@ -4088,30 +3930,17 @@ function KpiDeepDiveModal({
               activeKey={activeVariant}
               onSelect={handleVariantSelect}
             />
-            {drill?.kind === 'variant' && (
-              <KpiDrillRecords selection={drill} rows={drillRows} kpiKey={kpiKey} onClose={() => setDrill(null)} />
-            )}
           </section>
 
           <section>
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-2">
               {meta.paretoHeading}
-              {quality && (
-                <span className="no-print ml-2 text-[10px] font-normal normal-case tracking-normal text-slate-400 dark:text-slate-500">
-                  click a row for the records behind it
-                </span>
-              )}
             </h4>
             <KpiParetoRows
               rows={view.pareto}
               unit={meta.paretoUnit}
               groupNoun={meta.groupNoun}
-              activeKey={drill?.kind === 'pareto' ? drill.key : undefined}
-              onSelect={quality ? handleParetoSelect : undefined}
             />
-            {drill?.kind === 'pareto' && (
-              <KpiDrillRecords selection={drill} rows={drillRows} kpiKey={kpiKey} onClose={() => setDrill(null)} />
-            )}
           </section>
 
           <KpiEfficiencyDiagnostics
@@ -4158,7 +3987,6 @@ function KpiDeepDiveSection({
   const [kpiKey, setKpiKey] = useState('fpy');
   const [rangeId, setRangeId] = useState('90D');
   const [variantFilter, setVariantFilter] = useState('ALL');
-  const [drill, setDrill] = useState(null);
 
   // The KPI tiles above the card drive this state. The token makes a repeated
   // click on the same tile reset any drill-down and re-select its tab. A variant
@@ -4168,7 +3996,6 @@ function KpiDeepDiveSection({
     if (!focusKpiKey || !focusToken) return;
     setKpiKey(focusKpiKey);
     setVariantFilter('ALL');
-    setDrill(null);
   }, [focusKpiKey, focusToken]);
   const meta = KPI_DEEP_DIVE_META[kpiKey] || KPI_DEEP_DIVE_META.fpy;
   const range = KPI_RANGE_OPTIONS.find((r) => r.id === rangeId) || KPI_RANGE_OPTIONS[1];
@@ -4199,42 +4026,21 @@ function KpiDeepDiveSection({
     [meta, kpiKey, records, claims, savingItems, scopedLines, gateRecords, cutoffIso, range.days, range.label, variantFilter]
   );
 
-  const quality = meta.family === 'quality';
-  const drillRows = useMemo(
-    () => (drill ? kpiDrillRows({ records, cutoffIso, kpiKey, selection: drill }) : []),
-    [records, cutoffIso, kpiKey, drill]
-  );
-
   // Same interaction as the modal: clicking the active variant clears the
-  // scope; selecting a different one narrows the whole view. For quality KPIs
-  // the variant also opens the record list behind that line.
+  // scope; selecting a different one narrows the whole view.
   const handleVariantSelect = (key) => {
-    const next = activeVariant === key ? 'ALL' : key;
-    setVariantFilter(next);
-    if (!quality || next === 'ALL') {
-      setDrill(null);
-      return;
-    }
-    setDrill({ kind: 'variant', key, label: variants.find((v) => v.key === key)?.label || key });
-  };
-
-  const handleParetoSelect = (row) => {
-    if (!quality || !row) return;
-    const key = row.key;
-    setDrill((prev) =>
-      prev && prev.kind === 'pareto' && prev.key === key
-        ? null
-        : {
-            kind: 'pareto',
-            key,
-            keys: row.keys && row.keys.length ? row.keys : [row.key],
-            label: row.label,
-            variantKey: activeVariant === 'ALL' ? null : activeVariant
-          }
-    );
+    setVariantFilter(activeVariant === key ? 'ALL' : key);
   };
 
   const variantLabel = variants.find((v) => v.key === activeVariant)?.label;
+  const scopeLabel = activeVariant === 'ALL' ? view.scopeLabel : `${view.scopeLabel} · ${variantLabel}`;
+
+  const handleExportCsv = () => downloadKpiDeepDiveCsv(meta, view, range);
+  const openDeepDive = (print = false) => {
+    if (typeof onOpenDeepDive !== 'function') return;
+    onOpenDeepDive(kpiKey, activeVariant, range.id, print);
+  };
+
   const scopePhrase = activeVariant === 'ALL' ? '' : ' for this variant';
   const emptyRange = range.days
     ? `No dated points${scopePhrase} in the last ${range.days} days — widen the range or wait for the next run.`
@@ -4254,6 +4060,7 @@ function KpiDeepDiveSection({
           <p className="text-[11px] text-slate-500 dark:text-slate-400">
             {meta.title} · trend, the worst variants, and the drivers behind the loss in the active scope
           </p>
+          <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5">{scopeLabel}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <div className="text-right">
@@ -4262,10 +4069,30 @@ function KpiDeepDiveSection({
               {activeVariant === 'ALL' ? `Target ${meta.targetText}` : `${variantLabel} · Target ${meta.targetText}`}
             </div>
           </div>
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            title="Download this deep dive as CSV"
+            aria-label="Download this deep dive as CSV"
+            className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" />
+          </button>
           {typeof onOpenDeepDive === 'function' && (
             <button
               type="button"
-              onClick={() => onOpenDeepDive(kpiKey, activeVariant)}
+              onClick={() => openDeepDive(true)}
+              title="Print this deep dive"
+              aria-label="Print this deep dive"
+              className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
+            >
+              <Printer className="w-3.5 h-3.5" />
+            </button>
+          )}
+          {typeof onOpenDeepDive === 'function' && (
+            <button
+              type="button"
+              onClick={() => openDeepDive()}
               className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
             >
               Full deep dive
@@ -4283,7 +4110,6 @@ function KpiDeepDiveSection({
               onClick={() => {
                 setKpiKey(tab.key);
                 setVariantFilter('ALL');
-                setDrill(null);
               }}
               aria-pressed={kpiKey === tab.key}
               className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
@@ -4306,7 +4132,6 @@ function KpiDeepDiveSection({
                 value={activeVariant}
                 onChange={(e) => {
                   setVariantFilter(e.target.value);
-                  setDrill(null);
                 }}
                 aria-label="Scope the inline KPI deep dive to a variant"
                 className="px-2.5 py-1.5 text-[11px] font-semibold border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 max-w-[210px]"
@@ -4328,7 +4153,6 @@ function KpiDeepDiveSection({
                   type="button"
                   onClick={() => {
                     setRangeId(option.id);
-                    setDrill(null);
                   }}
                   aria-pressed={rangeId === option.id}
                   className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors ${
@@ -4378,7 +4202,7 @@ function KpiDeepDiveSection({
             <h3 className={`${chartHeading} mb-2`}>
               {meta.variantHeading}
               <span className="ml-2 text-[10px] font-normal normal-case tracking-normal text-slate-400 dark:text-slate-500">
-                {quality ? 'click a row to scope the deep dive and list its records' : 'click a row to scope the deep dive'}
+                click a row to scope the deep dive
               </span>
             </h3>
             <KpiBarRows
@@ -4391,27 +4215,16 @@ function KpiDeepDiveSection({
           <section>
             <h3 className={`${chartHeading} mb-2`}>
               {meta.paretoHeading}
-              {quality && (
-                <span className="ml-2 text-[10px] font-normal normal-case tracking-normal text-slate-400 dark:text-slate-500">
-                  click a row for the records behind it
-                </span>
-              )}
             </h3>
             <KpiParetoRows
               rows={view.pareto}
               unit={meta.paretoUnit}
               groupNoun={meta.groupNoun}
-              activeKey={drill?.kind === 'pareto' ? drill.key : undefined}
-              onSelect={quality ? handleParetoSelect : undefined}
             />
           </section>
         </div>
 
         <KpiEfficiencyDiagnostics analysis={view.effAnalysis} headingClass={chartHeading} />
-
-        {drill && (
-          <KpiDrillRecords selection={drill} rows={drillRows} kpiKey={kpiKey} onClose={() => setDrill(null)} />
-        )}
       </div>
     </section>
   );
@@ -5531,6 +5344,1171 @@ function DeleteTeamMemberModal({ member, reports, workload, onClose, onConfirm }
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ProductMasterView({ products = [], usageByModel = {}, onSave, onDelete, embedded = false }) {
+  const [query, setQuery] = useState('');
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({ model: '', familyGroup: MODEL_FAMILY_ORDER[0] });
+  const [error, setError] = useState('');
+  const [deleting, setDeleting] = useState(null);
+
+  const filtered = products
+    .filter((product) => {
+      const needle = query.trim().toLowerCase();
+      if (!needle) return true;
+      return [product.model, product.familyGroup]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(needle));
+    })
+    .sort((a, b) => {
+      const fa = MODEL_FAMILY_ORDER.indexOf(a.familyGroup);
+      const fb = MODEL_FAMILY_ORDER.indexOf(b.familyGroup);
+      if (fa !== fb) return (fa === -1 ? 99 : fa) - (fb === -1 ? 99 : fb);
+      return a.model.localeCompare(b.model);
+    });
+
+  const npiCount = products.filter((product) => isActiveNpiModel(product.model)).length;
+  const familyCount = new Set(products.map((product) => product.familyGroup)).size;
+
+  const openNew = () => {
+    setForm({ model: '', familyGroup: MODEL_FAMILY_ORDER[0] });
+    setError('');
+    setEditing({ id: null });
+  };
+
+  const openEdit = (product) => {
+    setForm({ model: product.model, familyGroup: product.familyGroup });
+    setError('');
+    setEditing(product);
+  };
+
+  const submit = (event) => {
+    event.preventDefault();
+    const result = onSave(form, editing.id || null);
+    if (!result || result.ok === false) {
+      setError((result && result.error) || 'Could not save this product.');
+      return;
+    }
+    setEditing(null);
+    setError('');
+  };
+
+  const confirmDelete = () => {
+    if (onDelete(deleting)) setDeleting(null);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className={`flex flex-wrap items-start gap-3 ${embedded ? 'justify-end' : 'justify-between'}`}>
+        {!embedded && (
+          <div>
+            <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">Product Master</h2>
+            <p className="mt-1 max-w-2xl text-xs text-slate-500 dark:text-slate-400">
+              Manage the model-to-family registry used by the scope filters, program forms and product
+              assignments. Active NPI status is derived from the model code.
+            </p>
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={openNew}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add Product
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {[
+          { label: 'Products', value: products.length },
+          { label: 'Active NPI', value: npiCount },
+          { label: 'MP', value: products.length - npiCount },
+          { label: 'Families', value: familyCount }
+        ].map((stat) => (
+          <div
+            key={stat.label}
+            className="rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900"
+          >
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              {stat.label}
+            </div>
+            <div className="mt-1 text-xl font-bold tabular-nums text-slate-900 dark:text-slate-100">
+              {stat.value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+          <div className="text-sm font-bold text-slate-900 dark:text-slate-100">
+            Models <span className="font-normal text-slate-400">({filtered.length})</span>
+          </div>
+          <div className="relative w-full sm:w-64">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search model or family..."
+              className="w-full rounded-lg border border-slate-200 bg-white py-1.5 pl-8 pr-3 text-xs text-slate-700 outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
+            />
+          </div>
+        </div>
+
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-xs text-slate-500 dark:text-slate-400">
+            No products match this search.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-xs">
+              <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500 dark:bg-slate-800/70 dark:text-slate-400">
+                <tr>
+                  <th className="px-4 py-2.5 font-semibold">Model</th>
+                  <th className="px-4 py-2.5 font-semibold">Family</th>
+                  <th className="px-4 py-2.5 font-semibold">Portfolio</th>
+                  <th className="px-4 py-2.5 font-semibold">References</th>
+                  <th className="px-4 py-2.5 text-right font-semibold">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {filtered.map((product) => (
+                  <tr key={product.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                    <td className="px-4 py-3 font-bold text-slate-900 dark:text-slate-100">
+                      {product.model}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="inline-flex rounded bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        {product.familyGroup}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex rounded px-2 py-0.5 text-[10px] font-semibold ${
+                          isActiveNpiModel(product.model)
+                            ? 'bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                            : 'bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                        }`}
+                      >
+                        {isActiveNpiModel(product.model) ? 'NPI' : 'MP'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 tabular-nums text-slate-600 dark:text-slate-300">
+                      {usageByModel[product.model] || 0}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => openEdit(product)}
+                          title={`Edit ${product.model}`}
+                          className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDeleting(product)}
+                          title={`Delete ${product.model}`}
+                          className="rounded-lg p-1.5 text-rose-500 hover:bg-rose-50 hover:text-rose-700 dark:hover:bg-rose-950 dark:hover:text-rose-300"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {editing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <form
+            onSubmit={submit}
+            className="w-full max-w-md overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+          >
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5 dark:border-slate-800">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                  {editing.id ? 'Edit Product' : 'Add Product'}
+                </h3>
+                <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                  Model code and family assignment
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditing(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800"
+                aria-label="Close product form"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4 px-5 py-4">
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                  Model code
+                </span>
+                <input
+                  value={form.model}
+                  onChange={(event) => setForm((prev) => ({ ...prev, model: event.target.value.toUpperCase() }))}
+                  placeholder="X4151"
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  required
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-1 block text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                  Family
+                </span>
+                <select
+                  value={form.familyGroup}
+                  onChange={(event) => setForm((prev) => ({ ...prev, familyGroup: event.target.value }))}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                >
+                  {MODEL_FAMILY_ORDER.map((family) => (
+                    <option key={family} value={family}>
+                      {family}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                A model in use cannot be renamed or deleted. Changing its family updates the records
+                already using it.
+              </p>
+
+              {error && (
+                <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] font-semibold text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300">
+                  {error}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3.5 dark:border-slate-800 dark:bg-slate-800">
+              <button
+                type="button"
+                onClick={() => setEditing(null)}
+                className="rounded-lg px-3.5 py-2 font-medium text-slate-600 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="rounded-lg bg-slate-900 px-4 py-2 font-semibold text-white hover:bg-slate-800 dark:bg-slate-700 dark:hover:bg-slate-600"
+              >
+                {editing.id ? 'Save Product' : 'Add Product'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {deleting && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+          <div className="w-full max-w-sm overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+            <div className="px-5 py-4">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Delete {deleting.model}?</h3>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                This removes the product from the model-family registry. Models still used by a program,
+                record or team assignment cannot be deleted.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3.5 dark:border-slate-800 dark:bg-slate-800">
+              <button
+                type="button"
+                onClick={() => setDeleting(null)}
+                className="rounded-lg px-3.5 py-2 font-medium text-slate-600 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDelete}
+                className="rounded-lg bg-rose-600 px-4 py-2 font-semibold text-white hover:bg-rose-700"
+              >
+                Delete Product
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProgramSetupView({
+  activeTab = 'products',
+  onTabChange,
+  onCreateProgram,
+  formKey = 0,
+  products = [],
+  usageByModel = {},
+  onSaveProduct,
+  onDeleteProduct
+}) {
+  const tabs = [
+    { id: 'initialize', label: 'Initialize Program', hint: 'PEN-81-0002' },
+    { id: 'products', label: 'Products', hint: String(products.length) }
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">
+              Program Setup &amp; Products
+            </h2>
+            <p className="mt-1 max-w-2xl text-xs text-slate-500 dark:text-slate-400">
+              Initialize a PEN-81-0002 program and maintain the model-to-family registry used by the
+              scope filters, program forms and product assignments.
+            </p>
+          </div>
+
+          <div
+            role="tablist"
+            aria-label="Program setup sections"
+            className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5 dark:border-slate-700 dark:bg-slate-800"
+          >
+            {tabs.map((tab) => {
+              const active = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => onTabChange(tab.id)}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-semibold transition-colors ${
+                    active
+                      ? 'bg-white text-slate-900 shadow-2xs dark:bg-slate-900 dark:text-slate-100'
+                      : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'
+                  }`}
+                >
+                  <span>{tab.label}</span>
+                  <span className="text-[10px] font-normal opacity-60">{tab.hint}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {activeTab === 'initialize' ? (
+        <div className="mx-auto w-full max-w-3xl">
+          <NewProjectForm
+            key={formKey}
+            onSubmit={onCreateProgram}
+            onClose={() => onTabChange('products')}
+            cancelLabel="Products"
+          />
+        </div>
+      ) : (
+        <ProductMasterView
+          products={products}
+          usageByModel={usageByModel}
+          onSave={onSaveProduct}
+          onDelete={onDeleteProduct}
+          embedded
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// VIEW 16: MIH RISK & CAPACITY FORECAST
+// ============================================================================
+
+/** Colour for a forecast risk band, shared by the summary and every row. */
+function mihRiskBadgeClass(risk) {
+  if (risk === 'high') {
+    return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300';
+  }
+  if (risk === 'medium') {
+    return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300';
+  }
+  if (risk === 'low') {
+    return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300';
+  }
+  return 'border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300';
+}
+
+function mihCapacityBadgeClass(status) {
+  if (status === 'over') return mihRiskBadgeClass('high');
+  if (status === 'tight') return mihRiskBadgeClass('medium');
+  if (status === 'ok') return mihRiskBadgeClass('low');
+  return mihRiskBadgeClass('unknown');
+}
+
+/**
+ * Predicted FATP MIH per line, the drivers behind the slip, and whether the owners
+ * can clear their remaining work inside the horizon. Read-only: the fixes live in
+ * the gate dossier, the task drawer and the timeline.
+ */
+function MihForecastView({ forecast, scopeLabel = '', revision = 0, lastSavedAt = null, onSwitchView }) {
+  const lines = forecast && Array.isArray(forecast.lines) ? forecast.lines : [];
+  const summary =
+    (forecast && forecast.summary) ||
+    { lines: 0, dated: 0, high: 0, medium: 0, low: 0, unknown: 0, atRisk: 0, averageSlip: 0, totalSlip: 0 };
+  const capacity = (forecast && forecast.capacity) || { owners: [], summary: {}, weeks: 0, perWeek: 0, capacity: 0 };
+  const cycle = (forecast && forecast.cycle) || { basis: 'none', samples: 0, median: null };
+  const capacitySummary = capacity.summary || {};
+
+  const stats = [
+    { label: 'MIH lines', value: String(summary.lines), note: `${summary.dated} with a plan date` },
+    {
+      label: 'At risk',
+      value: String(summary.atRisk),
+      note: `${summary.high} high · ${summary.medium} medium`
+    },
+    {
+      label: 'Average predicted slip',
+      value: `${summary.averageSlip}d`,
+      note: `${summary.totalSlip}d across the dated lines`
+    },
+    {
+      label: 'Owners over capacity',
+      value: String(capacitySummary.over || 0),
+      note: `${capacitySummary.tight || 0} tight · ${capacitySummary.overdue || 0} items already late`
+    }
+  ];
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-3.5 dark:border-slate-800">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+              MIH Risk &amp; Capacity Forecast
+            </h2>
+            <p className="mt-0.5 max-w-3xl text-[11px] text-slate-500 dark:text-slate-400">
+              FATP MIH predicted from the gates still unsigned, the program's late work, the build
+              against its window, and how long the remaining gates took on lines that already passed
+              them. Each driver is a number of days with the evidence behind it, and the slip is their
+              sum — so it can be argued with.
+            </p>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+              <span>As of {forecast && forecast.today ? dataTrustDayText(forecast.today) : '—'}</span>
+              <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                |
+              </span>
+              <span>
+                Cycle time:{' '}
+                {cycle.basis === 'history'
+                  ? `${Math.round(cycle.median)}d median stage from ${cycle.samples} approved stage${
+                      cycle.samples === 1 ? '' : 's'
+                    }`
+                  : "plan stage length — no approved stage pairs on file yet"}
+              </span>
+              <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                |
+              </span>
+              <span>
+                Capacity assumed {capacity.perWeek || MIH_FORECAST_ITEMS_PER_WEEK} items/week/owner over{' '}
+                {capacity.weeks || MIH_FORECAST_WEEKS_AHEAD} weeks ({(capacity.capacity || 0).toString()} per
+                owner)
+              </span>
+              <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                |
+              </span>
+              <span>
+                Sheet Rev #{Number(revision) || 0}
+                {lastSavedAt ? ` · saved ${dataTrustStamp(lastSavedAt)}` : ''}
+              </span>
+              {scopeLabel && (
+                <>
+                  <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                    |
+                  </span>
+                  <span>{scopeLabel}</span>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
+          {stats.map((stat) => (
+            <div
+              key={stat.label}
+              className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-800 dark:bg-slate-800/40"
+            >
+              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">{stat.label}</div>
+              <div className="mt-1 text-xl font-bold tabular-nums text-slate-900 dark:text-slate-100">
+                {stat.value}
+              </div>
+              <div className="mt-0.5 text-[10px] text-slate-400 dark:text-slate-400">{stat.note}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-5 py-3 dark:border-slate-800">
+          <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Predicted MIH by line</h3>
+          <span className="text-[11px] text-slate-500 dark:text-slate-400">
+            Highest risk and longest slip first
+          </span>
+        </div>
+
+        {lines.length === 0 ? (
+          <div className="px-5 py-10 text-center text-xs text-slate-500 dark:text-slate-400">
+            No MIH lines in this scope. Widen the portfolio or the model filter to forecast a program.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[980px] text-left text-[11px]">
+              <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+                <tr>
+                  <th className="px-3 py-2 font-semibold">MIH line</th>
+                  <th className="px-3 py-2 font-semibold">Plan MIH</th>
+                  <th className="px-3 py-2 font-semibold">Predicted MIH</th>
+                  <th className="px-3 py-2 font-semibold">Slip</th>
+                  <th className="px-3 py-2 font-semibold">Risk</th>
+                  <th className="px-3 py-2 font-semibold">Drivers</th>
+                  <th className="px-3 py-2 font-semibold">Build</th>
+                  <th className="px-3 py-2 font-semibold">Next gate</th>
+                  <th className="px-3 py-2 font-semibold">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {lines.map((line) => (
+                  <tr key={`${line.projectId}-${line.lineKey}`} className="align-top">
+                    <td className="px-3 py-2">
+                      <div className="font-semibold text-slate-800 dark:text-slate-100">
+                        {line.model} · {line.phase}
+                      </div>
+                      <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                        {line.config} · {line.side}
+                        {line.programStatus ? ` · ${line.programStatus}` : ''}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 tabular-nums text-slate-600 dark:text-slate-300">
+                      {formatMonthDay(line.plannedMih)}
+                    </td>
+                    <td className="px-3 py-2 tabular-nums font-semibold text-slate-800 dark:text-slate-100">
+                      {line.predictedMih ? formatMonthDay(line.predictedMih) : '—'}
+                      {line.daysToMih !== null && line.plannedMih ? (
+                        <div className="text-[10px] font-normal text-slate-400 dark:text-slate-500">
+                          {line.daysToMih >= 0 ? `${line.daysToMih}d to plan` : `${Math.abs(line.daysToMih)}d past`}
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 tabular-nums">
+                      {line.slipDays > 0 ? (
+                        <span className="font-bold text-rose-600 dark:text-rose-400">+{line.slipDays}d</span>
+                      ) : (
+                        <span className="text-emerald-700 dark:text-emerald-300">on plan</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span
+                        className={`inline-flex rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase ${mihRiskBadgeClass(
+                          line.risk
+                        )}`}
+                      >
+                        {line.risk}
+                      </span>
+                      <div className="mt-0.5 text-[10px] tabular-nums text-slate-400 dark:text-slate-500">
+                        {line.gatesApproved}/{line.gatesTotal} gates
+                      </div>
+                    </td>
+                    <td className="px-3 py-2">
+                      {line.drivers.length === 0 ? (
+                        <span className="text-[10px] text-slate-400 dark:text-slate-500">
+                          Nothing outstanding on the plan
+                        </span>
+                      ) : (
+                        <div className="flex flex-wrap gap-1">
+                          {line.drivers.map((driver) => (
+                            <span
+                              key={driver.key}
+                              title={driver.detail}
+                              className="inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                            >
+                              <span className="font-semibold">{driver.label}</span>
+                              <span className="tabular-nums text-rose-600 dark:text-rose-400">+{driver.days}d</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      {line.progressPct === null ? (
+                        <span className="text-[10px] text-slate-400 dark:text-slate-500">No planned qty</span>
+                      ) : (
+                        <div className="w-28">
+                          <div className="relative h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                            <div
+                              className="h-full bg-blue-500"
+                              style={{ width: `${Math.min(100, Math.max(0, line.progressPct))}%` }}
+                            />
+                            {line.windowSpentPct !== null && (
+                              <div
+                                className="absolute top-0 h-full w-0.5 bg-slate-700 dark:bg-slate-200"
+                                style={{ left: `${Math.min(100, Math.max(0, line.windowSpentPct))}%` }}
+                                title={`${Math.round(line.windowSpentPct)}% of the build window spent`}
+                              />
+                            )}
+                          </div>
+                          <div className="mt-0.5 text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+                            {Math.round(line.progressPct)}% built
+                            {line.windowSpentPct !== null
+                              ? ` · ${Math.round(line.windowSpentPct)}% of window`
+                              : ''}
+                          </div>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      {line.nextGate ? (
+                        <>
+                          <div className="font-semibold text-slate-700 dark:text-slate-200">
+                            {line.nextGate.code} {line.nextGate.short}
+                          </div>
+                          <div
+                            className={`text-[10px] tabular-nums ${
+                              line.nextGate.overdueDays > 0
+                                ? 'font-semibold text-rose-600 dark:text-rose-400'
+                                : 'text-slate-400 dark:text-slate-500'
+                            }`}
+                          >
+                            {line.nextGate.status}
+                            {line.nextGate.dueIso ? ` · ${formatMonthDay(line.nextGate.dueIso)}` : ''}
+                          </div>
+                        </>
+                      ) : (
+                        <span className="text-[10px] text-emerald-700 dark:text-emerald-300">
+                          All gates cleared
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex flex-wrap gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onSwitchView('gates')}
+                          className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-blue-600 hover:bg-slate-50 dark:border-slate-700 dark:text-blue-400 dark:hover:bg-slate-800"
+                        >
+                          Gates
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onSwitchView('tasks')}
+                          className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-blue-600 hover:bg-slate-50 dark:border-slate-700 dark:text-blue-400 dark:hover:bg-slate-800"
+                        >
+                          Tasks
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onSwitchView('timeline')}
+                          className="rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-blue-600 hover:bg-slate-50 dark:border-slate-700 dark:text-blue-400 dark:hover:bg-slate-800"
+                        >
+                          Timeline
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-5 py-3 dark:border-slate-800">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Capacity forecast</h3>
+            <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+              Open tasks plus owed signatures per owner, against {capacity.perWeek || MIH_FORECAST_ITEMS_PER_WEEK}{' '}
+              items/week over {capacity.weeks || MIH_FORECAST_WEEKS_AHEAD} weeks — a planning assumption, not
+              measured throughput.
+            </p>
+          </div>
+          <div className="text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+            {capacitySummary.totalLoad || 0} items ·{' '}
+            {capacitySummary.weeksToClear || 0} owner-weeks to clear
+          </div>
+        </div>
+
+        {!capacity.owners || capacity.owners.length === 0 ? (
+          <div className="px-5 py-8 text-center text-xs text-slate-500 dark:text-slate-400">
+            No team members on file to size capacity against.
+          </div>
+        ) : (
+          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            {capacity.owners.map((owner) => (
+              <li
+                key={owner.memberId || owner.name}
+                className="flex flex-wrap items-center justify-between gap-3 px-5 py-2.5"
+              >
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+                    {owner.name}
+                    {owner.portfolioWide && (
+                      <span className="ml-1 text-[10px] font-normal text-slate-400 dark:text-slate-500">
+                        portfolio-wide
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                    {owner.role || 'No role on file'}
+                    {owner.lines ? ` · ${owner.lines} line${owner.lines === 1 ? '' : 's'}` : ''}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-4 text-[11px] tabular-nums">
+                  <span className="text-slate-600 dark:text-slate-300">
+                    <strong className="text-slate-900 dark:text-slate-100">{owner.load}</strong> items
+                  </span>
+                  <span
+                    className={
+                      owner.overdue > 0
+                        ? 'font-semibold text-rose-600 dark:text-rose-400'
+                        : 'text-slate-400 dark:text-slate-500'
+                    }
+                  >
+                    {owner.overdue} late
+                  </span>
+                  <span className="text-slate-500 dark:text-slate-400">
+                    {owner.weeksToClear} wk to clear
+                  </span>
+                  <span
+                    className={`rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase ${mihCapacityBadgeClass(
+                      owner.status
+                    )}`}
+                  >
+                    {owner.status === 'idle' ? 'free' : owner.status}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// ============================================================================
+// VIEW: MY ACTIONS — ONE QUEUE OVER EVERY SOURCE OF OPEN WORK
+// ============================================================================
+
+/**
+ * Everything waiting on someone, from five different modules, read as one list:
+ * worst first, each row carrying how long it has waited and a button to the
+ * record itself. Read-only — the fix happens where the record lives.
+ */
+function MyActionsView({
+  queue,
+  owner = 'ALL',
+  onOwnerChange,
+  scopeLabel = '',
+  revision = 0,
+  lastSavedAt = null,
+  onOpenAction,
+  onSwitchView
+}) {
+  const items = queue && Array.isArray(queue.items) ? queue.items : [];
+  const owners = queue && Array.isArray(queue.owners) ? queue.owners : [];
+  const summary =
+    (queue && queue.summary) ||
+    { total: 0, urgent: 0, due: 0, watch: 0, overdue: 0, undated: 0, oldestDays: null, byKind: {}, byBucket: {} };
+  const [kindFilter, setKindFilter] = useState('ALL');
+
+  const kindFilters = [
+    { id: 'ALL', label: 'All', count: summary.total },
+    ...MY_ACTION_KIND_ORDER.map((id) => ({
+      id,
+      label: MY_ACTION_KINDS[id].label,
+      count: Number(summary.byKind[id]) || 0
+    }))
+  ];
+
+  const visible = kindFilter === 'ALL' ? items : items.filter((item) => item.kind === kindFilter);
+
+  const severityClass = (severity) => {
+    if (severity === 'urgent') {
+      return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300';
+    }
+    if (severity === 'due') {
+      return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300';
+    }
+    return 'border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300';
+  };
+
+  // A row that is not late yet never reads "0d waiting": its clock has no days
+  // behind it, so it says when it is due instead of pretending to have waited.
+  const agingText = (item) => {
+    if (item.overdueDays > 0) {
+      return `${item.overdueDays}d past due`;
+    }
+    if (item.dueIso) {
+      return `due ${dataTrustDayText(item.dueIso)}`;
+    }
+    if (item.ageDays !== null) {
+      return `${item.ageDays}d waiting`;
+    }
+    return 'no date on file';
+  };
+
+  const stats = [
+    {
+      label: 'Open actions',
+      value: String(summary.total),
+      note: `${summary.byKind.gate || 0} holds · ${summary.byKind.signature || 0} signatures`
+    },
+    {
+      label: 'Urgent',
+      value: String(summary.urgent),
+      note: `${summary.due} due · ${summary.watch} to watch`
+    },
+    {
+      label: 'Past due',
+      value: String(summary.overdue),
+      note: `${summary.undated} with no date to age`
+    },
+    {
+      label: 'Oldest waiting',
+      value: summary.oldestDays === null ? '—' : `${summary.oldestDays}d`,
+      note: summary.oldestDays === null ? 'nothing dated to age' : 'since its own clock started'
+    }
+  ];
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-3.5 dark:border-slate-800">
+          <div className="min-w-0">
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">My Actions</h2>
+            <p className="mt-0.5 max-w-3xl text-[11px] text-slate-500 dark:text-slate-400">
+              Every open item that needs a person, gathered from the gate dossiers, the task list,
+              customer feedback and the data-quality queue. Rows are worst first, each aging from its
+              own clock — the day a gate was needed, a task was due, a case was raised — and each opens
+              the record it came from.
+            </p>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+              <span>As of {queue && queue.today ? dataTrustDayText(queue.today) : '—'}</span>
+              <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                |
+              </span>
+              <span>
+                Signatures listed when the plan needs them within{' '}
+                {queue && queue.signatureHorizonDays !== undefined
+                  ? queue.signatureHorizonDays
+                  : MY_ACTION_SIGNATURE_HORIZON_DAYS}{' '}
+                days · cases after {queue && queue.staleCaseDays ? queue.staleCaseDays : MY_ACTION_CASE_STALE_DAYS}{' '}
+                days open
+              </span>
+              {scopeLabel && (
+                <>
+                  <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                    |
+                  </span>
+                  <span>{scopeLabel}</span>
+                </>
+              )}
+              <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                |
+              </span>
+              <span>
+                Sheet Rev #{Number(revision) || 0}
+                {lastSavedAt ? ` · saved ${dataTrustStamp(lastSavedAt)}` : ''}
+              </span>
+            </div>
+          </div>
+          <label className="flex shrink-0 items-center gap-2 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+            <span>Owner</span>
+            <select
+              aria-label="Whose actions to show"
+              value={owner}
+              onChange={(event) => onOwnerChange && onOwnerChange(event.target.value)}
+              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+            >
+              <option value="ALL">Everyone ({summary.total})</option>
+              {owners.map((entry) => (
+                <option key={entry.name} value={entry.name}>
+                  {entry.name} ({entry.count})
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
+          {stats.map((stat) => (
+            <div
+              key={stat.label}
+              className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-800 dark:bg-slate-800/40"
+            >
+              <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400">{stat.label}</div>
+              <div className="mt-1 text-xl font-bold tabular-nums text-slate-900 dark:text-slate-100">
+                {stat.value}
+              </div>
+              <div className="mt-0.5 text-[10px] text-slate-400 dark:text-slate-400">{stat.note}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-200 px-4 py-2.5 dark:border-slate-800">
+          {kindFilters.map((filter) => {
+            const active = kindFilter === filter.id;
+            return (
+              <button
+                key={filter.id}
+                type="button"
+                onClick={() => setKindFilter(filter.id)}
+                aria-pressed={active}
+                className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors ${
+                  active
+                    ? 'border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+                }`}
+              >
+                <span>{filter.label}</span>
+                <span className="tabular-nums opacity-70">{filter.count}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {visible.length === 0 ? (
+          <div className="px-5 py-10 text-center">
+            <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+              {items.length === 0
+                ? 'Nothing is waiting in this scope.'
+                : `No ${MY_ACTION_KINDS[kindFilter] ? MY_ACTION_KINDS[kindFilter].label.toLowerCase() : 'matching'} actions here.`}
+            </div>
+            <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+              No gate is on hold, every signature the plan needs is signed, no task is past its date, no
+              customer case has gone stale and the data-quality queue is empty.
+            </p>
+          </div>
+        ) : (
+          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            {visible.map((item) => (
+              <li key={item.id} className="flex flex-wrap items-start justify-between gap-3 px-5 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={`rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${severityClass(
+                        item.severity
+                      )}`}
+                    >
+                      {item.severityLabel}
+                    </span>
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                      {item.kindLabel}
+                    </span>
+                    {item.owner && (
+                      <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">
+                        {item.owner}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-100">
+                    {item.title}
+                  </div>
+                  {item.detail && (
+                    <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                      {item.detail}
+                    </p>
+                  )}
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  <div className="text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+                    <span
+                      className={
+                        item.overdueDays > 0
+                          ? 'font-bold text-rose-600 dark:text-rose-400'
+                          : 'font-semibold text-slate-600 dark:text-slate-300'
+                      }
+                    >
+                      {agingText(item)}
+                    </span>
+                    {item.overdueDays > 0 && (
+                      <span className="ml-1 text-slate-400 dark:text-slate-500">· {item.ageBucketLabel}</span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => (onOpenAction ? onOpenAction(item) : onSwitchView && onSwitchView(item.view))}
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-blue-600 hover:bg-slate-50 dark:border-slate-700 dark:text-blue-400 dark:hover:bg-slate-800"
+                  >
+                    <span>{item.actionLabel}</span>
+                    <ArrowRight className="h-3 w-3" />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// ============================================================================
+// VIEW 15: DATA QUALITY QUEUE & PROVENANCE
+// ============================================================================
+
+/**
+ * The queue behind the KPI tiles' trust badges: every record that is missing,
+ * contradicts a stored rule, or has gone stale — worst first, each row naming the
+ * module that can repair it. Read-only; the repair happens in that module.
+ */
+function DataQualityView({
+  queue,
+  scopeLabel = '',
+  revision = 0,
+  lastSavedAt = null,
+  onSwitchView
+}) {
+  const issues = queue && Array.isArray(queue.issues) ? queue.issues : [];
+  const summary =
+    (queue && queue.summary) || { total: 0, blocker: 0, inconsistent: 0, missing: 0, stale: 0 };
+  const [severityFilter, setSeverityFilter] = useState('ALL');
+
+  const filters = [
+    { id: 'ALL', label: 'All', count: summary.total },
+    ...DATA_QUALITY_SEVERITY_ORDER.map((id) => ({
+      id,
+      label: DATA_QUALITY_SEVERITY_LABELS[id],
+      count: Number(summary[id]) || 0
+    }))
+  ];
+
+  const visible =
+    severityFilter === 'ALL' ? issues : issues.filter((issue) => issue.severity === severityFilter);
+
+  const severityClass = (severity) => {
+    if (severity === 'blocker') {
+      return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300';
+    }
+    if (severity === 'inconsistent') {
+      return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300';
+    }
+    if (severity === 'missing') {
+      return 'border-orange-200 bg-orange-50 text-orange-700 dark:border-orange-800 dark:bg-orange-950 dark:text-orange-300';
+    }
+    return 'border-yellow-200 bg-yellow-50 text-yellow-800 dark:border-yellow-800 dark:bg-yellow-950 dark:text-yellow-300';
+  };
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-3.5 dark:border-slate-800">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">Data Quality Queue</h2>
+            <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+              Records that are missing, contradict a stored rule or have gone stale. Every KPI tile carries
+              the same verdict for its own source.
+            </p>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+              {scopeLabel && <span>{scopeLabel}</span>}
+              {scopeLabel && (
+                <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                  |
+                </span>
+              )}
+              <span>
+                Sheet Rev #{Number(revision) || 0}
+                {lastSavedAt ? ` · saved ${dataTrustStamp(lastSavedAt)}` : ''}
+              </span>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {filters.map((filter) => {
+              const active = severityFilter === filter.id;
+              return (
+                <button
+                  key={filter.id}
+                  type="button"
+                  onClick={() => setSeverityFilter(filter.id)}
+                  aria-pressed={active}
+                  className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-semibold transition-colors ${
+                    active
+                      ? 'border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <span>{filter.label}</span>
+                  <span className="tabular-nums opacity-70">{filter.count}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {visible.length === 0 ? (
+          <div className="px-5 py-10 text-center">
+            <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+              {issues.length === 0
+                ? 'No data-quality issues in this scope.'
+                : `No ${DATA_QUALITY_SEVERITY_LABELS[severityFilter] || ''} issues in this scope.`}
+            </div>
+            <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+              Every record on file describes a run, points at a program and spec that exist, and has been
+              refreshed inside {DATA_TRUST_AGING_DAYS} days.
+            </p>
+          </div>
+        ) : (
+          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            {visible.map((issue) => (
+              <li key={issue.id} className="flex flex-wrap items-start justify-between gap-3 px-5 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={`rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${severityClass(
+                        issue.severity
+                      )}`}
+                    >
+                      {issue.severityLabel}
+                    </span>
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                      {issue.areaLabel}
+                    </span>
+                    {issue.count > 1 && (
+                      <span className="text-[10px] tabular-nums text-slate-400 dark:text-slate-500">
+                        {issue.count} records
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 text-xs font-semibold text-slate-800 dark:text-slate-100">
+                    {issue.title}
+                  </div>
+                  {issue.detail && (
+                    <p className="mt-0.5 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                      {issue.detail}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onSwitchView(issue.view)}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-blue-600 hover:bg-slate-50 dark:border-slate-700 dark:text-blue-400 dark:hover:bg-slate-800"
+                >
+                  <span>Open {issue.areaLabel}</span>
+                  <ArrowRight className="h-3 w-3" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }

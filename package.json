@@ -3,9 +3,11 @@
     "build": "bun tools/build.mjs",
     "preview": "bun tools/preview-server.mjs 5183",
     "state:import": "bun tools/import-state.mjs",
-    "test": "bun tools/test-fy-helpers.mjs && bun tools/test-cpk-freeze.mjs && bun tools/test-sheetjs-bundle.mjs && bun tools/test-review-fixes.mjs && bun tools/test-project-crud.mjs && bun tools/test-state-history.mjs && bun tools/test-signoff-ledger.mjs && bun tools/test-server-permissions.mjs && bun tools/test-state-backup.mjs && bun tools/test-code-js.mjs && bun tools/test-production-validation.mjs && bun tools/test-kpi-drill.mjs && bun tools/test-generated-bundle.mjs",
+    "test": "bun tools/test-fy-helpers.mjs && bun tools/test-cpk-freeze.mjs && bun tools/test-sheetjs-bundle.mjs && bun tools/test-review-fixes.mjs && bun tools/test-project-crud.mjs && bun tools/test-state-history.mjs && bun tools/test-signoff-ledger.mjs && bun tools/test-server-permissions.mjs && bun tools/test-state-backup.mjs && bun tools/test-code-js.mjs && bun tools/test-production-validation.mjs && bun tools/test-data-trust.mjs && bun tools/test-mih-forecast.mjs && bun tools/test-my-actions.mjs && bun tools/test-kpi-parity.mjs && bun tools/test-release-rules.mjs && bun tools/test-generated-bundle.mjs",
     "deploy": "bun tools/deploy.mjs",
-    "deploy:login": "bun tools/deploy.mjs --login"
+    "deploy:login": "bun tools/deploy.mjs --login",
+    "deploy:verify": "bun tools/deploy.mjs --verify",
+    "deploy:rollback": "bun tools/deploy.mjs --rollback"
   },
   "devDependencies": {
     "esbuild": "0.24.2",

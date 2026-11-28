@@ -4,7 +4,59 @@
 // ============================================================================
 
 const PHASE_ORDER = ['P1', 'P2', 'EVT', 'DVT', 'PVT', 'MP'];
+const NPI_PHASES = ['P1', 'P2', 'EVT', 'DVT', 'PVT'];
+const NPI_PHASE_FILTER = 'NPI';
 const SIDE_ORDER = ['RHS', 'LHS', 'Single'];
+
+function phaseInScope(phase, filter) {
+  if (filter === 'ALL') return true;
+  if (filter === NPI_PHASE_FILTER) return NPI_PHASES.includes(phase);
+  return phase === filter;
+}
+
+function phaseFilterHasMatch(validPhases, filter) {
+  if (filter === 'ALL') return true;
+  if (filter === NPI_PHASE_FILTER) return NPI_PHASES.some((phase) => validPhases.has(phase));
+  return validPhases.has(filter);
+}
+
+// Only these models are active NPI programs. Every other model is steady-state
+// MP, whatever phase an older row happened to carry.
+const ACTIVE_NPI_MODELS = ['X4151', 'X4152', 'X4026'];
+
+function isActiveNpiModel(model) {
+  return ACTIVE_NPI_MODELS.includes(String(model || '').trim().toUpperCase());
+}
+
+function modelPortfolio(model) {
+  return isActiveNpiModel(model) ? 'NPI' : 'MP';
+}
+
+function canonicalProgramPhase(model, phase) {
+  if (!isActiveNpiModel(model)) return 'MP';
+  const text = String(phase || '').trim().toUpperCase();
+  return text || 'EVT';
+}
+
+function withCanonicalProgramPhase(project) {
+  if (!project || typeof project !== 'object') return project;
+  const phase = canonicalProgramPhase(project.model, project.phase);
+  return phase === project.phase ? project : { ...project, phase };
+}
+
+// Production, Cpk, cost and feedback rows carry a model and phase too, so the
+// same NPI/MP classification applies when they are loaded or saved. Feedback
+// rows also carry a build/buildConfig pair; a non-active model is MP there too.
+function withCanonicalModelPhase(row) {
+  if (!row || typeof row !== 'object') return row;
+  const phase = canonicalProgramPhase(row.model, row.phase);
+  let next = phase === row.phase ? row : { ...row, phase };
+  if (!isActiveNpiModel(row.model)) {
+    if (next.build && next.build !== 'MP') next = { ...next, build: 'MP' };
+    if (next.buildConfig && next.buildConfig !== 'MP') next = { ...next, buildConfig: 'MP' };
+  }
+  return next;
+}
 
 // Position of a value in a known order; anything unknown sorts after the list.
 const orderedRank = (order, value) => {
@@ -2176,6 +2228,37 @@ function computeProductionMetrics(rec) {
   };
 }
 
+// Daily production-rate trend: group the filtered records by production date so
+// the chart follows the same records the ledger is showing.
+//
+// The two percentages deliberately do not share a denominator:
+//   falloutPct = fallout ÷ input   — how much of the day's input was rejected.
+//   salvagePct = salvage ÷ fallout — the share of those rejects recovered.
+// Salvage is recovery, not a share of input: computeProductionMetrics already
+// clamps it to its fallout, the report quotes it as "% recovered by salvage", and
+// the CSV clamps it the same way. A share of input would be a different quantity
+// (and a number nobody could act on), so the chart labels the denominators.
+function productionRateTrend(records) {
+  const byDate = new Map();
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    const date = String(record.date || '').slice(0, 10);
+    if (!date) return;
+    const metrics = computeProductionMetrics(record);
+    const row = byDate.get(date) || { date, input: 0, fallout: 0, salvage: 0 };
+    row.input += metrics.input;
+    row.fallout += metrics.fallout;
+    row.salvage += metrics.salvage;
+    byDate.set(date, row);
+  });
+  return Array.from(byDate.values())
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((row) => ({
+      ...row,
+      falloutPct: row.input > 0 ? (row.fallout / row.input) * 100 : 0,
+      salvagePct: row.fallout > 0 ? Math.min(100, (row.salvage / row.fallout) * 100) : 0
+    }));
+}
+
 // ============================================================================
 // PRODUCTION RECORD VALIDATION
 //
@@ -2486,6 +2569,493 @@ function productionDropSummary(report, limit) {
     lines.join(' · ') +
     (rest > 0 ? ` · +${rest} more` : '')
   );
+}
+
+// ============================================================================
+// DATA TRUST, FRESHNESS & DATA-QUALITY QUEUE
+// ============================================================================
+// A KPI is only as good as the day it was last fed. These helpers answer, for one
+// number: which rows stand behind it, how old the newest of them is, and whether
+// anything on file is missing or contradicts a rule.
+
+/** A source is fresh inside a week, aging inside a month, stale after that. */
+const DATA_TRUST_FRESH_DAYS = 7;
+const DATA_TRUST_AGING_DAYS = 30;
+
+/** The areas the queue reports on, each with the module that can fix it. */
+const DATA_QUALITY_AREAS = {
+  production: { label: 'Production records', view: 'production' },
+  cpk: { label: 'Cpk & Master Specs', view: 'cpk' },
+  programs: { label: 'Programs', view: 'projects' },
+  gates: { label: 'Gate sign-off', view: 'gates' },
+  tasks: { label: 'Tasks', view: 'tasks' },
+  feedback: { label: 'Customer feedback', view: 'feedback' },
+  products: { label: 'Product Master', view: 'setup' }
+};
+
+/** Worst first: a blocker refuses a number, the rest only qualify it. */
+const DATA_QUALITY_SEVERITY_ORDER = ['blocker', 'inconsistent', 'missing', 'stale'];
+const DATA_QUALITY_SEVERITY_LABELS = {
+  blocker: 'Blocker',
+  inconsistent: 'Inconsistent',
+  missing: 'Missing',
+  stale: 'Stale'
+};
+
+/** YYYY-MM-DD from any stored day, or '' when the value holds no usable date. */
+function dataTrustDay(value) {
+  const text = String(value == null ? '' : value).trim();
+  const match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (!match) return '';
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!(month >= 1 && month <= 12) || !(day >= 1 && day <= 31)) return '';
+  return `${match[1]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/** `MM/DD` for a stored day, or '' when there is none. */
+function dataTrustDayText(value) {
+  const day = dataTrustDay(value);
+  return day ? `${day.slice(5, 7)}/${day.slice(8, 10)}` : '';
+}
+
+/** `MM/DD HH:mm` for a save timestamp, so a tile can say when the store moved. */
+function dataTrustStamp(value) {
+  const day = dataTrustDay(value);
+  if (!day) return '';
+  const time = String(value == null ? '' : value).match(/[T ](\d{2}:\d{2})/);
+  return time ? `${dataTrustDayText(day)} ${time[1]}` : dataTrustDayText(day);
+}
+
+/** Whole days from `fromIso` to `toIso`; null when either day is unusable. */
+function dataTrustDaysBetween(fromIso, toIso) {
+  const from = dataTrustDay(fromIso);
+  const to = dataTrustDay(toIso);
+  if (!from || !to) return null;
+  const at = (day) =>
+    Date.UTC(Number(day.slice(0, 4)), Number(day.slice(5, 7)) - 1, Number(day.slice(8, 10)));
+  return Math.round((at(to) - at(from)) / 86400000);
+}
+
+/** The latest usable day in a list of stored dates. */
+function dataTrustLatestDay(values) {
+  return (
+    (Array.isArray(values) ? values : [])
+      .map(dataTrustDay)
+      .filter(Boolean)
+      .sort()
+      .pop() || ''
+  );
+}
+
+/**
+ * What one KPI source can be trusted for right now: the day of its newest usable
+ * record, how old that is, how many rows stand behind the number, and a status the
+ * tiles colour. A source with no rows is `empty` (it says nothing, good or bad);
+ * rows with no date are `undated`, which is a caveat rather than a pass.
+ */
+function dataTrustFreshness(options) {
+  const opts = options || {};
+  const asOf = dataTrustDay(opts.asOf);
+  const rows = Math.max(0, Number(opts.rows) || 0);
+  const today = dataTrustDay(opts.today);
+  const freshDays = Number.isFinite(Number(opts.freshDays))
+    ? Number(opts.freshDays)
+    : DATA_TRUST_FRESH_DAYS;
+  const agingDays = Number.isFinite(Number(opts.agingDays))
+    ? Number(opts.agingDays)
+    : DATA_TRUST_AGING_DAYS;
+  const daysOld = asOf ? dataTrustDaysBetween(asOf, today) : null;
+
+  let status = 'fresh';
+  if (rows === 0) status = 'empty';
+  else if (!asOf || daysOld === null) status = 'undated';
+  else if (daysOld > agingDays) status = 'stale';
+  else if (daysOld > freshDays) status = 'aging';
+  // A record dated after today is not a measured run: it cannot be "fresh".
+  else if (daysOld < 0) status = 'future';
+
+  return {
+    asOf,
+    asOfText: asOf ? `as of ${dataTrustDayText(asOf)}` : 'no source date',
+    daysOld,
+    rows,
+    status,
+    // A source with no record date of its own (a fiscal-year tag) says so.
+    note: String(opts.note || ''),
+    coverageText: rows === 0 ? 'no rows in scope' : `${rows} row${rows === 1 ? '' : 's'}`
+  };
+}
+
+/** good | warn | bad | neutral — one tone map for the tiles and the queue. */
+function dataTrustTone(status) {
+  if (status === 'fresh') return 'good';
+  if (status === 'aging') return 'warn';
+  if (status === 'stale' || status === 'future') return 'bad';
+  return 'neutral';
+}
+
+/** Short badge text: `as of 11/20`, `stale · 45d`, `no data`, `no date`. */
+function dataTrustBadgeText(freshness) {
+  const trust = freshness || {};
+  if (trust.status === 'empty') return 'no data';
+  if (trust.status === 'undated') return trust.note || 'no date';
+  if (trust.status === 'future') return `future · ${Math.abs(trust.daysOld)}d ahead`;
+  if (trust.status === 'stale') return `stale · ${trust.daysOld}d`;
+  if (trust.status === 'aging') return `aging · ${trust.daysOld}d`;
+  return `as of ${dataTrustDayText(trust.asOf)}`;
+}
+
+/** The badge's classes, kept together so every tile and queue row agrees. */
+function dataTrustBadgeClass(status) {
+  if (status === 'fresh') {
+    return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300';
+  }
+  if (status === 'aging') {
+    return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300';
+  }
+  if (status === 'stale' || status === 'future') {
+    return 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-300';
+  }
+  return 'border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300';
+}
+
+/**
+ * The scorecard's dated sources, judged by the same freshness rule. Production
+ * feeds FPY, FY and efficiency from one set of runs, so one result backs all three.
+ * The caller passes the rows already narrowed to the fiscal year it scores.
+ */
+function kpiDataTrust(options) {
+  const opts = options || {};
+  const today = dataTrustDay(opts.today);
+  const records = Array.isArray(opts.records) ? opts.records : [];
+  const feedbackRows = Array.isArray(opts.feedbackRows) ? opts.feedbackRows : [];
+  const savingRows = Array.isArray(opts.savingRows) ? opts.savingRows : [];
+
+  const production = Object.assign(
+    dataTrustFreshness({
+      asOf: dataTrustLatestDay(records.map((row) => row && row.date)),
+      rows: records.length,
+      today
+    }),
+    { source: 'Production records' }
+  );
+
+  const claims = Object.assign(
+    dataTrustFreshness({
+      asOf: dataTrustLatestDay(feedbackRows.map((row) => row && row.feedbackDate)),
+      rows: feedbackRows.length,
+      today
+    }),
+    { source: 'Customer feedback' }
+  );
+
+  const saving = Object.assign(
+    dataTrustFreshness({
+      asOf: dataTrustLatestDay(
+        savingRows.map((row) => (row && (row.updatedAt || row.createdAt || row.date)) || '')
+      ),
+      rows: savingRows.length,
+      today,
+      // Cost initiatives are scored by fiscal-year tag, not a record date.
+      note: 'FY tag'
+    }),
+    { source: 'Cost-saving initiatives' }
+  );
+
+  return { fpy: production, fy: production, eff: production, claims, saving };
+}
+
+/** One queue entry, normalised so the view never has to guess at its shape. */
+function dataQualityIssue(input) {
+  const issue = input || {};
+  const area = DATA_QUALITY_AREAS[issue.area] ? issue.area : 'production';
+  const severity = DATA_QUALITY_SEVERITY_ORDER.indexOf(issue.severity) === -1 ? 'missing' : issue.severity;
+  return {
+    id: `${area}:${severity}:${String(issue.refId || issue.title || '').trim()}`,
+    area,
+    areaLabel: DATA_QUALITY_AREAS[area].label,
+    view: DATA_QUALITY_AREAS[area].view,
+    severity,
+    severityLabel: DATA_QUALITY_SEVERITY_LABELS[severity],
+    title: String(issue.title || '').trim() || 'Untitled issue',
+    detail: String(issue.detail || '').trim(),
+    count: Math.max(1, Number(issue.count) || 1),
+    refId: String(issue.refId || '')
+  };
+}
+
+/**
+ * The data-quality queue: everything on file that is missing, contradicts a rule
+ * or has gone stale, each entry naming the module that can fix it. Pure — it reads
+ * the slices and returns a new list; repairing is the module's job.
+ */
+function dataQualityQueue(workspace, options) {
+  const work = workspace || {};
+  const opts = options || {};
+  const today = dataTrustDay(opts.today) || dataTrustDay(new Date().toISOString());
+  const staleAfterDays =
+    Number(opts.staleAfterDays) > 0 ? Number(opts.staleAfterDays) : DATA_TRUST_AGING_DAYS;
+
+  const projects = Array.isArray(work.projects) ? work.projects : [];
+  const productionRecords = Array.isArray(work.productionRecords) ? work.productionRecords : [];
+  const cpkRecords = Array.isArray(work.cpkRecords) ? work.cpkRecords : [];
+  const masterSpecs = Array.isArray(work.masterSpecs) ? work.masterSpecs : [];
+  const tasks = Array.isArray(work.tasks) ? work.tasks : [];
+  const customerFeedback = Array.isArray(work.customerFeedback) ? work.customerFeedback : [];
+  const products = Array.isArray(work.products) ? work.products : [];
+  const gateRecords =
+    work.gateRecords && typeof work.gateRecords === 'object' ? work.gateRecords : {};
+
+  const issues = [];
+  const modelKey = (value) => String(value == null ? '' : value).trim().toUpperCase();
+
+  // 1. A production row that cannot describe a real run is refused by the form,
+  //    the loader and the import; the same rule names it here.
+  productionRecords.forEach((record, index) => {
+    const problems = productionRecordBlockingIssues(record, productionRecords, record && record.id);
+    if (!problems.length) return;
+    issues.push(
+      dataQualityIssue({
+        area: 'production',
+        severity: 'blocker',
+        refId: (record && record.id) || `row-${index + 1}`,
+        title: `${modelKey(record && record.model) || 'No model'} · ${
+          dataTrustDayText(record && record.date) || 'no date'
+        } · ${String((record && record.station) || '').trim() || 'no station'}`,
+        detail: problems
+          .map((problem) => problem.message)
+          .filter(Boolean)
+          .join(' '),
+        count: problems.length
+      })
+    );
+  });
+
+  // 2. A model the registry does not know has no family, so the Model filter
+  //    cannot group it with its siblings.
+  if (products.length > 0) {
+    const registered = new Set(products.map((product) => modelKey(product && product.model)).filter(Boolean));
+    const unregistered = new Map();
+    const scan = (rows) =>
+      rows.forEach((row) => {
+        const key = modelKey(row && row.model);
+        if (!key || registered.has(key)) return;
+        unregistered.set(key, (unregistered.get(key) || 0) + 1);
+      });
+    scan(projects);
+    scan(productionRecords);
+    scan(cpkRecords);
+    scan(customerFeedback);
+    unregistered.forEach((count, model) =>
+      issues.push(
+        dataQualityIssue({
+          area: 'products',
+          severity: 'inconsistent',
+          refId: model,
+          title: `${model} is not in Product Master`,
+          detail: `${count} record${count === 1 ? '' : 's'} carry this model with no family, so the Model filter cannot group it.`,
+          count
+        })
+      )
+    );
+  }
+
+  // 3. A Cpk reading whose spec is gone cannot be judged against any limit.
+  const specIds = new Set(masterSpecs.map((spec) => String((spec && spec.id) || '').trim()).filter(Boolean));
+  const orphanSpecs = new Map();
+  cpkRecords.forEach((row) => {
+    const id = String((row && row.specId) || '').trim();
+    if (id && specIds.has(id)) return;
+    const key = id || 'no spec';
+    orphanSpecs.set(key, (orphanSpecs.get(key) || 0) + 1);
+  });
+  orphanSpecs.forEach((count, specId) =>
+    issues.push(
+      dataQualityIssue({
+        area: 'cpk',
+        severity: 'inconsistent',
+        refId: specId,
+        title: `Cpk reading points at a missing spec (${specId})`,
+        detail: `${count} reading${count === 1 ? '' : 's'} cannot be judged against a limit because the spec is not on file.`,
+        count
+      })
+    )
+  );
+
+  // 4. A program with no build matrix, or with a zero plan, reports 0 % build
+  //    progress and no gate coverage without saying why.
+  projects.forEach((project) => {
+    const id = String((project && project.id) || '').trim() || 'unidentified program';
+    const matrix = Array.isArray(project && project.buildMatrix) ? project.buildMatrix : [];
+    const planned = matrix.reduce((sum, row) => sum + Math.max(0, Number(row && row.total) || 0), 0);
+    if (matrix.length === 0) {
+      issues.push(
+        dataQualityIssue({
+          area: 'programs',
+          severity: 'missing',
+          refId: id,
+          title: `${id} has no build matrix`,
+          detail: 'No configuration × side line is on file, so its planned quantity and gate coverage read zero.'
+        })
+      );
+    } else if (planned <= 0) {
+      issues.push(
+        dataQualityIssue({
+          area: 'programs',
+          severity: 'inconsistent',
+          refId: id,
+          title: `${id} plans zero units`,
+          detail: `${matrix.length} line${matrix.length === 1 ? '' : 's'} are on file with a quantity of zero, so build progress can never move.`,
+          count: matrix.length
+        })
+      );
+    }
+    const owner = String(
+      (project && (project.owner || project.leader || project.pm)) || ''
+    ).trim();
+    if (!owner) {
+      issues.push(
+        dataQualityIssue({
+          area: 'programs',
+          severity: 'missing',
+          refId: `${id}:owner`,
+          title: `${id} has no owner`,
+          detail: 'Nobody is named against the program, so its tasks cannot be claimed or chased.'
+        })
+      );
+    }
+  });
+
+  const projectIds = new Set(projects.map((project) => String((project && project.id) || '').trim()).filter(Boolean));
+
+  // 5. Work and dossiers that outlive their program are invisible in every
+  //    scoped module but keep counting in the store.
+  const orphanTasks = new Map();
+  tasks.forEach((task) => {
+    const id = String((task && task.projectId) || '').trim();
+    if (projectIds.has(id)) return;
+    const key = id || 'no program';
+    orphanTasks.set(key, (orphanTasks.get(key) || 0) + 1);
+  });
+  orphanTasks.forEach((count, projectId) =>
+    issues.push(
+      dataQualityIssue({
+        area: 'tasks',
+        severity: 'inconsistent',
+        refId: projectId,
+        title: `Task points at a missing program (${projectId})`,
+        detail: `${count} task${count === 1 ? '' : 's'} can never appear in a program's list because that program is gone.`,
+        count
+      })
+    )
+  );
+
+  const orphanDossiers = Object.keys(gateRecords).filter((id) => id && !projectIds.has(id));
+  if (orphanDossiers.length > 0) {
+    issues.push(
+      dataQualityIssue({
+        area: 'gates',
+        severity: 'inconsistent',
+        refId: orphanDossiers.slice(0, 3).join(', '),
+        title: 'Gate dossiers outlive their programs',
+        detail: `Stored for ${orphanDossiers.slice(0, 3).join(', ')}${orphanDossiers.length > 3 ? ` and ${orphanDossiers.length - 3} more` : ''} — no program carries these signatures any more.`,
+        count: orphanDossiers.length
+      })
+    );
+  }
+
+  // 6. A claim with no FACA number cannot be closed out against its report.
+  const claimsWithoutFaca = customerFeedback.filter(
+    (row) => row && row.category === 'Claim' && !String(row.facaNo || '').trim()
+  );
+  if (claimsWithoutFaca.length > 0) {
+    issues.push(
+      dataQualityIssue({
+        area: 'feedback',
+        severity: 'missing',
+        refId: 'claim-faca',
+        title: 'Claim without a FACA number',
+        detail: `${claimsWithoutFaca.length} claim${claimsWithoutFaca.length === 1 ? '' : 's'} carry no FACA number, so the 8D report cannot be traced from the claim.`,
+        count: claimsWithoutFaca.length
+      })
+    );
+  }
+
+  // 7. A source nobody has fed for a month still answers every KPI with its last
+  //    value — the warning belongs where the numbers are, not only in this queue.
+  const staleSource = (area, rows, asOf, label) => {
+    const freshness = dataTrustFreshness({ asOf, rows, today, agingDays: staleAfterDays });
+    if (freshness.status !== 'stale') return;
+    issues.push(
+      dataQualityIssue({
+        area,
+        severity: 'stale',
+        refId: `stale:${area}`,
+        title: `${label} ${freshness.daysOld === 1 ? 'is' : 'are'} ${freshness.daysOld} days old`,
+        detail: `The newest entry is ${dataTrustDayText(freshness.asOf)} (${freshness.rows} row${freshness.rows === 1 ? '' : 's'} on file), so anything the KPIs read from this source may not describe the current month.`,
+        count: freshness.rows
+      })
+    );
+  };
+  staleSource(
+    'production',
+    productionRecords.length,
+    dataTrustLatestDay(productionRecords.map((row) => row && row.date)),
+    'Production records'
+  );
+  staleSource(
+    'cpk',
+    cpkRecords.length,
+    dataTrustLatestDay(cpkRecords.map((row) => row && row.date)),
+    'Cpk readings'
+  );
+  staleSource(
+    'feedback',
+    customerFeedback.length,
+    dataTrustLatestDay(customerFeedback.map((row) => row && row.feedbackDate)),
+    'Customer feedback rows'
+  );
+
+  // 8. A record dated after today cannot be a measured run: it is either a plan
+  //    date in the measurement column or a typo nobody caught.
+  const futureRows = (rows, field, label, area) => {
+    const dated = rows
+      .map((row) => dataTrustDay(row && row[field]))
+      .filter(Boolean)
+      .filter((day) => day > today);
+    if (dated.length === 0) return;
+    const furthest = dated.slice().sort().pop();
+    issues.push(
+      dataQualityIssue({
+        area,
+        severity: 'inconsistent',
+        refId: `future:${area}`,
+        title: `${label} include ${dated.length} date${dated.length === 1 ? '' : 's'} after today`,
+        detail: `The furthest is ${dataTrustDayText(furthest)} (today is ${dataTrustDayText(today)}), so the source's newest day is ahead of the calendar rather than current.`,
+        count: dated.length
+      })
+    );
+  };
+  futureRows(productionRecords, 'date', 'Production records', 'production');
+  futureRows(cpkRecords, 'date', 'Cpk readings', 'cpk');
+  futureRows(customerFeedback, 'feedbackDate', 'Customer feedback rows', 'feedback');
+
+  const summary = { total: issues.length, blocker: 0, inconsistent: 0, missing: 0, stale: 0 };
+  const byArea = {};
+  issues.forEach((issue) => {
+    summary[issue.severity] += 1;
+    byArea[issue.area] = (byArea[issue.area] || 0) + 1;
+  });
+
+  issues.sort(
+    (a, b) =>
+      DATA_QUALITY_SEVERITY_ORDER.indexOf(a.severity) - DATA_QUALITY_SEVERITY_ORDER.indexOf(b.severity) ||
+      a.areaLabel.localeCompare(b.areaLabel) ||
+      a.title.localeCompare(b.title)
+  );
+
+  return { issues, summary, byArea };
 }
 
 /**
@@ -4129,14 +4699,194 @@ function describeSpecLimits(spec) {
   };
 }
 
+let MODEL_FAMILY_GROUPS = {
+  'MB14"': ['X3466', 'X3082', 'X4151', 'X4026'],
+  'MB16"': ['X3439', 'X3083', 'X4152'],
+  iMac: ['X2867', 'X3721'],
+  MacMini: ['X2977', 'X3784', 'X4171'],
+  Display: ['X2689']
+};
+const MODEL_FAMILY_ORDER = Object.keys(MODEL_FAMILY_GROUPS);
+
 function inferFamilyFromModel(model) {
   const m = String(model || '').toUpperCase();
-  if (['X3083', 'X4152', 'X3439', 'X4285'].includes(m)) return 'MB16"';
-  if (m === 'X3721') return 'iMac';
-  if (m === 'X3784') return 'MacMini';
-  if (m === 'X2689') return 'Display';
-  return 'MB14"';
+  const family = MODEL_FAMILY_ORDER.find((name) => MODEL_FAMILY_GROUPS[name].includes(m));
+  return family || 'MB14"';
 }
+
+function normalizeProductRegistry(rows) {
+  const seen = new Set();
+  return (Array.isArray(rows) ? rows : []).reduce((next, row) => {
+    const model = String(row?.model || '').toUpperCase().trim();
+    if (!/^X\d{4}$/.test(model) || seen.has(model)) return next;
+    seen.add(model);
+    const familyGroup = MODEL_FAMILY_ORDER.includes(row.familyGroup)
+      ? row.familyGroup
+      : inferFamilyFromModel(model);
+    next.push({
+      id: String(row.id || `PRD-${model}`),
+      model,
+      familyGroup
+    });
+    return next;
+  }, []);
+}
+
+function syncModelFamilyGroups(products) {
+  const next = {};
+  MODEL_FAMILY_ORDER.forEach((family) => {
+    next[family] = [];
+  });
+  (Array.isArray(products) ? products : []).forEach((product) => {
+    const model = String(product?.model || '').toUpperCase().trim();
+    if (!/^X\d{4}$/.test(model)) return;
+    const family = MODEL_FAMILY_ORDER.includes(product.familyGroup)
+      ? product.familyGroup
+      : 'MB14"';
+    if (!next[family].includes(model)) next[family].push(model);
+  });
+  MODEL_FAMILY_GROUPS = next;
+}
+
+/**
+ * The Product Master registry supplies the Model filter's universe. A product
+ * is available in the portfolio its model code belongs to, and in the family
+ * it was registered under, even when no program or production row uses it yet.
+ */
+function productModelsForScope(products, portfolio, family = 'ALL') {
+  const seen = new Set();
+  const models = [];
+  (Array.isArray(products) ? products : []).forEach((product) => {
+    const model = String(product?.model || '').toUpperCase().trim();
+    if (!/^X\d{4}$/.test(model) || seen.has(model)) return;
+    if (modelPortfolio(model) !== portfolio) return;
+    const productFamily = MODEL_FAMILY_ORDER.includes(product.familyGroup)
+      ? product.familyGroup
+      : inferFamilyFromModel(model);
+    if (family !== 'ALL' && productFamily !== family) return;
+    seen.add(model);
+    models.push(model);
+  });
+  return models;
+}
+
+/** Counts every reference that makes a product unsafe to rename or delete. */
+function countProductUsage(sources = {}) {
+  const counts = {};
+  const add = (model) => {
+    const key = String(model || '').toUpperCase().trim();
+    if (!key) return;
+    counts[key] = (counts[key] || 0) + 1;
+  };
+  ['projects', 'productionRecords', 'cpkRecords', 'costProjects', 'customerFeedback', 'masterSpecs'].forEach(
+    (key) => (Array.isArray(sources[key]) ? sources[key] : []).forEach((row) => add(row?.model))
+  );
+  (Array.isArray(sources.teamMembers) ? sources.teamMembers : []).forEach((member) =>
+    (Array.isArray(member?.products) ? member.products : []).forEach(add)
+  );
+  return counts;
+}
+
+/** Applies a product family change to every row that names the model. */
+function productFamilyUpdate(rows, model, familyGroup) {
+  const target = String(model || '').toUpperCase().trim();
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    return String(row.model || '').toUpperCase().trim() === target
+      ? { ...row, familyGroup }
+      : row;
+  });
+}
+
+function applyProductFamilyToWorkspace(workspace, model, familyGroup) {
+  const source = workspace && typeof workspace === 'object' ? workspace : {};
+  return {
+    ...source,
+    projects: productFamilyUpdate(source.projects, model, familyGroup),
+    productionRecords: productFamilyUpdate(source.productionRecords, model, familyGroup),
+    cpkRecords: productFamilyUpdate(source.cpkRecords, model, familyGroup),
+    costProjects: productFamilyUpdate(source.costProjects, model, familyGroup),
+    customerFeedback: productFamilyUpdate(source.customerFeedback, model, familyGroup)
+  };
+}
+
+/** Validates and applies one Product Master add/edit without touching React state. */
+function saveProductToRegistry(products, form, existingId = null, usageByModel = {}) {
+  const list = Array.isArray(products) ? products : [];
+  const input = form && typeof form === 'object' ? form : {};
+  const model = String(input.model || '').toUpperCase().trim();
+  const familyGroup = MODEL_FAMILY_ORDER.includes(input.familyGroup)
+    ? input.familyGroup
+    : MODEL_FAMILY_ORDER[0];
+  if (!/^X\d{4}$/.test(model)) {
+    return { ok: false, error: 'Model must be an X#### code, for example X4151.' };
+  }
+
+  const duplicate = list.find(
+    (product) =>
+      String(product?.model || '').toUpperCase().trim() === model && product.id !== existingId
+  );
+  if (duplicate) {
+    return { ok: false, error: `${model} is already assigned to ${duplicate.familyGroup}.` };
+  }
+
+  const existing = existingId ? list.find((product) => product.id === existingId) : null;
+  if (existing && existing.model !== model) {
+    if (isActiveNpiModel(existing.model)) {
+      return { ok: false, error: `${existing.model} is a fixed active NPI model and cannot be renamed.` };
+    }
+    if ((usageByModel[existing.model] || 0) > 0) {
+      return {
+        ok: false,
+        error: `${existing.model} is used by ${usageByModel[existing.model]} record(s); update those records before renaming it.`
+      };
+    }
+  }
+
+  const product = existing
+    ? { ...existing, model, familyGroup }
+    : { id: nextId('PRD-', list), model, familyGroup };
+  const next = existing
+    ? list.map((row) => (row.id === existing.id ? product : row))
+    : [...list, product];
+  return {
+    ok: true,
+    products: next,
+    product,
+    existing,
+    familyChanged: Boolean(existing && existing.familyGroup !== familyGroup)
+  };
+}
+
+/** Rejects protected or referenced products before removing one from the registry. */
+function deleteProductFromRegistry(products, product, usageByModel = {}) {
+  if (!product) return { ok: false, error: 'Product not found.' };
+  if (isActiveNpiModel(product.model)) {
+    return { ok: false, error: `${product.model} is a fixed active NPI model and cannot be deleted.` };
+  }
+  const usage = usageByModel[product.model] || 0;
+  if (usage > 0) {
+    return {
+      ok: false,
+      error: `${product.model} is used by ${usage} record(s); reassign or remove them before deleting the product.`
+    };
+  }
+  return {
+    ok: true,
+    products: (Array.isArray(products) ? products : []).filter((row) => row.id !== product.id),
+    product
+  };
+}
+
+const INITIAL_PRODUCTS = normalizeProductRegistry(
+  MODEL_FAMILY_ORDER.flatMap((family) =>
+    MODEL_FAMILY_GROUPS[family].map((model) => ({
+      id: `PRD-${model}`,
+      model,
+      familyGroup: family
+    }))
+  )
+);
 
 /**
  * Reads a measurement date from an imported cell. Only unambiguous formats are
@@ -5197,6 +5947,875 @@ function summarizeMihAchievement(lines, options = {}) {
   return summary;
 }
 
+// ============================================================================
+// MIH RISK & CAPACITY FORECAST
+// ============================================================================
+// The plan says when MIH should happen. This says when it will, and why: the
+// gates that are already late, the program's own late work, how far the build is
+// behind the window it has spent, and how long the remaining gates usually take
+// on lines that have already passed them. Every driver is a number of days with
+// the evidence behind it, so a forecast can be argued with rather than believed.
+
+/** The gates that must clear before FATP MIH. PBR happens after it. */
+const MIH_FORECAST_GATES = NPI_GATES.filter((gate) => gate.id !== 'pbr');
+
+/** A stage longer than this is a stalled line, not a cycle time — leave it out. */
+const MIH_FORECAST_CYCLE_MAX_DAYS = 120;
+const MIH_FORECAST_GATE_CAP_DAYS = 45;
+const MIH_FORECAST_TASK_CAP_DAYS = 10;
+const MIH_FORECAST_BUILD_CAP_DAYS = 30;
+const MIH_FORECAST_CYCLE_CAP_DAYS = 30;
+const MIH_FORECAST_MEDIUM_SLIP_DAYS = 3;
+const MIH_FORECAST_HIGH_SLIP_DAYS = 14;
+
+/** What one owner is assumed to clear in a week, and the horizon judged against it. */
+const MIH_FORECAST_ITEMS_PER_WEEK = 8;
+const MIH_FORECAST_WEEKS_AHEAD = 4;
+
+/** Worst first: the module lists the lines that will miss MIH before the rest. */
+const MIH_FORECAST_RISK_ORDER = ['high', 'medium', 'low', 'unknown'];
+
+function forecastMedian(values) {
+  const list = (Array.isArray(values) ? values : [])
+    .map(Number)
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+  if (list.length === 0) return null;
+  const middle = Math.floor(list.length / 2);
+  return list.length % 2 === 1 ? list[middle] : (list[middle - 1] + list[middle]) / 2;
+}
+
+const forecastClamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+/** Whole days between two real dates, or null when either is not a date. */
+function forecastDaysBetween(fromIso, toIso) {
+  if (!isoDateParts(fromIso) || !isoDateParts(toIso)) return null;
+  return diffDaysIso(fromIso, toIso);
+}
+
+/**
+ * How long the remaining gates usually take, measured from the approvals already
+ * on file: on each line, every pair of consecutive approved gates is one stage
+ * sample. A median is used so one stalled line cannot set the forecast. No
+ * samples comes back as `basis: 'none'` — the caller then says the forecast rests
+ * on the plan, instead of presenting a made-up cycle time as history.
+ *
+ * Approvals stamped on the same day are one bulk sign-off, not a stage that took
+ * no time, so they are not a cycle sample. Counting them would pull the median to
+ * 0d and read as "gates are instant" instead of "no stage has been measured yet".
+ */
+function historicalGateCycleDays(gateRecords, lines, options) {
+  const opts = options || {};
+  const today = String(opts.today || '');
+  const samples = {};
+  let all = [];
+
+  (Array.isArray(lines) ? lines : []).forEach((line) => {
+    const dates = MIH_FORECAST_GATES.map((gate) => ({
+      id: gate.id,
+      at: gateApprovalIso(gateRecords, line.projectId, line.lineKey, gate.id, today)
+    }));
+    for (let index = 1; index < dates.length; index += 1) {
+      const from = dates[index - 1];
+      const to = dates[index];
+      if (!from.at || !to.at) continue;
+      const days = forecastDaysBetween(from.at, to.at);
+      if (days === null || days < 1 || days > MIH_FORECAST_CYCLE_MAX_DAYS) continue;
+      if (!samples[to.id]) samples[to.id] = [];
+      samples[to.id].push(days);
+      all.push(days);
+    }
+  });
+
+  const byGate = {};
+  Object.keys(samples).forEach((id) => {
+    byGate[id] = { median: forecastMedian(samples[id]), samples: samples[id].length };
+  });
+
+  return {
+    byGate,
+    median: forecastMedian(all),
+    samples: all.length,
+    basis: all.length > 0 ? 'history' : 'none'
+  };
+}
+
+/**
+ * Predicted slip for each MIH line and the drivers behind it.
+ *
+ * Each driver is capped so one broken input cannot swallow the forecast, and the
+ * caps are added: a late gate and a build that is behind tend to happen together.
+ * The drivers are returned individually so the sum can be read, not just trusted.
+ */
+function mihRiskForecast(entries, options) {
+  const opts = options || {};
+  const today = String(opts.today || '');
+  const cycle = opts.cycle || { byGate: {}, median: null, samples: 0, basis: 'none' };
+  const driveLines = [];
+
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    const plannedMih = String(entry.plannedMih || (entry.schedule && entry.schedule.mih) || '');
+    const daysToMih = forecastDaysBetween(today, plannedMih);
+    const gates = entry.gates && typeof entry.gates === 'object' ? entry.gates : {};
+
+    const gateState = MIH_FORECAST_GATES.map((gate) => {
+      const record = gates[gate.id] || {};
+      const dueIso = String(
+        record.dueIso || gateSignOffDueIso(gate.id, entry.schedule) || ''
+      );
+      const status = String(record.status || 'Pending');
+      const late = status === 'Approved' ? null : forecastDaysBetween(dueIso, today);
+      return {
+        id: gate.id,
+        code: gate.code,
+        short: gate.short,
+        status,
+        approved: status === 'Approved',
+        dueIso,
+        overdueDays: late === null ? 0 : Math.max(0, late)
+      };
+    });
+
+    const drivers = [];
+
+    // 1. A gate whose signature the plan already needed.
+    const overdueGates = gateState.filter((gate) => !gate.approved && gate.overdueDays > 0);
+    const gateDays = Math.min(
+      MIH_FORECAST_GATE_CAP_DAYS,
+      overdueGates.reduce((worst, gate) => Math.max(worst, gate.overdueDays), 0)
+    );
+    if (gateDays > 0) {
+      const worst = overdueGates.slice().sort((a, b) => b.overdueDays - a.overdueDays)[0];
+      drivers.push({
+        key: 'gates',
+        label: `${overdueGates.length} gate${overdueGates.length === 1 ? '' : 's'} past plan`,
+        days: gateDays,
+        detail: `${worst.code} ${worst.short} was due ${formatMonthDay(worst.dueIso)}, ${worst.overdueDays} day${
+          worst.overdueDays === 1 ? '' : 's'
+        } ago and is still ${worst.status}.`
+      });
+    }
+
+    // 2. The program's own work, already late or stuck.
+    const openTasks = Array.isArray(entry.openTasks) ? entry.openTasks : [];
+    const overdueTasks = openTasks.filter(
+      (task) => task && isoDateParts(task.dueDate) && String(task.dueDate) < today
+    );
+    const blockedTasks = openTasks.filter((task) => task && task.status === 'Blocked');
+    const taskDays = Math.min(
+      MIH_FORECAST_TASK_CAP_DAYS,
+      overdueTasks.length + blockedTasks.length * 2
+    );
+    if (taskDays > 0) {
+      drivers.push({
+        key: 'tasks',
+        label: `${overdueTasks.length} task${overdueTasks.length === 1 ? '' : 's'} late`,
+        days: taskDays,
+        detail: `${openTasks.length} open on the program, ${blockedTasks.length} of them blocked.`
+      });
+    }
+
+    // 3. Build progress against the share of the build window already spent.
+    const plannedQty = Math.max(0, Number(entry.plannedQty) || 0);
+    const builtQty = Math.max(0, Number(entry.builtQty) || 0);
+    const progress = plannedQty > 0 ? forecastClamp(builtQty / plannedQty, 0, 1) : null;
+    const windowStart = (entry.schedule && entry.schedule.prepStart) || '';
+    const elapsed = forecastDaysBetween(windowStart, today);
+    const windowDays = forecastDaysBetween(windowStart, plannedMih);
+    const windowSpent =
+      elapsed === null || windowDays === null || windowDays <= 0
+        ? null
+        : forecastClamp(elapsed / windowDays, 0, 1);
+    let buildDays = 0;
+    if (progress !== null && windowSpent !== null && daysToMih !== null && daysToMih > 0) {
+      const gap = windowSpent - progress;
+      if (gap > 0.02) {
+        buildDays = Math.min(MIH_FORECAST_BUILD_CAP_DAYS, Math.round(gap * daysToMih));
+      }
+    }
+    if (buildDays > 0) {
+      drivers.push({
+        key: 'build',
+        label: 'Build behind the window',
+        days: buildDays,
+        detail: `${Math.round(progress * 100)}% built (${builtQty.toLocaleString()} of ${plannedQty.toLocaleString()} pcs) against ${Math.round(
+          windowSpent * 100
+        )}% of the build window already spent.`
+      });
+    }
+
+    // 4. Whether the gates still unsigned fit in the days left: the cycle time is
+    //    the median stage of the lines that have already passed those gates.
+    const remaining = gateState.filter((gate) => !gate.approved);
+    const historyDays = remaining.reduce((sum, gate) => {
+      const sample = cycle.byGate ? cycle.byGate[gate.id] : null;
+      const perGate = sample && sample.median !== null ? sample.median : cycle.median;
+      return sum + (perGate === null || perGate === undefined ? 0 : perGate);
+    }, 0);
+    const planPerGate =
+      windowDays !== null && windowDays > 0 ? windowDays / MIH_FORECAST_GATES.length : 0;
+    const needsDays = historyDays > 0 ? historyDays : remaining.length * planPerGate;
+    const cycleBasis = historyDays > 0 && cycle.basis === 'history' ? 'history' : 'plan';
+    const cycleDays =
+      daysToMih !== null && daysToMih >= 0
+        ? Math.min(
+            MIH_FORECAST_CYCLE_CAP_DAYS,
+            Math.max(0, Math.round(needsDays - daysToMih))
+          )
+        : 0;
+    if (cycleDays > 0) {
+      drivers.push({
+        key: 'cycle',
+        label: `${remaining.length} gate${remaining.length === 1 ? '' : 's'} left`,
+        days: cycleDays,
+        detail: `${Math.round(needsDays)}d of gate work at ${
+          cycleBasis === 'history'
+            ? `the ${Math.round(cycle.median)}d median stage on file`
+            : "the plan's own stage length"
+        }, against ${daysToMih}d to MIH.`
+      });
+    }
+
+    const slipDays = Math.round(drivers.reduce((sum, driver) => sum + driver.days, 0));
+    const predictedMih = plannedMih && slipDays > 0 ? addDaysIso(plannedMih, slipDays) : plannedMih;
+    const programStatus = String(entry.programStatus || '');
+
+    let risk = 'low';
+    if (!plannedMih) risk = 'unknown';
+    else if (programStatus === 'Blocked' || slipDays >= MIH_FORECAST_HIGH_SLIP_DAYS) risk = 'high';
+    else if (programStatus === 'At Risk' || slipDays >= MIH_FORECAST_MEDIUM_SLIP_DAYS) risk = 'medium';
+
+    driveLines.push({
+      projectId: entry.projectId,
+      model: entry.model,
+      phase: entry.phase,
+      lineKey: entry.lineKey,
+      config: entry.config,
+      side: entry.side,
+      programStatus,
+      plannedMih,
+      predictedMih,
+      slipDays,
+      risk,
+      daysToMih,
+      nextGate: gateState.find((gate) => !gate.approved) || null,
+      gatesApproved: gateState.filter((gate) => gate.approved).length,
+      gatesTotal: gateState.length,
+      progressPct: progress === null ? null : progress * 100,
+      windowSpentPct: windowSpent === null ? null : windowSpent * 100,
+      plannedQty,
+      builtQty,
+      openTasks: openTasks.length,
+      overdueTasks: overdueTasks.length,
+      drivers,
+      cycleBasis,
+      cycleDays: Math.round(needsDays)
+    });
+  });
+
+  driveLines.sort((a, b) => {
+    const riskCmp =
+      MIH_FORECAST_RISK_ORDER.indexOf(a.risk) - MIH_FORECAST_RISK_ORDER.indexOf(b.risk);
+    if (riskCmp !== 0) return riskCmp;
+    if (b.slipDays !== a.slipDays) return b.slipDays - a.slipDays;
+    return String(a.plannedMih || '9999').localeCompare(String(b.plannedMih || '9999'));
+  });
+
+  const dated = driveLines.filter((line) => line.plannedMih);
+  const totalSlip = dated.reduce((sum, line) => sum + line.slipDays, 0);
+
+  return {
+    lines: driveLines,
+    summary: {
+      lines: driveLines.length,
+      dated: dated.length,
+      high: driveLines.filter((line) => line.risk === 'high').length,
+      medium: driveLines.filter((line) => line.risk === 'medium').length,
+      low: driveLines.filter((line) => line.risk === 'low').length,
+      unknown: driveLines.filter((line) => line.risk === 'unknown').length,
+      atRisk: driveLines.filter((line) => line.risk === 'high' || line.risk === 'medium').length,
+      totalSlip,
+      averageSlip: dated.length ? Math.round((totalSlip / dated.length) * 10) / 10 : 0,
+      nextMih: dated.length ? dated.map((line) => line.plannedMih).sort()[0] : null,
+      lastPredicted: dated.length
+        ? dated.map((line) => line.predictedMih || line.plannedMih).sort().slice(-1)[0]
+        : null,
+      worst: driveLines[0] || null
+    }
+  };
+}
+
+/**
+ * Whether each owner can clear what is on their plate inside the horizon. Load is
+ * the work already counted by the workload board (open tasks plus owed
+ * signatures); the rate is an explicit planning assumption, never a measured
+ * throughput, so the module states it next to the numbers.
+ */
+function capacityForecast(rows, options) {
+  const opts = options || {};
+  const today = String(opts.today || '');
+  const weeks = Math.max(1, Number(opts.weeksAhead) || MIH_FORECAST_WEEKS_AHEAD);
+  const perWeek = Math.max(1, Number(opts.itemsPerWeek) || MIH_FORECAST_ITEMS_PER_WEEK);
+  const capacity = Math.round(weeks * perWeek);
+
+  const owners = (Array.isArray(rows) ? rows : []).map((row) => {
+    const tasks = Array.isArray(row.openTasks) ? row.openTasks : [];
+    const signOffs = Array.isArray(row.signOffs) ? row.signOffs : [];
+    const items = tasks.length + signOffs.length;
+    const load = Number.isFinite(Number(row.load)) ? Number(row.load) : items;
+    const overdue =
+      tasks.filter((task) => task && isoDateParts(task.dueDate) && String(task.dueDate) < today)
+        .length +
+      signOffs.filter((signOff) => signOff && isoDateParts(signOff.dueIso) && String(signOff.dueIso) < today)
+        .length;
+    const nextDue =
+      tasks
+        .map((task) => task && task.dueDate)
+        .concat(signOffs.map((signOff) => signOff && signOff.dueIso))
+        .filter((day) => isoDateParts(day))
+        .sort()[0] || null;
+    const weeksToClear = Math.round((load / perWeek) * 10) / 10;
+
+    let status = 'ok';
+    if (load === 0) status = 'idle';
+    else if (load > capacity) status = 'over';
+    else if (load > capacity * 0.75) status = 'tight';
+
+    return {
+      memberId: row.memberId,
+      name: String(row.name || 'Unnamed'),
+      role: String(row.role || ''),
+      load,
+      items,
+      overdue,
+      nextDue,
+      weeksToClear,
+      status,
+      capacity,
+      lines: Number(row.lines) || 0,
+      portfolioWide: Boolean(row.portfolioWide)
+    };
+  });
+
+  owners.sort((a, b) => b.load - a.load || a.name.localeCompare(b.name));
+
+  const totalLoad = owners.reduce((sum, owner) => sum + owner.load, 0);
+  return {
+    owners,
+    weeks,
+    perWeek,
+    capacity,
+    summary: {
+      owners: owners.length,
+      over: owners.filter((owner) => owner.status === 'over').length,
+      tight: owners.filter((owner) => owner.status === 'tight').length,
+      idle: owners.filter((owner) => owner.status === 'idle').length,
+      overdue: owners.reduce((sum, owner) => sum + owner.overdue, 0),
+      totalLoad,
+      weeksToClear: Math.round((totalLoad / perWeek) * 10) / 10,
+      constrained: owners
+        .filter((owner) => owner.status === 'over')
+        .map((owner) => owner.name)
+    }
+  };
+}
+
+/**
+ * The forecast the module renders: one row per MIH line (program × config × side)
+ * with its predicted slip and drivers, plus the owners who cannot clear their
+ * remaining work inside the horizon. `variantsFor`, `scheduleFor` and
+ * `workloadFor` exist so the rules can be tested without the scheduling and
+ * roster machinery behind them.
+ */
+function buildMihForecast(workspace, options) {
+  const work = workspace || {};
+  const opts = options || {};
+  const today = String(opts.today || '');
+  const projects = Array.isArray(work.projects) ? work.projects : [];
+  const tasks = Array.isArray(work.tasks) ? work.tasks : [];
+  const gateRecords = work.gateRecords && typeof work.gateRecords === 'object' ? work.gateRecords : {};
+  const productionRecords = Array.isArray(work.productionRecords) ? work.productionRecords : [];
+  const teamMembers = Array.isArray(work.teamMembers) ? work.teamMembers : [];
+  const scheduleOverrides = work.scheduleOverrides || {};
+
+  const variantsFor =
+    typeof opts.variantsFor === 'function' ? opts.variantsFor : getLineVariantsForProject;
+  const scheduleFor =
+    typeof opts.scheduleFor === 'function'
+      ? opts.scheduleFor
+      : (project, lineKey) => lineGateSchedule(project, lineKey, scheduleOverrides);
+
+  const linePairs = [];
+  projects.forEach((project) => {
+    variantsFor(project).forEach((variant) => {
+      linePairs.push({ projectId: project.id, lineKey: variant.key });
+    });
+  });
+  const cycle = historicalGateCycleDays(gateRecords, linePairs, { today });
+
+  const entries = [];
+  projects.forEach((project) => {
+    // Program-wide actions: a task carries a gate, not a config/side, so it holds
+    // every line of the program it belongs to.
+    const programTasks = tasks.filter(
+      (task) => task && task.projectId === project.id && task.status !== 'Done'
+    );
+    variantsFor(project).forEach((variant) => {
+      const lineGates = (gateRecords[project.id] || {})[variant.key] || {};
+      const schedule = scheduleFor(project, variant.key) || {};
+      const gates = {};
+      MIH_FORECAST_GATES.forEach((gate) => {
+        const record = lineGates[gate.id] || {};
+        gates[gate.id] = {
+          status: record.status || 'Pending',
+          dueIso: gateSignOffDueIso(gate.id, schedule) || ''
+        };
+      });
+      const builtQty = productionRecords
+        .filter(
+          (record) =>
+            record &&
+            record.model === project.model &&
+            record.config === variant.config &&
+            record.side === variant.side
+        )
+        .reduce((sum, record) => sum + Math.max(0, Number(record.input) || 0), 0);
+
+      entries.push({
+        projectId: project.id,
+        model: project.model,
+        phase: project.phase,
+        lineKey: variant.key,
+        config: variant.config,
+        side: variant.side,
+        programStatus: project.status,
+        plannedMih: variant.fatpMih || schedule.mih || '',
+        schedule,
+        gates,
+        openTasks: programTasks,
+        plannedQty: variant.qty,
+        builtQty
+      });
+    });
+  });
+
+  const forecast = mihRiskForecast(entries, { today, cycle });
+
+  const capacityRows = teamMembers.map((member) => {
+    const workload = opts.workloadFor
+      ? opts.workloadFor(member)
+      : computeTeamWorkload(member, projects, tasks, gateRecords, teamMembers, scheduleOverrides);
+    return {
+      memberId: member.id,
+      name: member.name,
+      role: member.role,
+      load: workload.load,
+      openTasks: workload.openTasks,
+      signOffs: workload.signOffs,
+      lines: workload.lines,
+      portfolioWide: workload.portfolioWide
+    };
+  });
+  const capacity = capacityForecast(capacityRows, {
+    today,
+    weeksAhead: opts.weeksAhead,
+    itemsPerWeek: opts.itemsPerWeek
+  });
+
+  return Object.assign({ today, cycle }, forecast, { capacity });
+}
+
+// ============================================================================
+// MY ACTIONS — ONE QUEUE OVER EVERY SOURCE OF OPEN WORK
+// ============================================================================
+// Each module already knows what is late inside it. This collects those into one
+// list, and gives every row the same two things: the age of its own clock, and
+// where to go to close it. A gate holding a line, a signature the plan already
+// needed, a task past its date, a customer case nobody has moved and a record
+// that cannot be trusted are the same job from the reader's side — what differs
+// is only how long each has been waiting.
+
+const MY_ACTION_KINDS = {
+  gate: { label: 'Blocked gate', view: 'gates', action: 'Open gate' },
+  signature: { label: 'Owed signature', view: 'gates', action: 'Open dossier' },
+  task: { label: 'Overdue task', view: 'tasks', action: 'Open task' },
+  case: { label: 'Stale case', view: 'feedback', action: 'Open case' },
+  gap: { label: 'Data gap', view: 'quality', action: 'Fix data' }
+};
+
+/** Worst first: a hold on a line outranks a signature nobody has chased yet. */
+const MY_ACTION_KIND_ORDER = ['gate', 'signature', 'task', 'case', 'gap'];
+
+/** Aging bands, so `19d` can be read as "this has been waiting a month". */
+const MY_ACTION_AGING_BUCKETS = [
+  { id: 'new', label: '0–2 days', max: 2 },
+  { id: 'week', label: '3–7 days', max: 7 },
+  { id: 'month', label: '8–30 days', max: 30 },
+  { id: 'older', label: 'Over 30 days', max: null }
+];
+
+/** An open case nobody has touched for this long has gone stale, not just open. */
+const MY_ACTION_CASE_STALE_DAYS = 30;
+
+/** A signature the plan needs inside this window is work for this week. */
+const MY_ACTION_SIGNATURE_HORIZON_DAYS = 7;
+
+/** Past a week late an item is not merely due — it is the thing to do first. */
+const MY_ACTION_URGENT_DAYS = 7;
+
+const MY_ACTION_SEVERITY_ORDER = ['urgent', 'due', 'watch'];
+const MY_ACTION_SEVERITY_LABELS = { urgent: 'Urgent', due: 'Due', watch: 'Watch' };
+
+/** Which aging band a day count falls in, or null when there is no date on file. */
+function myActionBucket(days) {
+  const value = days === null || days === undefined || days === '' ? null : Number(days);
+  if (value === null || !Number.isFinite(value)) return null;
+  const aged = Math.max(0, value);
+  const band = MY_ACTION_AGING_BUCKETS.find(
+    (entry) => entry.max === null || aged <= entry.max
+  );
+  return band ? band.id : 'older';
+}
+
+function myActionBucketLabel(bucketId) {
+  const band = MY_ACTION_AGING_BUCKETS.find((entry) => entry.id === bucketId);
+  return band ? band.label : 'No date on file';
+}
+
+/**
+ * Urgent is a line on hold or anything more than a week past its date; due is
+ * past its date at all; watch is a real open item that is not yet late. Severity
+ * comes from the overdue count, never from how loudly a row is worded.
+ */
+function myActionSeverity(overdueDays, options) {
+  const opts = options || {};
+  if (opts.blocked) return 'urgent';
+  if (opts.blocker) return 'urgent';
+  const days = overdueDays === null || overdueDays === undefined ? 0 : Number(overdueDays);
+  if (!Number.isFinite(days) || days <= 0) return 'watch';
+  return days > MY_ACTION_URGENT_DAYS ? 'urgent' : 'due';
+}
+
+/** One normalised row: same fields whatever module it came from. */
+function myActionItem(input) {
+  const item = input || {};
+  const kind = MY_ACTION_KINDS[item.kind] ? item.kind : 'task';
+  const meta = MY_ACTION_KINDS[kind];
+  const toDays = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    const days = Number(value);
+    return Number.isFinite(days) ? Math.max(0, Math.round(days)) : null;
+  };
+  const ageDays = toDays(item.ageDays);
+  const overdueDays = toDays(item.overdueDays) || 0;
+  const severity = myActionSeverity(overdueDays, {
+    blocked: Boolean(item.blocked),
+    blocker: Boolean(item.blocker)
+  });
+  const bucket = myActionBucket(ageDays);
+  const recordId = String(item.recordId || '').trim();
+  return {
+    id: `${kind}:${String(item.refId || recordId || item.title || '').trim()}`,
+    kind,
+    kindLabel: meta.label,
+    // A data gap carries the module that can repair it; every other kind goes to
+    // its own module. Falls back to the kind's view when the row names none.
+    view: String(item.view || meta.view).trim() || meta.view,
+    actionLabel: meta.action,
+    severity,
+    severityLabel: MY_ACTION_SEVERITY_LABELS[severity],
+    title: String(item.title || '').trim() || 'Untitled action',
+    detail: String(item.detail || '').trim(),
+    owner: String(item.owner || '').trim(),
+    projectId: String(item.projectId || '').trim(),
+    projectModel: String(item.projectModel || '').trim(),
+    lineKey: String(item.lineKey || '').trim(),
+    gateId: String(item.gateId || '').trim(),
+    gateCode: String(item.gateCode || '').trim(),
+    gateShort: String(item.gateShort || '').trim(),
+    recordId,
+    dueIso: dataTrustDay(item.dueIso) || '',
+    ageDays,
+    overdueDays,
+    ageBucket: bucket,
+    ageBucketLabel: myActionBucketLabel(bucket)
+  };
+}
+
+/**
+ * The queue itself, in the worst-first order it is read in.
+ *
+ * `variantsFor` and `scheduleFor` exist for the same reason as in the MIH
+ * forecast: the rules can then be checked without the scheduling machinery. A
+ * `owner` in the options narrows the list to one person's actions; the summary
+ * always describes the rows actually returned, and `owners` describes everyone so
+ * the picker can list them.
+ */
+function myActionsQueue(workspace, options) {
+  const work = workspace || {};
+  const opts = options || {};
+  const today = dataTrustDay(opts.today) || dataTrustDay(new Date().toISOString());
+  const staleCaseDays =
+    Number(opts.caseStaleDays) > 0 ? Number(opts.caseStaleDays) : MY_ACTION_CASE_STALE_DAYS;
+  const signatureHorizon =
+    Number(opts.signatureHorizonDays) >= 0
+      ? Number(opts.signatureHorizonDays)
+      : MY_ACTION_SIGNATURE_HORIZON_DAYS;
+  const variantsFor =
+    typeof opts.variantsFor === 'function' ? opts.variantsFor : getLineVariantsForProject;
+  const scheduleFor =
+    typeof opts.scheduleFor === 'function' ? opts.scheduleFor : lineGateSchedule;
+
+  const projects = Array.isArray(work.projects) ? work.projects : [];
+  const tasks = Array.isArray(work.tasks) ? work.tasks : [];
+  const customerFeedback = Array.isArray(work.customerFeedback) ? work.customerFeedback : [];
+  const gateRecords =
+    work.gateRecords && typeof work.gateRecords === 'object' ? work.gateRecords : {};
+  const issues = Array.isArray(opts.issues)
+    ? opts.issues
+    : work.dataQuality && Array.isArray(work.dataQuality.issues)
+      ? work.dataQuality.issues
+      : [];
+
+  const items = [];
+  const gateById = new Map(NPI_GATES.map((gate) => [gate.id, gate]));
+
+  // 1 and 2. A gate on hold, and a signature the plan already needs. A blocked
+  // gate is not also listed as an owed signature: the hold is the action, and
+  // saying it twice would make the queue look larger than the work.
+  projects.forEach((project) => {
+    const lines = variantsFor(project);
+    lines.forEach((variant) => {
+      const lineKey = variant.key;
+      const schedule = scheduleFor(project, lineKey) || {};
+      const lineGates = (gateRecords[project.id] || {})[lineKey] || {};
+      NPI_GATES.forEach((gate) => {
+        const dossier = lineGates[gate.id] || {};
+        const status = String(dossier.status || 'Pending');
+        if (status === 'Approved') return;
+        const dueIso = gateSignOffDueIso(gate.id, schedule);
+        const lateBy = dueIso ? dataTrustDaysBetween(dueIso, today) : null;
+        const place = `${project.model || project.id} · ${lineKey.replace('-', ' ')} · ${gate.code} ${
+          gate.short
+        }`;
+        if (status === 'Blocked' || status === 'Rejected') {
+          items.push(
+            myActionItem({
+              kind: 'gate',
+              blocked: true,
+              refId: `${project.id}:${lineKey}:${gate.id}`,
+              title: `${place} is on hold`,
+              detail:
+                status === 'Rejected'
+                  ? `The gate was rejected and has to be reworked before the line can move past ${gate.code}.`
+                  : `${gate.code} ${gate.short} is blocked, so every later gate on this line waits behind it.`,
+              owner: String(dossier.owner || '').trim(),
+              projectId: project.id,
+              projectModel: project.model,
+              lineKey,
+              gateId: gate.id,
+              gateCode: gate.code,
+              gateShort: gate.short,
+              dueIso,
+              ageDays: lateBy,
+              overdueDays: lateBy
+            })
+          );
+          return;
+        }
+
+        const horizon = dueIso ? dataTrustDaysBetween(today, dueIso) : 0;
+        if (horizon === null || horizon > signatureHorizon) return;
+        const approvers = Array.isArray(dossier.approvers) ? dossier.approvers : [];
+        approvers.forEach((approver) => {
+          const decision = String((approver && approver.decision) || 'Pending');
+          if (decision === 'Approved' || decision === 'Conditional') return;
+          const name = String((approver && approver.name) || '').trim();
+          if (!name) return;
+          items.push(
+            myActionItem({
+              kind: 'signature',
+              refId: `${project.id}:${lineKey}:${gate.id}:${name}`,
+              title: `${place} — ${name} owes a signature`,
+              detail:
+                decision === 'Rejected'
+                  ? `Marked rejected: the gate cannot pass until this decision is replaced or the rework signed off.`
+                  : `The plan needs this signature to keep ${project.model || project.id} on its build date.`,
+              owner: name,
+              projectId: project.id,
+              projectModel: project.model,
+              lineKey,
+              gateId: gate.id,
+              gateCode: gate.code,
+              gateShort: gate.short,
+              dueIso,
+              ageDays: lateBy,
+              overdueDays: lateBy
+            })
+          );
+        });
+      });
+    });
+  });
+
+  // 3. A task past its date. Its clock starts on the day it was due, so the age
+  //    and the lateness are the same number and cannot disagree.
+  tasks.forEach((task) => {
+    if (!task || task.status === 'Done') return;
+    const dueIso = dataTrustDay(task.dueDate);
+    if (!dueIso) return;
+    const lateBy = dataTrustDaysBetween(dueIso, today);
+    if (lateBy === null || lateBy <= 0) return;
+    items.push(
+      myActionItem({
+        kind: 'task',
+        refId: String(task.id || ''),
+        recordId: String(task.id || ''),
+        title: `${String(task.id || 'Task')} · ${String(task.title || 'Untitled task')}`,
+        detail: `${String(task.status || 'Open')}${task.owner ? ` · ${task.owner}` : ''}${
+          task.processStep ? ` · ${task.processStep}` : ''
+        }`,
+        owner: String(task.owner || '').trim(),
+        projectId: String(task.projectId || '').trim(),
+        gateId: String(task.gateId || '').trim(),
+        gateCode: (gateById.get(task.gateId) || {}).code || '',
+        gateShort: (gateById.get(task.gateId) || {}).short || '',
+        dueIso,
+        ageDays: lateBy,
+        overdueDays: lateBy
+      })
+    );
+  });
+
+  // 4. A customer case still open long after it was raised. The clock is the day
+  //    the customer wrote, not the day someone last looked at it, because the age
+  //    that matters is how long the customer has been waiting.
+  customerFeedback.forEach((row) => {
+    if (!row) return;
+    const open = row.nmbStatus === 'Open' || row.customerStatus === 'Open';
+    if (!open) return;
+    const raisedIso = dataTrustDay(row.feedbackDate);
+    if (!raisedIso) return;
+    const ageDays = dataTrustDaysBetween(raisedIso, today);
+    if (ageDays === null || ageDays < staleCaseDays) return;
+    items.push(
+      myActionItem({
+        kind: 'case',
+        refId: String(row.id || ''),
+        recordId: String(row.id || ''),
+        title: `${String(row.id || 'Case')} · ${String(row.issueItem || 'Customer case')}`,
+        detail: `${
+          row.nmbStatus === 'Open' && row.customerStatus === 'Open'
+            ? 'Open on both sides'
+            : 'Open'
+        } since ${dataTrustDayText(raisedIso)} · ${String(row.location || 'no location')}${
+          row.facaNo ? ` · ${row.facaNo}` : ' · no FACA number'
+        }`,
+        owner: '',
+        projectModel: String(row.model || '').trim(),
+        dueIso: raisedIso,
+        ageDays,
+        overdueDays: ageDays - staleCaseDays
+      })
+    );
+  });
+
+  // 5. A data gap: a record that cannot be trusted, taken from the same queue the
+  //    KPI tiles' badges read. Most have no date of their own, so they carry no
+  //    age rather than a made-up one, and a blocker is urgent regardless.
+  issues.forEach((issue) => {
+    if (!issue) return;
+    items.push(
+      myActionItem({
+        kind: 'gap',
+        blocker: issue.severity === 'blocker',
+        refId: String(issue.id || issue.refId || issue.title || ''),
+        recordId: String(issue.id || ''),
+        title: `${issue.areaLabel || 'Data'} · ${issue.title || 'Untitled issue'}`,
+        detail: issue.detail || '',
+        view: issue.view || 'quality',
+        owner: '',
+        dueIso: '',
+        ageDays: null,
+        overdueDays: 0
+      })
+    );
+  });
+
+  items.sort(
+    (a, b) =>
+      MY_ACTION_SEVERITY_ORDER.indexOf(a.severity) - MY_ACTION_SEVERITY_ORDER.indexOf(b.severity) ||
+      (b.overdueDays || 0) - (a.overdueDays || 0) ||
+      (b.ageDays === null ? -1 : b.ageDays) - (a.ageDays === null ? -1 : a.ageDays) ||
+      MY_ACTION_KIND_ORDER.indexOf(a.kind) - MY_ACTION_KIND_ORDER.indexOf(b.kind) ||
+      a.title.localeCompare(b.title)
+  );
+
+  const ownerKey = (value) => String(value || '').trim().toLowerCase();
+  const everyone = [];
+  const ownerMap = new Map();
+  items.forEach((item) => {
+    const key = ownerKey(item.owner);
+    if (!key) return;
+    const entry = ownerMap.get(key) || {
+      name: item.owner,
+      count: 0,
+      urgent: 0,
+      overdue: 0,
+      oldestDays: null
+    };
+    entry.count += 1;
+    if (item.severity === 'urgent') entry.urgent += 1;
+    if (item.overdueDays > 0) entry.overdue += 1;
+    if (item.ageDays !== null && (entry.oldestDays === null || item.ageDays > entry.oldestDays)) {
+      entry.oldestDays = item.ageDays;
+    }
+    ownerMap.set(key, entry);
+  });
+  ownerMap.forEach((entry) => everyone.push(entry));
+  everyone.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  const wanted = opts.owner ? ownerKey(opts.owner) : '';
+  const visible = wanted ? items.filter((item) => ownerKey(item.owner) === wanted) : items;
+
+  const summary = {
+    total: visible.length,
+    urgent: 0,
+    due: 0,
+    watch: 0,
+    overdue: 0,
+    undated: 0,
+    oldestDays: null,
+    byKind: {},
+    byBucket: {}
+  };
+  MY_ACTION_KIND_ORDER.forEach((kind) => {
+    summary.byKind[kind] = 0;
+  });
+  MY_ACTION_AGING_BUCKETS.forEach((band) => {
+    summary.byBucket[band.id] = 0;
+  });
+  visible.forEach((item) => {
+    summary[item.severity] += 1;
+    summary.byKind[item.kind] = (summary.byKind[item.kind] || 0) + 1;
+    if (item.overdueDays > 0) summary.overdue += 1;
+    if (item.ageDays === null) summary.undated += 1;
+    else if (summary.oldestDays === null || item.ageDays > summary.oldestDays) {
+      summary.oldestDays = item.ageDays;
+    }
+    if (item.ageBucket) summary.byBucket[item.ageBucket] += 1;
+  });
+
+  return {
+    today,
+    items: visible,
+    summary,
+    owners: everyone,
+    staleCaseDays,
+    signatureHorizonDays: signatureHorizon
+  };
+}
+
 function getLineVariantsForProject(project) {
   if (!project) return [];
   const defaultSides = getSideList(project.side);
@@ -5258,10 +6877,11 @@ function projectFromSettingsForm(project, form) {
     return text || fallback;
   };
   const familyGroup = pick('familyGroup', project.familyGroup || PROGRAM_FAMILY_GROUPS[0]);
+  const model = pick('model', project.model).toUpperCase();
   return {
     ...project,
-    model: pick('model', project.model).toUpperCase(),
-    phase: pick('phase', project.phase),
+    model,
+    phase: canonicalProgramPhase(model, pick('phase', project.phase)),
     status: pick('status', project.status),
     familyGroup: familyGroup,
     family: pick('family', project.family || `${familyGroup} FDB Fan Module`),

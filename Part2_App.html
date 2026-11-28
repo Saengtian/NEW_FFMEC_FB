@@ -131,9 +131,21 @@ function ScopeFilterSelect({
   value,
   options,
   onChange,
-  fullWidthOnMobile = false
+  fullWidthOnMobile = false,
+  groupByFamily = false
 }) {
   const optionClass = 'bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100';
+  const optionValue = (option) =>
+    option && typeof option === 'object' ? option.value : option;
+  const optionLabel = (option) =>
+    option && typeof option === 'object' ? option.label : option;
+  const optionCount = options.filter((option) => !(option && option.synthetic)).length;
+  const familyGroups = groupByFamily
+    ? MODEL_FAMILY_ORDER.map((family) => ({
+        family,
+        options: options.filter((option) => inferFamilyFromModel(optionValue(option)) === family)
+      })).filter((group) => group.options.length > 0)
+    : null;
   const changed = value !== 'ALL';
   return (
     <div
@@ -161,13 +173,23 @@ function ScopeFilterSelect({
         }`}
       >
         <option value="ALL" className={optionClass}>
-          All ({options.length})
+          All ({optionCount})
         </option>
-        {options.map((option) => (
-          <option key={option} value={option} className={optionClass}>
-            {option}
-          </option>
-        ))}
+        {familyGroups
+          ? familyGroups.map((group) => (
+              <optgroup key={group.family} label={group.family}>
+                {group.options.map((option) => (
+                  <option key={optionValue(option)} value={optionValue(option)} className={optionClass}>
+                    {optionLabel(option)}
+                  </option>
+                ))}
+              </optgroup>
+            ))
+          : options.map((option) => (
+              <option key={optionValue(option)} value={optionValue(option)} className={optionClass}>
+                {optionLabel(option)}
+              </option>
+            ))}
       </select>
     </div>
   );
@@ -193,23 +215,32 @@ function App() {
     setTheme(next);
   };
 
-  const [projects, setProjects] = useState(INITIAL_PROJECTS);
+  const [projects, setProjects] = useState(() => INITIAL_PROJECTS.map(withCanonicalProgramPhase));
   const [tasks, setTasks] = useState(() => INITIAL_TASKS.map(normalizeTask));
   const [gateRecords, setGateRecords] = useState(() => createInitialGateRecords());
-  const [productionRecords, setProductionRecords] = useState(INITIAL_PRODUCTION_RECORDS);
+  const [productionRecords, setProductionRecords] = useState(() =>
+    INITIAL_PRODUCTION_RECORDS.map(withCanonicalModelPhase)
+  );
   const [masterSpecs, setMasterSpecs] = useState(INITIAL_MASTER_SPECS);
   const [cpkRecords, setCpkRecords] = useState(() =>
-    migrateCpkRecords(INITIAL_CPK_RECORDS, INITIAL_MASTER_SPECS)
+    migrateCpkRecords(INITIAL_CPK_RECORDS, INITIAL_MASTER_SPECS).map(withCanonicalModelPhase)
   );
-  const [costProjects, setCostProjects] = useState(INITIAL_COST_PROJECTS);
-  const [customerFeedback, setCustomerFeedback] = useState(INITIAL_CUSTOMER_FEEDBACK);
+  const [costProjects, setCostProjects] = useState(() =>
+    INITIAL_COST_PROJECTS.map(withCanonicalModelPhase)
+  );
+  const [customerFeedback, setCustomerFeedback] = useState(() =>
+    INITIAL_CUSTOMER_FEEDBACK.map(withCanonicalModelPhase)
+  );
   const [teamMembers, setTeamMembers] = useState(INITIAL_TEAM_MEMBERS);
+  const [products, setProducts] = useState(INITIAL_PRODUCTS);
   const [selectedProjectId, setSelectedProjectId] = useState('PRJ-X4151');
   const [selectedGateId, setSelectedGateId] = useState('mbo');
   const [selectedLineKey, setSelectedLineKey] = useState('ME11-RHS');
   const [selectedLineKeys, setSelectedLineKeys] = useState(['ME11-RHS']);
 
-  // Global Top-Header Dependency Filter Scope (Family <-> Model <-> Phase <-> Side)
+  // Global Top-Header Dependency Filter Scope (Portfolio <-> Family <-> Model <-> Phase <-> Side)
+  // NPI is the default so steady-state MP programs never mix into the NPI modules.
+  const [globalPortfolio, setGlobalPortfolio] = useState('NPI');
   const [globalFamily, setGlobalFamily] = useState('ALL');
   const [globalModel, setGlobalModel] = useState('ALL');
   const [globalPhase, setGlobalPhase] = useState('ALL');
@@ -217,7 +248,8 @@ function App() {
   const [globalSide, setGlobalSide] = useState('ALL');
 
   const [activeTaskDrawerId, setActiveTaskDrawerId] = useState(null);
-  const [newProjectModalOpen, setNewProjectModalOpen] = useState(false);
+  const [setupTab, setSetupTab] = useState('products');
+  const [programFormKey, setProgramFormKey] = useState(0);
   const [editingProject, setEditingProject] = useState(null);
   const [deletingProject, setDeletingProject] = useState(null);
   const [newTaskModalOpen, setNewTaskModalOpen] = useState(false);
@@ -317,6 +349,7 @@ function App() {
     costProjects,
     customerFeedback,
     teamMembers,
+    products,
     scheduleOverrides
   });
 
@@ -332,7 +365,12 @@ function App() {
     let productionDrops = [];
     isHydratingRef.current = true;
     try {
-      if (Array.isArray(data.projects)) setProjects(data.projects);
+      if (Array.isArray(data.products)) {
+        const loadedProducts = normalizeProductRegistry(data.products);
+        setProducts(loadedProducts);
+        syncModelFamilyGroups(loadedProducts);
+      }
+      if (Array.isArray(data.projects)) setProjects(data.projects.map(withCanonicalProgramPhase));
       if (Array.isArray(data.tasks)) setTasks(data.tasks.map(normalizeTask));
       if (data.gateRecords && typeof data.gateRecords === 'object') {
         // Stored dossiers can still carry Drive links the old seed invented, which
@@ -349,7 +387,7 @@ function App() {
         productionDropped = cleaned.dropped.length;
         productionRepaired = cleaned.repaired;
         productionDrops = productionDropReport(cleaned.dropped);
-        setProductionRecords(cleaned.records);
+        setProductionRecords(cleaned.records.map(withCanonicalModelPhase));
       }
       const loadedSpecs = Array.isArray(data.masterSpecs)
         ? applyProvisionalLimitDefaults(data.masterSpecs)
@@ -366,10 +404,14 @@ function App() {
         );
         const cleanedCpk = stripLegacyFabricatedCpkRows(frozen);
         removedFabricated = frozen.length - cleanedCpk.length;
-        setCpkRecords(cleanedCpk);
+        setCpkRecords(cleanedCpk.map(withCanonicalModelPhase));
       }
-      if (Array.isArray(data.costProjects)) setCostProjects(data.costProjects);
-      if (Array.isArray(data.customerFeedback)) setCustomerFeedback(data.customerFeedback);
+      if (Array.isArray(data.costProjects)) {
+        setCostProjects(data.costProjects.map(withCanonicalModelPhase));
+      }
+      if (Array.isArray(data.customerFeedback)) {
+        setCustomerFeedback(data.customerFeedback.map(withCanonicalModelPhase));
+      }
       if (Array.isArray(data.teamMembers)) setTeamMembers(data.teamMembers);
       if (data.scheduleOverrides && typeof data.scheduleOverrides === 'object') setScheduleOverrides(data.scheduleOverrides);
     } catch (err) {
@@ -769,7 +811,7 @@ function App() {
     // user's revision is never overwritten by an autosave.
     if (syncConflictRef.current) return;
     saveSchedulerRef.current.schedule(['Auto-sync from FFM NPI Ops']);
-  }, [projects, tasks, gateRecords, productionRecords, masterSpecs, cpkRecords, costProjects, customerFeedback, teamMembers, scheduleOverrides]);
+  }, [projects, tasks, gateRecords, productionRecords, masterSpecs, cpkRecords, costProjects, customerFeedback, teamMembers, products, scheduleOverrides]);
 
   // A pending debounced save must not be lost when the page is closed or hidden
   useEffect(() => {
@@ -965,6 +1007,12 @@ function App() {
     return map;
   }, [projects]);
 
+  // The portfolio sidebar is a shortcut to the live NPI work, not the MP line.
+  const activeNpiProjects = useMemo(
+    () => projects.filter((project) => isActiveNpiModel(project.model)),
+    [projects]
+  );
+
   const gateMap = useMemo(() => {
     const map = {};
     NPI_GATES.forEach((g) => {
@@ -976,14 +1024,16 @@ function App() {
   const selectedProject = projectMap[selectedProjectId] || projects[0];
   const activeDrawerTask = tasks.find((t) => t.id === activeTaskDrawerId) || null;
 
-  // Unified Family x Model x Phase x Side Scope Catalog (Active NPI + Production Records)
+  // Unified Portfolio x Family x Model x Phase x Side Scope Catalog.
+  // Projects and production rows are classified by model so NPI and MP never
+  // share the same scope options or module data.
   const scopeCatalog = useMemo(() => {
-    const npiEntries = projects.map((p) => ({
+    const programEntries = projects.map((p) => ({
       family: getFamilyGroup(p),
       model: p.model,
       phase: p.phase,
       sides: getSideList(p.side),
-      source: 'NPI',
+      source: 'PROGRAM',
       projectId: p.id
     }));
     const prodEntries = productionRecords.map((r) => ({
@@ -995,18 +1045,20 @@ function App() {
       source: 'PROD',
       recordId: r.id
     }));
-    return [...npiEntries, ...prodEntries];
-  }, [projects, productionRecords]);
+    return [...programEntries, ...prodEntries].filter(
+      (item) => modelPortfolio(item.model) === globalPortfolio
+    );
+  }, [projects, productionRecords, globalPortfolio]);
 
   // Dependency-Driven Filter Options
   const availableFamilies = useMemo(() => {
     const matched = scopeCatalog.filter((item) => {
       if (globalModel !== 'ALL' && item.model !== globalModel) return false;
-      if (globalPhase !== 'ALL' && item.phase !== globalPhase) return false;
+      if (!phaseInScope(item.phase, globalPhase)) return false;
       if (globalSide !== 'ALL' && !item.sides.includes(globalSide)) return false;
       return true;
     });
-    const order = ['MB14"', 'MB16"', 'iMac', 'MacMini', 'Display'];
+    const order = MODEL_FAMILY_ORDER;
     return Array.from(new Set(matched.map((item) => item.family))).sort(
       (a, b) =>
         (order.indexOf(a) === -1 ? 99 : order.indexOf(a)) -
@@ -1020,7 +1072,7 @@ function App() {
       if (!item.process) return false;
       if (globalFamily !== 'ALL' && item.family !== globalFamily) return false;
       if (globalModel !== 'ALL' && item.model !== globalModel) return false;
-      if (globalPhase !== 'ALL' && item.phase !== globalPhase) return false;
+      if (!phaseInScope(item.phase, globalPhase)) return false;
       if (globalSide !== 'ALL' && !item.sides.includes(globalSide)) return false;
       return true;
     });
@@ -1028,15 +1080,32 @@ function App() {
     return PROCESS_STEPS.filter((step) => present.has(step));
   }, [scopeCatalog, globalFamily, globalModel, globalPhase, globalSide]);
 
+  // Product Master is the registry behind this filter. Registered products are
+  // offered even with no program/record; data-backed models still honour the
+  // Phase and Side filters, and unknown imported models stay reachable.
+  const registeredModels = useMemo(
+    () => new Set(productModelsForScope(products, globalPortfolio, globalFamily)),
+    [products, globalPortfolio, globalFamily]
+  );
   const availableModels = useMemo(() => {
     const matched = scopeCatalog.filter((item) => {
       if (globalFamily !== 'ALL' && item.family !== globalFamily) return false;
-      if (globalPhase !== 'ALL' && item.phase !== globalPhase) return false;
+      if (!phaseInScope(item.phase, globalPhase)) return false;
       if (globalSide !== 'ALL' && !item.sides.includes(globalSide)) return false;
       return true;
     });
-    return Array.from(new Set(matched.map((item) => item.model)));
-  }, [scopeCatalog, globalFamily, globalPhase, globalSide]);
+    const models = new Set(matched.map((item) => item.model));
+    const dataModels = new Set(scopeCatalog.map((item) => item.model));
+    registeredModels.forEach((model) => {
+      if (!dataModels.has(model)) models.add(model);
+    });
+    return Array.from(models).sort((a, b) => {
+      const fa = MODEL_FAMILY_ORDER.indexOf(inferFamilyFromModel(a));
+      const fb = MODEL_FAMILY_ORDER.indexOf(inferFamilyFromModel(b));
+      if (fa !== fb) return (fa === -1 ? 99 : fa) - (fb === -1 ? 99 : fb);
+      return a.localeCompare(b);
+    });
+  }, [scopeCatalog, globalFamily, globalPhase, globalSide, registeredModels]);
 
   const availablePhases = useMemo(() => {
     const matched = scopeCatalog.filter((item) => {
@@ -1045,18 +1114,22 @@ function App() {
       if (globalSide !== 'ALL' && !item.sides.includes(globalSide)) return false;
       return true;
     });
-    return Array.from(new Set(matched.map((item) => item.phase))).sort(
+    const phases = Array.from(new Set(matched.map((item) => item.phase))).sort(
       (a, b) =>
         (PHASE_ORDER.indexOf(a) === -1 ? 99 : PHASE_ORDER.indexOf(a)) -
         (PHASE_ORDER.indexOf(b) === -1 ? 99 : PHASE_ORDER.indexOf(b))
     );
+    if (phases.some((phase) => NPI_PHASES.includes(phase))) {
+      phases.unshift({ value: NPI_PHASE_FILTER, label: 'NPI (P1-PVT)', synthetic: true });
+    }
+    return phases;
   }, [scopeCatalog, globalFamily, globalModel, globalSide]);
 
   const availableSides = useMemo(() => {
     const matched = scopeCatalog.filter((item) => {
       if (globalFamily !== 'ALL' && item.family !== globalFamily) return false;
       if (globalModel !== 'ALL' && item.model !== globalModel) return false;
-      if (globalPhase !== 'ALL' && item.phase !== globalPhase) return false;
+      if (!phaseInScope(item.phase, globalPhase)) return false;
       return true;
     });
     const sideSet = new Set();
@@ -1072,12 +1145,18 @@ function App() {
   const masterSpecModelOptions = useMemo(
     () =>
       Array.from(
-        new Set([...scopeCatalog.map((item) => item.model), ...masterSpecs.map((s) => s.model)].filter(Boolean))
+        new Set([
+          ...scopeCatalog.map((item) => item.model),
+          ...masterSpecs
+            .filter((s) => !s.model || modelPortfolio(s.model) === globalPortfolio)
+            .map((s) => s.model)
+        ].filter(Boolean))
       ).sort(),
-    [scopeCatalog, masterSpecs]
+    [scopeCatalog, masterSpecs, globalPortfolio]
   );
   const syncGateSelectionToScope = (nextFamily, nextModel, nextSide) => {
     const matchingProjects = projects.filter((p) => {
+      if (modelPortfolio(p.model) !== globalPortfolio) return false;
       if (nextFamily !== 'ALL' && getFamilyGroup(p) !== nextFamily) return false;
       if (nextModel !== 'ALL' && p.model !== nextModel) return false;
       if (nextSide !== 'ALL' && !getSideList(p.side).includes(nextSide)) return false;
@@ -1105,6 +1184,25 @@ function App() {
     }
   };
 
+  const handleGlobalPortfolioChange = (nextPortfolio) => {
+    if (nextPortfolio === globalPortfolio) return;
+    setGlobalPortfolio(nextPortfolio);
+    setGlobalFamily('ALL');
+    setGlobalModel('ALL');
+    setGlobalPhase('ALL');
+    setGlobalSide('ALL');
+    setGlobalProcess('ALL');
+
+    const target = projects.find((p) => modelPortfolio(p.model) === nextPortfolio);
+    if (target) {
+      const firstLine = getLineVariantsForProject(target)[0]?.key || 'ME11-RHS';
+      setSelectedProjectId(target.id);
+      setSelectedGateId(target.currentGateId);
+      setSelectedLineKey(firstLine);
+      setSelectedLineKeys([firstLine]);
+    }
+  };
+
   const handleGlobalFamilyChange = (nextFamily) => {
     setGlobalFamily(nextFamily);
     if (nextFamily === 'ALL') {
@@ -1113,6 +1211,9 @@ function App() {
     }
 
     const familyEntries = scopeCatalog.filter((item) => item.family === nextFamily);
+    const registeredFamilyModels = new Set(
+      productModelsForScope(products, globalPortfolio, nextFamily)
+    );
     const validModels = new Set(familyEntries.map((item) => item.model));
     const validPhases = new Set(familyEntries.map((item) => item.phase));
     const validSides = new Set();
@@ -1120,11 +1221,15 @@ function App() {
 
     let resolvedModel = globalModel;
     let resolvedSide = globalSide;
-    if (globalModel !== 'ALL' && !validModels.has(globalModel)) {
+    if (
+      globalModel !== 'ALL' &&
+      !validModels.has(globalModel) &&
+      !registeredFamilyModels.has(globalModel)
+    ) {
       resolvedModel = 'ALL';
       setGlobalModel('ALL');
     }
-    if (globalPhase !== 'ALL' && !validPhases.has(globalPhase)) {
+    if (!phaseFilterHasMatch(validPhases, globalPhase)) {
       setGlobalPhase('ALL');
     }
     if (globalSide !== 'ALL' && !validSides.has(globalSide)) {
@@ -1142,6 +1247,7 @@ function App() {
     }
 
     const modelEntries = scopeCatalog.filter((item) => item.model === nextModel);
+    const product = products.find((item) => item.model === nextModel);
     const validFamilies = new Set(modelEntries.map((item) => item.family));
     const validPhases = new Set(modelEntries.map((item) => item.phase));
     const validSides = new Set();
@@ -1149,11 +1255,18 @@ function App() {
 
     let resolvedFamily = globalFamily;
     let resolvedSide = globalSide;
-    if (globalFamily !== 'ALL' && !validFamilies.has(globalFamily)) {
+    const selectedFamily =
+      product && MODEL_FAMILY_ORDER.includes(product.familyGroup)
+        ? product.familyGroup
+        : null;
+    if (
+      globalFamily !== 'ALL' &&
+      (selectedFamily ? selectedFamily !== globalFamily : !validFamilies.has(globalFamily))
+    ) {
       resolvedFamily = 'ALL';
       setGlobalFamily('ALL');
     }
-    if (globalPhase !== 'ALL' && !validPhases.has(globalPhase)) {
+    if (!phaseFilterHasMatch(validPhases, globalPhase)) {
       setGlobalPhase('ALL');
     }
     if (globalSide !== 'ALL' && !validSides.has(globalSide)) {
@@ -1167,7 +1280,7 @@ function App() {
     setGlobalPhase(nextPhase);
     if (nextPhase === 'ALL') return;
 
-    const phaseEntries = scopeCatalog.filter((item) => item.phase === nextPhase);
+    const phaseEntries = scopeCatalog.filter((item) => phaseInScope(item.phase, nextPhase));
     const validFamilies = new Set(phaseEntries.map((item) => item.family));
     const validModels = new Set(phaseEntries.map((item) => item.model));
     const validSides = new Set();
@@ -1202,7 +1315,7 @@ function App() {
         resolvedModel = 'ALL';
         setGlobalModel('ALL');
       }
-      if (globalPhase !== 'ALL' && !validPhases.has(globalPhase)) {
+      if (!phaseFilterHasMatch(validPhases, globalPhase)) {
         setGlobalPhase('ALL');
       }
       syncGateSelectionToScope(resolvedFamily, resolvedModel, nextSide);
@@ -1216,7 +1329,14 @@ function App() {
     if (globalProcess !== 'ALL' && !availableProcesses.includes(globalProcess)) setGlobalProcess('ALL');
   }, [availableProcesses, globalProcess]);
 
+  // A deleted product (or a scope change that hides it) must not leave the Model
+  // filter pointing at a code the registry no longer offers.
+  useEffect(() => {
+    if (globalModel !== 'ALL' && !availableModels.includes(globalModel)) setGlobalModel('ALL');
+  }, [availableModels, globalModel]);
+
   const handleResetGlobalFilters = () => {
+    setGlobalPortfolio('NPI');
     setGlobalFamily('ALL');
     setGlobalModel('ALL');
     setGlobalPhase('ALL');
@@ -1225,6 +1345,7 @@ function App() {
   };
 
   const isGlobalFilterActive =
+    globalPortfolio !== 'NPI' ||
     globalFamily !== 'ALL' ||
     globalModel !== 'ALL' ||
     globalPhase !== 'ALL' ||
@@ -1234,9 +1355,10 @@ function App() {
   const scopedProjects = useMemo(() => {
     return projects
       .filter((p) => {
+        if (modelPortfolio(p.model) !== globalPortfolio) return false;
         if (globalFamily !== 'ALL' && getFamilyGroup(p) !== globalFamily) return false;
         if (globalModel !== 'ALL' && p.model !== globalModel) return false;
-        if (globalPhase !== 'ALL' && p.phase !== globalPhase) return false;
+        if (!phaseInScope(p.phase, globalPhase)) return false;
         if (globalSide !== 'ALL' && !getSideList(p.side).includes(globalSide)) return false;
         return true;
       })
@@ -1247,14 +1369,15 @@ function App() {
         const pB = PHASE_ORDER.indexOf(b.phase) === -1 ? 99 : PHASE_ORDER.indexOf(b.phase);
         return pA - pB;
       });
-  }, [projects, globalFamily, globalModel, globalPhase, globalSide]);
+  }, [projects, globalPortfolio, globalFamily, globalModel, globalPhase, globalSide]);
 
   const scopedProductionRecords = useMemo(() => {
     return productionRecords
       .filter((r) => {
+        if (modelPortfolio(r.model) !== globalPortfolio) return false;
         if (globalFamily !== 'ALL' && getFamilyGroup(r) !== globalFamily) return false;
         if (globalModel !== 'ALL' && r.model !== globalModel) return false;
-        if (globalPhase !== 'ALL' && r.phase !== globalPhase) return false;
+        if (!phaseInScope(r.phase, globalPhase)) return false;
         if (globalSide !== 'ALL' && !getSideList(r.side).includes(globalSide)) return false;
         if (globalProcess !== 'ALL' && getProcessStep(r) !== globalProcess) return false;
         return true;
@@ -1270,7 +1393,7 @@ function App() {
         if (sA !== sB) return sA - sB;
         return a.config.localeCompare(b.config, undefined, { numeric: true });
       });
-  }, [productionRecords, globalFamily, globalModel, globalPhase, globalSide, globalProcess]);
+  }, [productionRecords, globalPortfolio, globalFamily, globalModel, globalPhase, globalSide, globalProcess]);
 
   const scopedTasks = useMemo(() => {
     const allowedIds = new Set(scopedProjects.map((p) => p.id));
@@ -1281,33 +1404,66 @@ function App() {
 
   const scopedCpkRecords = useMemo(() => {
     return cpkRecords.filter((r) => {
+      if (modelPortfolio(r.model) !== globalPortfolio) return false;
       if (globalFamily !== 'ALL' && getFamilyGroup(r) !== globalFamily) return false;
       if (globalModel !== 'ALL' && r.model !== globalModel) return false;
-      if (globalPhase !== 'ALL' && r.phase !== globalPhase) return false;
+      if (!phaseInScope(r.phase, globalPhase)) return false;
       if (globalSide !== 'ALL' && r.side !== globalSide) return false;
       return true;
     });
-  }, [cpkRecords, globalFamily, globalModel, globalPhase, globalSide]);
+  }, [cpkRecords, globalPortfolio, globalFamily, globalModel, globalPhase, globalSide]);
 
   const scopedCostProjects = useMemo(() => {
     return costProjects.filter((c) => {
+      if (modelPortfolio(c.model) !== globalPortfolio) return false;
       if (globalFamily !== 'ALL' && getFamilyGroup(c) !== globalFamily) return false;
       if (globalModel !== 'ALL' && c.model !== globalModel) return false;
-      if (globalPhase !== 'ALL' && c.phase !== globalPhase) return false;
+      if (!phaseInScope(c.phase, globalPhase)) return false;
       if (globalSide !== 'ALL' && !getSideList(c.side).includes(globalSide)) return false;
       return true;
     });
-  }, [costProjects, globalFamily, globalModel, globalPhase, globalSide]);
+  }, [costProjects, globalPortfolio, globalFamily, globalModel, globalPhase, globalSide]);
 
   const scopedCustomerFeedback = useMemo(() => {
     return customerFeedback.filter((cf) => {
+      if (modelPortfolio(cf.model) !== globalPortfolio) return false;
       if (globalFamily !== 'ALL' && getFamilyGroup(cf) !== globalFamily) return false;
       if (globalModel !== 'ALL' && cf.model !== globalModel) return false;
-      if (globalPhase !== 'ALL' && cf.phase !== globalPhase) return false;
+      if (!phaseInScope(cf.phase, globalPhase)) return false;
       if (globalSide !== 'ALL' && !getSideList(cf.side).includes(globalSide)) return false;
       return true;
     });
-  }, [customerFeedback, globalFamily, globalModel, globalPhase, globalSide]);
+  }, [customerFeedback, globalPortfolio, globalFamily, globalModel, globalPhase, globalSide]);
+
+  const scopedMasterSpecs = useMemo(
+    () => masterSpecs.filter((s) => !s.model || modelPortfolio(s.model) === globalPortfolio),
+    [masterSpecs, globalPortfolio]
+  );
+
+  // Product Master is the model/family registry. Count every place a model is
+  // referenced before allowing a delete or a model rename.
+  const productUsageByModel = useMemo(
+    () =>
+      countProductUsage({
+        projects,
+        productionRecords,
+        cpkRecords,
+        costProjects,
+        customerFeedback,
+        masterSpecs,
+        teamMembers
+      }),
+    [projects, productionRecords, cpkRecords, costProjects, customerFeedback, masterSpecs, teamMembers]
+  );
+
+  // Only the selected portfolio's dossiers reach a module.
+  const scopedGateRecords = useMemo(() => {
+    const next = {};
+    scopedProjects.forEach((project) => {
+      if (gateRecords[project.id]) next[project.id] = gateRecords[project.id];
+    });
+    return next;
+  }, [gateRecords, scopedProjects]);
 
   // Scope-wide counters still consumed by the top bar and the sidebar badges.
   const globalStats = useMemo(() => {
@@ -1337,6 +1493,65 @@ function App() {
     return { pendingSignOffs, openTasks, activeLineCount };
   }, [scopedProjects, gateRecords, scopedTasks, globalSide]);
 
+  // The queue behind the KPI trust badges: missing, contradictory and stale
+  // records in the active scope, each naming the module that repairs it.
+  const [myActionOwner, setMyActionOwner] = useState('ALL');
+
+  const dataQuality = useMemo(
+    () =>
+      dataQualityQueue(
+        {
+          projects: scopedProjects,
+          productionRecords: scopedProductionRecords,
+          cpkRecords: scopedCpkRecords,
+          masterSpecs: scopedMasterSpecs,
+          tasks: scopedTasks,
+          gateRecords: scopedGateRecords,
+          customerFeedback: scopedCustomerFeedback,
+          costProjects: scopedCostProjects,
+          products
+        },
+        { today: todayIso() }
+      ),
+    [
+      scopedProjects,
+      scopedProductionRecords,
+      scopedCpkRecords,
+      scopedMasterSpecs,
+      scopedTasks,
+      scopedGateRecords,
+      scopedCustomerFeedback,
+      scopedCostProjects,
+      products
+    ]
+  );
+
+  // MIH risk and capacity forecast for the active scope: one row per line with
+  // the predicted slip and the drivers behind it, plus the owners whose remaining
+  // work does not fit the horizon.
+  const mihForecast = useMemo(
+    () =>
+      buildMihForecast(
+        {
+          projects: scopedProjects,
+          tasks: scopedTasks,
+          gateRecords: scopedGateRecords,
+          productionRecords: scopedProductionRecords,
+          teamMembers,
+          scheduleOverrides
+        },
+        { today: todayIso() }
+      ),
+    [
+      scopedProjects,
+      scopedTasks,
+      scopedGateRecords,
+      scopedProductionRecords,
+      teamMembers,
+      scheduleOverrides
+    ]
+  );
+
   // ============================================================================
   // MUTATION & INTERACTION HANDLERS
   // ============================================================================
@@ -1347,6 +1562,46 @@ function App() {
     } else {
       setSidebarCollapsed((prev) => !prev);
     }
+  };
+
+  const handleSaveProduct = (form, existingId = null) => {
+    const result = saveProductToRegistry(products, form, existingId, productUsageByModel);
+    if (!result.ok) return { ok: false, error: result.error };
+
+    setProducts(result.products);
+    syncModelFamilyGroups(result.products);
+
+    if (result.familyChanged) {
+      const updated = applyProductFamilyToWorkspace(
+        { projects, productionRecords, cpkRecords, costProjects, customerFeedback },
+        result.product.model,
+        result.product.familyGroup
+      );
+      setProjects(updated.projects);
+      setProductionRecords(updated.productionRecords);
+      setCpkRecords(updated.cpkRecords);
+      setCostProjects(updated.costProjects);
+      setCustomerFeedback(updated.customerFeedback);
+    }
+
+    showToast(
+      result.existing
+        ? `Updated product ${result.product.model} (${result.product.familyGroup})`
+        : `Added product ${result.product.model} (${result.product.familyGroup})`
+    );
+    return { ok: true };
+  };
+
+  const handleDeleteProduct = (product) => {
+    const result = deleteProductFromRegistry(products, product, productUsageByModel);
+    if (!result.ok) {
+      showToast(result.error, 'warning');
+      return false;
+    }
+    setProducts(result.products);
+    syncModelFamilyGroups(result.products);
+    showToast(`Deleted product ${result.product.model}`);
+    return true;
   };
 
   const handleCreateProject = (form) => {
@@ -1379,7 +1634,7 @@ function App() {
       model: modelCode,
       familyGroup: form.familyGroup || 'MB14"',
       family: form.family || `${form.familyGroup || 'MB14"'} FDB Fan Module`,
-      phase: form.phase || 'EVT',
+      phase: canonicalProgramPhase(modelCode, form.phase),
       side: form.side || 'RHS & LHS',
       spec: 'DC5V · Standard FDB Fan Spec',
       lineSpec: 'FFM Auto Line @ 340 UPH · HC 34.25',
@@ -1423,7 +1678,7 @@ function App() {
     const firstLine = getLineVariantsForProject(newProj)[0]?.key || 'ME11-RHS';
     setSelectedLineKey(firstLine);
     setSelectedLineKeys([firstLine]);
-    setNewProjectModalOpen(false);
+    setProgramFormKey((key) => key + 1);
     showToast(`Initialized NPI program ${newProj.model} ${newProj.phase}`);
   };
 
@@ -1733,7 +1988,7 @@ function App() {
       id: `REC-${form.model.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${Date.now().toString().slice(-4)}`,
       model: form.model.toUpperCase().trim(),
       familyGroup: form.familyGroup || 'MB14"',
-      phase: form.phase || 'EVT',
+      phase: canonicalProgramPhase(form.model, form.phase),
       station: form.station || PRODUCTION_STATIONS[3],
       config: form.config.toUpperCase().trim() || 'ME11',
       side: form.side || 'RHS',
@@ -1778,7 +2033,10 @@ function App() {
         return;
       }
       if (plan.accepted.length > 0) {
-        setProductionRecords((prev) => [...plan.accepted, ...prev]);
+        setProductionRecords((prev) => [
+          ...plan.accepted.map(withCanonicalModelPhase),
+          ...prev
+        ]);
       }
       if (plan.rejected.length > 0) {
         const report = productionDropReport(plan.rejected);
@@ -1821,7 +2079,7 @@ function App() {
       id,
       model: form.model.toUpperCase().trim(),
       familyGroup: form.familyGroup || 'MB14"',
-      phase: form.phase || 'EVT',
+      phase: canonicalProgramPhase(form.model, form.phase),
       station: form.station || PRODUCTION_STATIONS[3],
       config: form.config.toUpperCase().trim() || 'ME11',
       side: form.side || 'RHS',
@@ -2128,7 +2386,7 @@ function App() {
       title: form.title.trim(),
       model: form.model.toUpperCase().trim() || 'X4151',
       familyGroup: form.familyGroup || inferFamilyFromModel(form.model),
-      phase: form.phase || 'EVT',
+      phase: canonicalProgramPhase(form.model, form.phase),
       side: form.side || 'RHS & LHS',
       category: form.category || COST_SAVING_CATEGORIES[0],
       vendor: form.vendor.trim() || 'NMB Internal',
@@ -2389,9 +2647,11 @@ function App() {
       model: cleanModel,
       familyGroup: form.familyGroup || inferFamilyFromModel(cleanModel),
       dateCode: (form.dateCode || '').trim(),
-      build: form.build || 'NPI',
-      phase: form.phase || (form.build === 'MP' ? 'MP' : 'EVT'),
-      buildConfig: (form.buildConfig || form.phase || 'EVT').trim(),
+      build: isActiveNpiModel(cleanModel) ? form.build || 'NPI' : 'MP',
+      phase: canonicalProgramPhase(cleanModel, form.phase || (form.build === 'MP' ? 'MP' : 'EVT')),
+      buildConfig: isActiveNpiModel(cleanModel)
+        ? (form.buildConfig || form.phase || 'EVT').trim()
+        : 'MP',
       side: form.side || (cleanModel === 'X3784' ? 'Single' : 'RHS & LHS'),
       issueCategory: form.issueCategory || 'Function',
       issueItem: (form.issueItem || '').trim(),
@@ -2985,6 +3245,29 @@ function App() {
     );
   };
 
+  // Opens the record behind a My Actions row: the gate dossier for a hold or an
+  // owed signature, the task drawer for a task, the case form for a case, and the
+  // module that owns the record for a data gap.
+  const openMyAction = (item) => {
+    if (!item) return;
+    if (item.kind === 'task' && item.recordId) {
+      setActiveView('tasks');
+      setActiveTaskDrawerId(item.recordId);
+      return;
+    }
+    if (item.kind === 'case' && item.recordId) {
+      const record = scopedCustomerFeedback.find((row) => String(row.id) === item.recordId);
+      setActiveView('feedback');
+      if (record) setEditingFeedback(record);
+      return;
+    }
+    if ((item.kind === 'gate' || item.kind === 'signature') && item.gateId) {
+      navigateToGate(item.projectId, item.gateId, item.lineKey || null);
+      return;
+    }
+    setActiveView(item.view || 'quality');
+  };
+
   const navigateToGate = (projectId, gateId, lineKey = null) => {
     const proj = projectMap[projectId] || projects[0];
     const defaultLine = lineKey || getLineVariantsForProject(proj)[0]?.key || 'ME11-RHS';
@@ -2996,12 +3279,50 @@ function App() {
     setMobileMenuOpen(false);
   };
 
+  // One queue over every source of open work — blocked gates, owed signatures,
+  // overdue tasks, stale customer cases and the data-quality gaps — in the order
+  // they should be picked up. An owner narrows it so the summary describes the rows
+  // actually shown rather than everyone's.
+  const myActions = useMemo(
+    () =>
+      myActionsQueue(
+        {
+          projects: scopedProjects,
+          tasks: scopedTasks,
+          customerFeedback: scopedCustomerFeedback,
+          gateRecords: scopedGateRecords,
+          dataQuality
+        },
+        {
+          today: todayIso(),
+          owner: myActionOwner === 'ALL' ? '' : myActionOwner,
+          scheduleFor: (project, lineKey) => lineGateSchedule(project, lineKey, scheduleOverrides)
+        }
+      ),
+    [
+      scopedProjects,
+      scopedTasks,
+      scopedCustomerFeedback,
+      scopedGateRecords,
+      dataQuality,
+      myActionOwner,
+      scheduleOverrides
+    ]
+  );
+
   const navItems = [
     { id: 'overview', label: 'Program Overview', icon: LayoutDashboard },
-    { id: 'projects', label: 'NPI Projects & Matrix', icon: FolderKanban },
+    {
+      id: 'actions',
+      label: 'My Actions',
+      icon: Flag,
+      badge: myActions.summary.urgent
+    },
+    { id: 'projects', label: `${globalPortfolio} Projects & Matrix`, icon: FolderKanban },
+    { id: 'setup', label: 'Program Setup & Products', icon: SlidersHorizontal },
     { id: 'timeline', label: 'Build Timeline (Gantt)', icon: Calendar },
     { id: 'tasks', label: 'Tasks & AIL', icon: CheckSquare, badge: globalStats.openTasks },
-    { id: 'gates', label: 'NPI Gate Sign-Off', icon: ShieldCheck, badge: globalStats.pendingSignOffs },
+    { id: 'gates', label: `${globalPortfolio} Gate Sign-Off`, icon: ShieldCheck, badge: globalStats.pendingSignOffs },
     { id: 'ledger', label: 'Sign-off Ledger', icon: FileSpreadsheet },
     { id: 'cpk', label: 'Cpk & Master Specs', icon: BarChart3 },
     { id: 'costs', label: 'Projects & Cost Saving', icon: DollarSign, badge: scopedCostProjects.length },
@@ -3014,21 +3335,37 @@ function App() {
       ).length
     },
     { id: 'production', label: 'Production Records', icon: Database },
+    {
+      id: 'quality',
+      label: 'Data Quality',
+      icon: AlertTriangle,
+      badge: dataQuality.summary.total
+    },
+    {
+      id: 'forecast',
+      label: 'MIH Risk & Capacity',
+      icon: Clock,
+      badge: mihForecast.summary.atRisk
+    },
     { id: 'team', label: 'Team & Workload', icon: Users },
     { id: 'reports', label: 'Reports & Snapshots', icon: ClipboardCheck }
   ];
 
   const viewTitles = {
     overview: 'FFM Program Overview & Gate Dependency Matrix',
-    projects: 'NPI Projects & Multi-Vendor Split Build Matrix',
-    timeline: 'NPI Build Timeline & Milestone Gantt',
+    actions: 'My Actions — Every Owed Signature, Hold, Late Task, Stale Case & Data Gap',
+    projects: `${globalPortfolio} Projects & Multi-Vendor Split Build Matrix`,
+    setup: 'Initialize NPI Program (PEN-81-0002) & Product Master',
+    timeline: `${globalPortfolio} Build Timeline & Milestone Gantt`,
     tasks: 'FDB Fan Assembly Tasks & AIL (Action Item List)',
-    gates: 'NPI Gate Pass Sign-Off Center (PEN-81-0002 Rev B)',
+    gates: `${globalPortfolio} Gate Pass Sign-Off Center (PEN-81-0002 Rev B)`,
     ledger: 'Gate Decision Ledger (SignOffLog) & State Reconciliation',
     cpk: 'Process Capability (Cpk) & Master Specifications',
     costs: 'FFM Projects & Cost Saving Portfolio (VA/VE · Yield · HC)',
     feedback: 'FFM Customer Feedback, FA & 8D FACA Tracker (Y2026)',
     production: 'Production Records (Yield, UPH & Efficiency)',
+    quality: 'Data Quality Queue & Source Provenance',
+    forecast: 'MIH Risk & Capacity Forecast (Predicted Slip, Drivers & Owner Load)',
     team: 'Team Members, Product Assignment & Workload',
     reports: 'Executive KPI Report & Snapshot Analysis'
   };
@@ -3050,6 +3387,7 @@ function App() {
       ariaLabel: 'Model filter',
       value: globalModel,
       options: availableModels,
+      groupByFamily: true,
       onChange: handleGlobalModelChange
     },
     {
@@ -3162,16 +3500,19 @@ function App() {
             );
           })}
 
-          {!sidebarCollapsed && (
+          {!sidebarCollapsed && globalPortfolio === 'NPI' && (
             <div className="pt-5 mt-5 border-t border-slate-800/80 space-y-1.5">
               <div className="px-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                Active EVT Programs
+                Active NPI Programs
               </div>
-              {projects.map((p) => (
+              {activeNpiProjects.map((p) => (
                 <button
                   key={p.id}
                   type="button"
-                  onClick={() => navigateToGate(p.id, p.currentGateId)}
+                  onClick={() => {
+                    setGlobalPortfolio('NPI');
+                    navigateToGate(p.id, p.currentGateId);
+                  }}
                   className="w-full px-3 py-2 rounded-lg text-left hover:bg-slate-900 dark:hover:bg-slate-700 transition-colors flex items-center justify-between gap-2"
                 >
                   <div className="min-w-0">
@@ -3359,7 +3700,11 @@ function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setNewProjectModalOpen(true)}
+                onClick={() => {
+                  setSetupTab('initialize');
+                  setActiveView('setup');
+                  setMobileMenuOpen(false);
+                }}
                 className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" />
@@ -3376,6 +3721,27 @@ function App() {
                 <span>Scope</span>
               </span>
 
+              <div className="col-span-2 inline-flex w-full items-center justify-between gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1 shadow-2xs dark:border-slate-800 dark:bg-slate-900 sm:col-auto sm:w-auto sm:justify-start">
+                <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Portfolio</span>
+                <div className="inline-flex rounded-md bg-slate-100 p-0.5 dark:bg-slate-800">
+                  {['NPI', 'MP'].map((portfolio) => (
+                    <button
+                      key={portfolio}
+                      type="button"
+                      aria-pressed={globalPortfolio === portfolio}
+                      onClick={() => handleGlobalPortfolioChange(portfolio)}
+                      className={`rounded px-2 py-0.5 text-[11px] font-bold transition-colors ${
+                        globalPortfolio === portfolio
+                          ? 'bg-blue-600 text-white shadow-2xs'
+                          : 'text-slate-600 hover:bg-white dark:text-slate-300 dark:hover:bg-slate-700'
+                      }`}
+                    >
+                      {portfolio}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {scopeFilters.map((filter) => (
                 <React.Fragment key={filter.key}>
                   {filter.key !== 'family' && (
@@ -3388,6 +3754,7 @@ function App() {
                     options={filter.options}
                     onChange={filter.onChange}
                     fullWidthOnMobile={Boolean(filter.fullWidthOnMobile)}
+                    groupByFamily={Boolean(filter.groupByFamily)}
                   />
                 </React.Fragment>
               ))}
@@ -3406,7 +3773,7 @@ function App() {
 
             <div className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums flex items-center gap-3">
               <span>
-                NPI Scope: <strong className="text-slate-800 dark:text-slate-200">{scopedProjects.length}</strong> prog ·{' '}
+                {globalPortfolio} Scope: <strong className="text-slate-800 dark:text-slate-200">{scopedProjects.length}</strong> prog ·{' '}
                 <strong className="text-slate-800 dark:text-slate-200">{globalStats.activeLineCount}</strong> lines
               </span>
               <span className="text-slate-300 dark:text-slate-300">|</span>
@@ -3425,20 +3792,47 @@ function App() {
                 return (
                   <OverviewView
                     projects={scopedProjects}
+                    portfolio={globalPortfolio}
                     records={scopedProductionRecords}
                     tasks={scopedTasks}
-                    gateRecords={gateRecords}
-                    costProjects={costProjects}
-                    customerFeedback={customerFeedback}
+                    gateRecords={scopedGateRecords}
+                    costProjects={scopedCostProjects}
+                    customerFeedback={scopedCustomerFeedback}
                     globalSide={globalSide}
-                    onOpenKpiDrilldown={(key, variant) =>
-                      setKpiDrilldown({ key, variant: variant || 'ALL' })
+                    onOpenKpiDrilldown={(key, variant, range, print) =>
+                      setKpiDrilldown({
+                        key,
+                        variant: variant || 'ALL',
+                        range: range || '90D',
+                        print: Boolean(print)
+                      })
                     }
                     onOpenGate={navigateToGate}
                     onSelectTask={(id) => setActiveTaskDrawerId(id)}
                     onSwitchView={setActiveView}
                     masterSpecs={masterSpecs}
                     cpkRecords={scopedCpkRecords}
+                    revision={cloudSync.revision}
+                    lastSavedAt={cloudSync.lastSavedAt}
+                    lastSavedBy={cloudSync.lastSavedBy}
+                    dataQualityCount={dataQuality.summary.total}
+                  />
+                );
+              case 'actions':
+                return (
+                  <MyActionsView
+                    queue={myActions}
+                    owner={myActionOwner}
+                    onOwnerChange={setMyActionOwner}
+                    scopeLabel={`${globalPortfolio} portfolio${
+                      globalFamily !== 'ALL' ? ` · ${globalFamily}` : ''
+                    }${globalModel !== 'ALL' ? ` · ${globalModel}` : ''}${
+                      globalPhase !== 'ALL' ? ` · ${globalPhase}` : ''
+                    }`}
+                    revision={cloudSync.revision}
+                    lastSavedAt={cloudSync.lastSavedAt}
+                    onOpenAction={openMyAction}
+                    onSwitchView={setActiveView}
                   />
                 );
               case 'projects':
@@ -3461,11 +3855,24 @@ function App() {
                     canDeletePrograms={projects.length > 1}
                   />
                 );
+              case 'setup':
+                return (
+                  <ProgramSetupView
+                    activeTab={setupTab}
+                    onTabChange={setSetupTab}
+                    onCreateProgram={handleCreateProject}
+                    formKey={programFormKey}
+                    products={products}
+                    usageByModel={productUsageByModel}
+                    onSaveProduct={handleSaveProduct}
+                    onDeleteProduct={handleDeleteProduct}
+                  />
+                );
               case 'timeline':
                 return (
                   <BuildTimelineGanttView
                     projects={scopedProjects}
-                    gateRecords={gateRecords}
+                    gateRecords={scopedGateRecords}
                     globalSide={globalSide}
                     scheduleOverrides={scheduleOverrides}
                     onOpenGate={navigateToGate}
@@ -3485,15 +3892,21 @@ function App() {
                   />
                 );
               case 'ledger':
-                return <SignOffLedgerView gateRecords={gateRecords} projects={projects} />;
+                return <SignOffLedgerView gateRecords={scopedGateRecords} projects={scopedProjects} />;
               case 'gates':
+                if (scopedProjects.length === 0) {
+                  return (
+                    <div className="rounded-xl border border-slate-200 bg-white p-10 text-center text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
+                      No {globalPortfolio} programs match the current scope. Reset filters above to view the gate dossier.
+                    </div>
+                  );
+                }
                 return (
                   <GateSignOffView
-                    projects={scopedProjects.length > 0 ? scopedProjects : projects}
+                    projects={scopedProjects}
                     selectedProject={
                       scopedProjects.find((p) => p.id === selectedProject.id) ||
-                      scopedProjects[0] ||
-                      selectedProject
+                      scopedProjects[0]
                     }
                     onSelectProject={(id) => {
                       setSelectedProjectId(id);
@@ -3517,7 +3930,7 @@ function App() {
                     }}
                     selectedGateId={selectedGateId}
                     onSelectGate={setSelectedGateId}
-                    gateRecords={gateRecords}
+                    gateRecords={scopedGateRecords}
                     scheduleOverrides={scheduleOverrides}
                     tasks={tasks}
                     onOpenGate={navigateToGate}
@@ -3526,8 +3939,7 @@ function App() {
                       setSignOffModal({
                         projectId: (
                           scopedProjects.find((p) => p.id === selectedProject.id) ||
-                          scopedProjects[0] ||
-                          selectedProject
+                          scopedProjects[0]
                         ).id,
                         lineKeys: targetKeys,
                         gateId: selectedGateId,
@@ -3542,7 +3954,7 @@ function App() {
               case 'cpk':
                 return (
                   <CpkMasterSpecsView
-                    masterSpecs={masterSpecs}
+                    masterSpecs={scopedMasterSpecs}
                     cpkRecords={scopedCpkRecords}
                     uploadHistory={cpkUploadHistory}
                     lastUploadBatch={lastUploadBatch}
@@ -3589,13 +4001,37 @@ function App() {
                     onImportFile={handleImportProductionRecords}
                   />
                 );
+              case 'forecast':
+                return (
+                  <MihForecastView
+                    forecast={mihForecast}
+                    scopeLabel={`${globalPortfolio} portfolio${
+                      globalFamily !== 'ALL' ? ` · ${globalFamily}` : ''
+                    }${globalModel !== 'ALL' ? ` · ${globalModel}` : ''}`}
+                    revision={cloudSync.revision}
+                    lastSavedAt={cloudSync.lastSavedAt}
+                    onSwitchView={setActiveView}
+                  />
+                );
+              case 'quality':
+                return (
+                  <DataQualityView
+                    queue={dataQuality}
+                    scopeLabel={`${globalPortfolio} portfolio${
+                      globalFamily !== 'ALL' ? ` · ${globalFamily}` : ''
+                    }${globalModel !== 'ALL' ? ` · ${globalModel}` : ''}`}
+                    revision={cloudSync.revision}
+                    lastSavedAt={cloudSync.lastSavedAt}
+                    onSwitchView={setActiveView}
+                  />
+                );
               case 'team':
                 return (
                   <TeamMembersView
                     members={teamMembers}
-                    projects={projects}
-                    tasks={tasks}
-                    gateRecords={gateRecords}
+                    projects={scopedProjects}
+                    tasks={scopedTasks}
+                    gateRecords={scopedGateRecords}
                     scheduleOverrides={scheduleOverrides}
                     onOpenNew={() => setNewTeamMemberModalOpen(true)}
                     onEdit={(member) => setEditingTeamMember(member)}
@@ -3612,9 +4048,10 @@ function App() {
                     records={scopedProductionRecords}
                     costProjects={scopedCostProjects}
                     customerFeedback={scopedCustomerFeedback}
-                    gateRecords={gateRecords}
+                    gateRecords={scopedGateRecords}
                     scopeLabel={
                       [
+                        globalPortfolio,
                         globalFamily !== 'ALL' ? globalFamily : '',
                         globalModel !== 'ALL' ? globalModel : '',
                         globalPhase !== 'ALL' ? globalPhase : '',
@@ -3656,21 +4093,16 @@ function App() {
         <KpiDeepDiveModal
           kpiKey={kpiDrilldown.key}
           initialVariant={kpiDrilldown.variant}
+          initialRange={kpiDrilldown.range}
+          printOnOpen={kpiDrilldown.print}
           projects={scopedProjects}
           records={scopedProductionRecords}
-          gateRecords={gateRecords}
+          gateRecords={scopedGateRecords}
           globalSide={globalSide}
           scopeFilters={scopeFilters}
           costProjects={scopedCostProjects}
           customerFeedback={scopedCustomerFeedback}
           onClose={() => setKpiDrilldown(null)}
-        />
-      )}
-
-      {newProjectModalOpen && (
-        <NewProjectModal
-          onClose={() => setNewProjectModalOpen(false)}
-          onSubmit={handleCreateProject}
         />
       )}
 
@@ -3813,7 +4245,7 @@ function App() {
         <CpkImportPipelineModal
           masterSpecs={masterSpecs}
           defaultModel={globalModel !== 'ALL' ? globalModel : selectedProject?.model || 'X4151'}
-          defaultPhase={globalPhase !== 'ALL' ? globalPhase : 'EVT'}
+          defaultPhase={globalPhase !== 'ALL' && globalPhase !== NPI_PHASE_FILTER ? globalPhase : 'EVT'}
           defaultSide={globalSide !== 'ALL' ? globalSide : 'RHS'}
           onClose={() => setCpkImportModalOpen(false)}
           onImport={handleImportCpkRecords}
@@ -3826,7 +4258,7 @@ function App() {
           initialItem={editingCostProject}
           defaultModel={globalModel !== 'ALL' ? globalModel : selectedProject?.model || 'X4151'}
           defaultFamily={globalFamily !== 'ALL' ? globalFamily : 'MB14"'}
-          defaultPhase={globalPhase !== 'ALL' ? globalPhase : 'EVT'}
+          defaultPhase={globalPhase !== 'ALL' && globalPhase !== NPI_PHASE_FILTER ? globalPhase : 'EVT'}
           onClose={() => {
             setNewCostModalOpen(false);
             setEditingCostProject(null);

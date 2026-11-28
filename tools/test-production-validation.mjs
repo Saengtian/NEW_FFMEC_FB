@@ -34,6 +34,7 @@ const source = readFileSync(join(ROOT, "Part1_Data.html"), "utf8");
 const DECLARATIONS = [
   /const PRODUCTION_RECORD_ISSUES = \{[\s\S]*?\n\};/,
   /function computeProductionMetrics\([\s\S]*?\n}/,
+  /function productionRateTrend\([\s\S]*?\n}/,
   /function productionLineKey\([\s\S]*?\n}/,
   /function productionRecordGoodUnits\([\s\S]*?\n}/,
   /function productionRecordIssues\([\s\S]*?\n}/,
@@ -67,7 +68,7 @@ const api = new Function(
     "return { PRODUCTION_RECORD_ISSUES, computeProductionMetrics, productionLineKey, " +
     "productionRecordGoodUnits, productionRecordIssues, productionRecordBlockingIssues, clampProductionDowntime, " +
     "sanitizeProductionRecords, productionDropReport, productionDropRowLines, productionDropMessage, " +
-    "productionDropSummary, productionRecordImportPlan, normalizeProductionDate, INITIAL_PRODUCTION_RECORDS };"
+    "productionDropSummary, productionRecordImportPlan, normalizeProductionDate, productionRateTrend, INITIAL_PRODUCTION_RECORDS };"
 )();
 
 const {
@@ -82,6 +83,7 @@ const {
   productionDropSummary,
   productionRecordImportPlan,
   normalizeProductionDate,
+  productionRateTrend,
   clampProductionDowntime,
   sanitizeProductionRecords,
   INITIAL_PRODUCTION_RECORDS,
@@ -468,6 +470,42 @@ check("an empty or non-array load is an empty list, not an error", () => {
     assert.deepEqual(cleaned.dropped, []);
     assert.equal(cleaned.repaired, 0);
   });
+});
+
+check("the rate trend measures fallout against input and salvage against fallout", () => {
+  const points = productionRateTrend([
+    { date: "2026-01-02", input: 100, fallout: 5, salvage: 2 },
+    { date: "2026-01-01", input: 200, fallout: 20, salvage: 10 },
+    { date: "2026-01-02", input: 100, fallout: 5, salvage: 3 }
+  ]);
+  assert.deepEqual(points.map((point) => point.date), ["2026-01-01", "2026-01-02"]);
+  assert.equal(points[0].falloutPct, 10, "fallout of input");
+  assert.equal(points[0].salvagePct, 50, "half the fallout recovered, not 5% of input");
+  assert.equal(points[1].input, 200);
+  assert.equal(points[1].falloutPct, 5);
+  assert.equal(points[1].salvagePct, 50, "5 recovered of 10 fallout");
+});
+
+check("a single-day trend keeps one point with the same percentages", () => {
+  const points = productionRateTrend([
+    { date: "2026-02-01", input: 250, fallout: 10, salvage: 5 }
+  ]);
+  assert.equal(points.length, 1);
+  assert.equal(points[0].date, "2026-02-01");
+  assert.equal(points[0].input, 250);
+  assert.equal(points[0].falloutPct, 4);
+  assert.equal(points[0].salvagePct, 50);
+});
+
+check("salvage recovery is zero without fallout, and never above 100%", () => {
+  const [clean] = productionRateTrend([{ date: "2026-03-01", input: 100, fallout: 0, salvage: 0 }]);
+  assert.equal(clean.salvagePct, 0, "no fallout means no recovery share, not a division by zero");
+  assert.equal(clean.falloutPct, 0);
+
+  // Salvage cannot exceed its fallout in a real record, but a hand-written row can
+  // say so; the chart must not plot 150%.
+  const [over] = productionRateTrend([{ date: "2026-03-02", input: 100, fallout: 4, salvage: 6 }]);
+  assert.equal(over.salvagePct, 100);
 });
 
 check("the cleaned list and the metric helpers agree on what a run is", () => {

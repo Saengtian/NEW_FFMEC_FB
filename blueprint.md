@@ -267,6 +267,12 @@ bun run build → clasp push -f (12 files) → clasp version "deploy <sha>"
 - Deployments are named by version; the staging and production deployment ids are pinned in
   `deploy.config.json`. The staging gate is not skippable: the production id is only updated after
   `tools/verify-deployment.mjs` reports that the staging URL parsed and mounted React.
+- The proof reads the frame tree, not the shell. Apps Script serves a shell page whose sandbox frame
+  (`userCodeAppPanel`) holds the app in a same-origin `userHtmlFrame`; `#root` is never in the top
+  document. The verifier walks every reachable document and takes `#root` from whichever one rendered. A
+  *visible* `#review-permissions-button` with nothing rendered is the only thing that counts as a
+  permission block — the shell ships that markup hidden, and names the frame `?createOAuthDialog=true`,
+  on every load.
 - The gate fails closed. It runs on a dedicated Chrome profile (`.preview/staging-browser`) because the
   web app is domain-only and `executeAs: USER_ACCESSING`; a signed-out browser exits `2` rather than
   passing, so an untested version can never reach production.

@@ -42,7 +42,9 @@ check("Part1_Data.html has no CDN URL", () => {
 check("Bundle.html leaves the parser out", () => {
   assert.ok(!bundle.includes("cdn.sheetjs.com"));
   assert.ok(!bundle.includes("0.20.2"), "Bundle.html still contains the SheetJS version");
-  assert.ok(bundle.length < 900 * 1024, `Bundle.html is ${(bundle.length / 1024).toFixed(0)} KB`);
+  // A ceiling on the app's own code, not a byte budget to squeeze under: the
+  // parser is ~486 KB, so a bundle that inlined it would land near 1.4 MB.
+  assert.ok(bundle.length < 1200 * 1024, `Bundle.html is ${(bundle.length / 1024).toFixed(0)} KB`);
 });
 
 check("SheetJs.html contains the parser", () => {

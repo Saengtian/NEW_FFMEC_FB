@@ -202,6 +202,19 @@ and the newest files, and *Back up now* fills the gap.
 
 ## 10. When something goes wrong
 
+**The page is blank, or shows "Authorization required — Review permissions"**
+The app is not broken and nothing needs to be reloaded twice. Google asks each account to allow the app
+once, because every save and gate signature is recorded against the person who made it. Press
+*Review permissions* → *Allow*; the app appears, and the same account is not asked again. If the consent
+screen has no *Allow* (wrong account, or a permission was denied), sign in with your
+**@minebea.co.th** account and open the link again — the app cannot run anonymously by design.
+
+The maintainer can confirm the state in one command: `bun run deploy:verify` exits `3` when the
+permission dialog is what is being served, and `0` once the app renders. The check reads the app frame
+inside Apps Script's sandbox (`userHtmlFrame`), not the shell around it, so a green result means the served
+bundle really mounted. The shell's hidden dialog markup and its `?createOAuthDialog=true` frame name appear
+on every load, granted or not, and are not a sign that a permission is missing.
+
 **"Save refused: could not read your Google Workspace identity"**
 Sign in with your Minebea account, grant the email permission, reload.
 

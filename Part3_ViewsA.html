@@ -3,6 +3,10 @@
 // VIEW 1: PROGRAM OVERVIEW & GATE DEPENDENCY MATRIX (MODEL > PHASE > SIDE > CONFIG)
 // ============================================================================
 
+// Apps Script strips a raw double slash inside a template literal, which would
+// truncate this file's one-line compiled bundle. Build the scheme instead.
+const HTTPS_PREFIX = "https:" + "/".repeat(2);
+
 function OverviewView({
   projects,
   records,
@@ -11,8 +15,13 @@ function OverviewView({
   costProjects,
   customerFeedback,
   globalSide,
+  portfolio = 'NPI',
   masterSpecs = [],
   cpkRecords = [],
+  revision = 0,
+  lastSavedAt = null,
+  lastSavedBy = '',
+  dataQualityCount = 0,
   onOpenKpiDrilldown,
   onOpenGate,
   onSelectTask,
@@ -92,6 +101,27 @@ function OverviewView({
     };
   }, [records]);
 
+  // Provenance for the scorecard: what each tile's source looks like right now, so
+  // a number nobody has refreshed since September cannot pass for current.
+  const claimsFyRows = useMemo(
+    () => (customerFeedback || []).filter((f) => isInKpiFiscalYear(f.feedbackDate)),
+    [customerFeedback]
+  );
+  const savingFyRows = useMemo(
+    () => (costProjects || []).filter((item) => isKpiFiscalYearTag(item.fyTarget)),
+    [costProjects]
+  );
+  const dataTrust = useMemo(
+    () =>
+      kpiDataTrust({
+        records,
+        feedbackRows: claimsFyRows,
+        savingRows: savingFyRows,
+        today: todayIso()
+      }),
+    [records, claimsFyRows, savingFyRows]
+  );
+
   // KPI scorecard: the six official targets measured against current data.
   const kpiTiles = useMemo(() => {
     // Every tile uses the MIH tile's fiscal window (1 Apr – 31 Mar) for the fiscal year
@@ -128,7 +158,7 @@ function OverviewView({
 
     // mode 'max' = at-or-above target is good, 'min' = at-or-below target is good.
     const build = (key, label, value, target, opts = {}) => {
-      const { unit = '', digits = 1, mode = 'max', format, targetFormat, footnote, drivers = [] } = opts;
+      const { unit = '', digits = 1, mode = 'max', format, targetFormat, footnote, drivers = [], trust = null } = opts;
       const fmt = format || ((v) => `${v.toFixed(digits)}${unit}`);
       const onTarget = mode === 'max' ? value >= target : value <= target;
       const headroom = mode === 'max' ? value - target : target - value;
@@ -144,7 +174,8 @@ function OverviewView({
         onTarget,
         barPct: Math.max(0, Math.min(100, target > 0 ? (value / target) * 100 : 0)),
         footnote,
-        drivers
+        drivers,
+        trust
       };
     };
 
@@ -158,12 +189,19 @@ function OverviewView({
     const mihFootnote = mihSummary.due > 0
       ? `${mihSummary.onTime} of ${mihSummary.due} due lines on time \u00b7 ${mihForecastText}`
       : `${mihSummary.nextDue ? `Next MIH due ${mihSummary.nextDue}` : 'No MIH date scheduled'} \u00b7 ${mihForecastText}`;
+    // MIH is fed by gate approvals, so its as-of is the newest dated approval.
+    const mihTrust = dataTrustFreshness({
+      asOf: dataTrustLatestDay(mihLines.map((line) => line.approvedAt)),
+      rows: mihSummary.tracked,
+      today: mihToday
+    });
     const mihTile = mihSummary.due > 0
       ? build('mih', 'Shipment to MIH Achieved', mihSummary.pct, KPI_TARGETS.mihAchievement, {
           digits: 0,
           unit: '%',
           footnote: mihFootnote,
-          drivers: mihDrivers
+          drivers: mihDrivers,
+          trust: mihTrust
         })
       : {
           key: 'mih',
@@ -175,13 +213,15 @@ function OverviewView({
           tone: 'neutral',
           barPct: 0,
           footnote: mihFootnote,
-          drivers: mihDrivers
+          drivers: mihDrivers,
+          trust: mihTrust
         };
 
     return [
       build('fpy', 'First Pass Yield (FPY)', kpiResults.fpy, KPI_TARGETS.fpy, {
         unit: '%',
         footnote: `${kpiResults.runs} runs in scope`,
+        trust: dataTrust.fpy,
         drivers: [
           { text: `${kpiResults.runs} production run${kpiResults.runs === 1 ? '' : 's'}`, ok: kpiResults.runs > 0 },
           { text: `${kpiResults.totalInput.toLocaleString()} units input`, ok: kpiResults.totalInput > 0 }
@@ -190,6 +230,7 @@ function OverviewView({
       build('fy', 'Final Yield (FY)', kpiResults.fy, KPI_TARGETS.fy, {
         unit: '%',
         footnote: `${kpiResults.totalInput.toLocaleString()} units input`,
+        trust: dataTrust.fy,
         drivers: [
           { text: `${Math.round(kpiResults.salvage).toLocaleString()} salvage pcs`, ok: kpiResults.runs > 0 },
           { text: `${kpiResults.totalInput.toLocaleString()} units input`, ok: kpiResults.totalInput > 0 }
@@ -198,6 +239,7 @@ function OverviewView({
       build('eff', 'Line Efficiency', kpiResults.efficiency, KPI_TARGETS.efficiency, {
         unit: '%',
         footnote: 'Input UPH vs net-good UPH',
+        trust: dataTrust.eff,
         drivers: [
           { text: `${kpiResults.plannedHr.toFixed(1)} h planned`, ok: kpiResults.plannedHr > 0 },
           { text: `${Math.round(kpiResults.downtimeMin).toLocaleString()} min downtime`, ok: kpiResults.downtimeMin > 0 }
@@ -208,6 +250,7 @@ function OverviewView({
         mode: 'min',
         targetFormat: (v) => `\u2264 ${v}`,
         footnote: kpiFiscalScopeLabel(),
+        trust: dataTrust.claims,
         drivers: [
           { text: `${feedbackFyCount} feedback case${feedbackFyCount === 1 ? '' : 's'}`, ok: feedbackFyCount > 0 },
           { text: `${claimsFy2026} claim${claimsFy2026 === 1 ? '' : 's'}`, ok: true }
@@ -216,19 +259,22 @@ function OverviewView({
       build('saving', `Annual Cost Saving FY${currentFiscalYear()}`, annualSavingThb, KPI_TARGETS.annualSavingThb, {
         format: formatThbCompact,
         footnote: `${fySavingProjects.length} saving initiatives tagged FY${currentFiscalYear()}`,
+        trust: dataTrust.saving,
         drivers: [
           { text: `${fySavingProjects.length} initiative${fySavingProjects.length === 1 ? '' : 's'} tagged FY${currentFiscalYear()}`, ok: fySavingProjects.length > 0 }
         ]
       }),
       mihTile
     ];
-  }, [kpiResults, costProjects, customerFeedback, projects, gateRecords, globalSide]);
+  }, [kpiResults, costProjects, customerFeedback, projects, gateRecords, globalSide, dataTrust]);
 
 
   // Active NPI build progress: units actually run vs the planned build quantity.
   const buildProgress = useMemo(
     () =>
-      projects.map((project) => {
+      projects
+        .filter((project) => isActiveNpiModel(project.model))
+        .map((project) => {
         const variants = getLineVariantsForProject(project).filter(
           (v) => globalSide === 'ALL' || v.side === globalSide
         );
@@ -274,6 +320,39 @@ function OverviewView({
               Weighted actuals from {kpiResults.runs} production run{kpiResults.runs === 1 ? '' : 's'} in the
               active scope ({kpiResults.totalInput.toLocaleString()} units input) against the FY{currentFiscalYear()} KPI targets
             </p>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] tabular-nums text-slate-500 dark:text-slate-400">
+              <span>
+                Source as of{' '}
+                <strong className="font-semibold text-slate-700 dark:text-slate-300">
+                  {dataTrust.fpy.asOf ? dataTrustDayText(dataTrust.fpy.asOf) : 'no production date'}
+                </strong>
+              </span>
+              <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                |
+              </span>
+              <span>
+                Sheet Rev #{Number(revision) || 0}
+                {lastSavedAt ? ` · saved ${dataTrustStamp(lastSavedAt)}` : ''}
+                {lastSavedBy ? ` by ${lastSavedBy}` : ''}
+              </span>
+              <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+                |
+              </span>
+              <button
+                type="button"
+                onClick={() => onSwitchView('quality')}
+                className={`inline-flex items-center gap-1 font-semibold underline-offset-2 hover:underline ${
+                  dataQualityCount > 0
+                    ? 'text-amber-700 dark:text-amber-300'
+                    : 'text-emerald-700 dark:text-emerald-300'
+                }`}
+              >
+                {dataQualityCount > 0
+                  ? `${dataQualityCount} data-quality issue${dataQualityCount === 1 ? '' : 's'} to review`
+                  : 'Data quality clean'}
+                <ArrowRight className="h-3 w-3" />
+              </button>
+            </div>
           </div>
           <button
             type="button"
@@ -342,6 +421,21 @@ function OverviewView({
               {tile.footnote && (
                 <div className="text-[10px] text-slate-400 dark:text-slate-400 mt-1 truncate" title={tile.footnote}>
                   {tile.footnote}
+                </div>
+              )}
+              {tile.trust && (
+                <div className="mt-1 flex items-center gap-1.5 text-[10px] tabular-nums">
+                  <span
+                    className={`shrink-0 rounded border px-1 py-0.5 font-semibold ${dataTrustBadgeClass(
+                      tile.trust.status
+                    )}`}
+                    title={`${tile.trust.source || 'Source'} ${tile.trust.asOfText}`}
+                  >
+                    {dataTrustBadgeText(tile.trust)}
+                  </span>
+                  <span className="truncate text-slate-400 dark:text-slate-400">
+                    {tile.trust.coverageText}
+                  </span>
                 </div>
               )}
             </button>
@@ -415,6 +509,7 @@ function OverviewView({
       </div>
 
       {/* Active NPI Build Progress — units run vs planned build quantity, gate cells passed */}
+      {portfolio === 'NPI' && (
       <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-200 dark:border-slate-800">
           <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">Active NPI Build Progress</h2>
@@ -497,6 +592,7 @@ function OverviewView({
           </div>
         )}
       </section>
+      )}
 
       {/* Bottom Two-Column Split: Production Records Snapshot + Open Escalations */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
@@ -973,17 +1069,22 @@ function SignOffLedgerView({ gateRecords, projects }) {
   }, [ledger, gateRecords, projects]);
 
   const programOptions = useMemo(() => {
+    const allowed = new Set(projects.map((p) => p.id));
     const seen = new Map();
     ledger.rows.forEach((row) => {
-      if (row.programId && !seen.has(row.programId)) seen.set(row.programId, row.program || row.programId);
+      if (row.programId && allowed.has(row.programId) && !seen.has(row.programId)) {
+        seen.set(row.programId, row.program || row.programId);
+      }
     });
     return Array.from(seen.entries()).sort((a, b) => String(a[1]).localeCompare(String(b[1])));
-  }, [ledger.rows]);
+  }, [ledger.rows, projects]);
 
   const visibleRows = useMemo(() => {
     const query = search.trim().toLowerCase();
+    const allowed = new Set(projects.map((p) => p.id));
     return ledger.rows
       .filter((row) => {
+        if (row.programId && !allowed.has(row.programId)) return false;
         if (programFilter !== 'ALL' && row.programId !== programFilter) return false;
         if (decisionFilter !== 'ALL' && row.decision !== decisionFilter) return false;
         if (!query) return true;
@@ -996,7 +1097,7 @@ function SignOffLedgerView({ gateRecords, projects }) {
           String(b.timestamp).localeCompare(String(a.timestamp)) ||
           (Number(b.revision) || 0) - (Number(a.revision) || 0)
       );
-  }, [ledger.rows, programFilter, decisionFilter, search]);
+  }, [ledger.rows, projects, programFilter, decisionFilter, search]);
 
   const handleExport = () =>
     triggerCsvDownload(`FFM-signoff-ledger_${todayIso()}.csv`, signOffLedgerCsv(visibleRows));
@@ -3082,7 +3183,7 @@ function GateSignOffView({
     const url = evidenceUrl.trim();
     if (!label || !url) return;
     if (!/^https?:\/\//i.test(url)) {
-      setEvidenceError('Paste the full link, starting with https://');
+      setEvidenceError('Paste the full link, starting with ' + HTTPS_PREFIX);
       return;
     }
     onAddEvidence(selectedProject.id, validKeys, selectedGateId, { label, url });
@@ -3721,7 +3822,7 @@ function GateSignOffView({
                     type="url"
                     value={evidenceUrl}
                     onChange={(e) => setEvidenceUrl(e.target.value)}
-                    placeholder="https://drive.google.com/drive/folders/..."
+                    placeholder={HTTPS_PREFIX + 'drive.google.com/drive/folders/...'}
                     required
                     className="w-full px-2.5 py-1.5 text-xs font-mono border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-none focus:border-blue-500 bg-white dark:bg-slate-900"
                   />
@@ -3845,6 +3946,184 @@ function GateSignOffView({
 // VIEW 5: PRODUCTION RECORDS (CALCULATED FPY, FY, UPH & EFFICIENCY)
 // ============================================================================
 
+function ProductionRateTrend({ points }) {
+  const W = 760;
+  const H = 230;
+  const padding = { top: 18, right: 18, bottom: 38, left: 46 };
+  const innerW = W - padding.left - padding.right;
+  const innerH = H - padding.top - padding.bottom;
+  // Two denominators, stated on the chart: fallout is a share of input, salvage is
+  // the share of that fallout recovered. Plotting salvage against input would make
+  // a recovery rate look like a rounding error.
+  const series = [
+    {
+      key: 'falloutPct',
+      amountKey: 'fallout',
+      label: 'Fallout',
+      pctOf: 'of input',
+      denominator: 'input',
+      color: '#e11d48',
+      textClass: 'text-rose-600 dark:text-rose-400'
+    },
+    {
+      key: 'salvagePct',
+      amountKey: 'salvage',
+      label: 'Salvage recovered',
+      pctOf: 'of fallout',
+      denominator: 'fallout',
+      color: '#059669',
+      textClass: 'text-emerald-600 dark:text-emerald-400'
+    }
+  ];
+  const totals = points.reduce(
+    (sum, point) => ({
+      input: sum.input + point.input,
+      fallout: sum.fallout + point.fallout,
+      salvage: sum.salvage + point.salvage
+    }),
+    { input: 0, fallout: 0, salvage: 0 }
+  );
+  const rawMax = Math.max(1, ...points.flatMap((point) => series.map((entry) => point[entry.key])));
+  const yMax = rawMax <= 5 ? 5 : Math.ceil(rawMax / 5) * 5;
+  const x = (index) =>
+    points.length <= 1
+      ? padding.left + innerW / 2
+      : padding.left + (index / (points.length - 1)) * innerW;
+  const y = (value) => padding.top + innerH - (value / yMax) * innerH;
+  const pathFor = (key) =>
+    points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${x(index)} ${y(point[key])}`).join(' ');
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((fraction) => fraction * yMax);
+  const labelIndexes =
+    points.length <= 8
+      ? points.map((_, index) => index)
+      : [0, Math.floor((points.length - 1) / 2), points.length - 1];
+
+  return (
+    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-3.5 dark:border-slate-800">
+        <div>
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+            Fallout &amp; Salvage Recovery Trend
+          </h2>
+          <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+            Fallout is the share of that day&rsquo;s input rejected; salvage is the share of that fallout
+            recovered. Two denominators, labelled on every point; grouped by production date from the
+            filtered records.
+          </p>
+        </div>
+        <div className="flex items-center gap-4 text-[10px] font-semibold text-slate-600 dark:text-slate-300">
+          {series.map((entry) => (
+                          <span key={entry.key} className="inline-flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: entry.color }} /> % {entry.label}{' '}
+              <span className="font-normal text-slate-400 dark:text-slate-500">({entry.pctOf})</span>
+            </span>
+          ))}
+          <span className="text-slate-400 dark:text-slate-500">{points.length} day(s)</span>
+        </div>
+      </div>
+
+      {points.length === 0 ? (
+        <div className="p-8 text-center text-xs text-slate-500 dark:text-slate-400">
+          No production records match the current filters.
+        </div>
+      ) : (
+        <div className="space-y-3 px-4 py-4">
+          <svg
+            viewBox={`0 0 ${W} ${H}`}
+            role="img"
+            aria-label="Daily percent fallout of input, and percent salvage recovered of fallout"
+            className="h-auto w-full"
+          >
+            {ticks.map((tick) => (
+              <g key={tick}>
+                <line
+                  x1={padding.left}
+                  x2={W - padding.right}
+                  y1={y(tick)}
+                  y2={y(tick)}
+                  stroke="currentColor"
+                  className="text-slate-200 dark:text-slate-700"
+                  strokeWidth="1"
+                />
+                <text
+                  x={padding.left - 8}
+                  y={y(tick) + 3}
+                  textAnchor="end"
+                  className="fill-slate-400 text-[10px] dark:fill-slate-500"
+                >
+                  {Number.isInteger(tick) ? tick.toFixed(0) : tick.toFixed(1)}%
+                </text>
+              </g>
+            ))}
+            <line
+              x1={padding.left}
+              x2={W - padding.right}
+              y1={y(0)}
+              y2={y(0)}
+              stroke="currentColor"
+              className="text-slate-400 dark:text-slate-500"
+              strokeWidth="1.2"
+            />
+            {points.length > 1 &&
+              series.map((entry) => (
+                <path
+                  key={entry.key}
+                  d={pathFor(entry.key)}
+                  fill="none"
+                  stroke={entry.color}
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                />
+              ))}
+            {points.map((point, index) =>
+              series.map((entry) => (
+                <circle
+                  key={`${point.date}-${entry.key}`}
+                  cx={x(index)}
+                  cy={y(point[entry.key])}
+                  r="2.5"
+                  fill={entry.color}
+                >
+                  <title>
+                    {point.date} · {entry.label} {point[entry.key].toFixed(2)}% {entry.pctOf} (
+                    {point[entry.amountKey].toLocaleString()} pcs)
+                  </title>
+                </circle>
+              ))
+            )}
+            {labelIndexes.map((index) => (
+              <text
+                key={index}
+                x={x(index)}
+                y={H - 14}
+                textAnchor="middle"
+                className="fill-slate-400 text-[10px] dark:fill-slate-500"
+              >
+                {formatMonthDay(points[index].date)}
+              </text>
+            ))}
+          </svg>
+
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+            {series.map((entry) => {
+              const base = totals[entry.denominator];
+              return (
+                <span key={entry.key}>
+                  Total {entry.label.toLowerCase()}{' '}
+                  <strong className={entry.textClass}>{totals[entry.amountKey].toLocaleString()} pcs</strong>
+                  {' '}(
+                  {base > 0 ? ((totals[entry.amountKey] / base) * 100).toFixed(2) : '0.00'}% {entry.pctOf})
+                </span>
+              );
+            })}
+            <span>Input <strong className="text-slate-700 dark:text-slate-300">{totals.input.toLocaleString()} pcs</strong></span>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDeleteRecord, onImportFile }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [stationFilter, setStationFilter] = useState('ALL');
@@ -3883,7 +4162,7 @@ function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDelet
       (acc, r) => {
         const m = computeProductionMetrics(r);
         return {
-          input: acc.input + r.input,
+          input: acc.input + m.input,
           fallout: acc.fallout + m.fallout,
           salvage: acc.salvage + m.salvage,
           plannedTimeHr: acc.plannedTimeHr + r.plannedTimeHr,
@@ -3897,6 +4176,8 @@ function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDelet
       ...computeProductionMetrics(agg)
     };
   }, [filteredRecords]);
+
+  const rateTrend = useMemo(() => productionRateTrend(filteredRecords), [filteredRecords]);
 
   return (
     <div className="space-y-6">
@@ -3958,6 +4239,8 @@ function ProductionRecordsView({ records, onOpenNewRecord, onEditRecord, onDelet
           <div className="text-[11px] text-slate-500 dark:text-slate-400">Output UPH / Input UPH</div>
         </div>
       </div>
+
+      <ProductionRateTrend points={rateTrend} />
 
       {/* Main Production Records Ledger */}
       <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
