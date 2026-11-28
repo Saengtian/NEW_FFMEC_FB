@@ -2,7 +2,7 @@
   "domain": "minebea.co.th",
   "productionDeploymentId": "AKfycbz6y_8byEXlOxSWq6y5_azvp129b7CmlIfqhuNGA2BX-LrKTHVnmQdgHwylvx7yFE4C",
   "stagingDeploymentId": "AKfycbwjPK3JuBCippJmn5z00Q7P7UeBauRapbgZfzU9f32JjalRTpgRMiTkqZAB8qYXxHvN",
-  "productionVersion": 53,
-  "lastGoodVersion": 53,
+  "productionVersion": 52,
+  "lastGoodVersion": 52,
   "verifyTimeoutMs": 120000
 }
