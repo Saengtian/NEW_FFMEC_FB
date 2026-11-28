@@ -97,9 +97,14 @@ function run(cmd, args, { quiet = false } = {}) {
 
 const clasp = (args) => run("clasp", args).out;
 
+/**
+ * The label a version is named by. It has to name the code that was pushed, so a
+ * tree with uncommitted changes is marked `-dirty` instead of borrowing the sha of
+ * a commit that does not contain them; `--always` keeps it working with no tags.
+ */
 function gitDescribe() {
   try {
-    return run("git", ["rev-parse", "--short", "HEAD"], { quiet: true }).out.trim() || "unknown";
+    return run("git", ["describe", "--always", "--dirty", "--abbrev=7"], { quiet: true }).out.trim() || "unknown";
   } catch {
     return "unknown";
   }
